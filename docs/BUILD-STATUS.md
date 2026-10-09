@@ -36,18 +36,27 @@ rt2 is running. Problems met and fixed on the way, each now part of the build:
 
 ## Engine (`engine/venetium_w10m`) — written, untested
 
-All of it compiles only once the dependencies above are built. What it does:
+Each source is compiled on its own as soon as the headers it needs exist
+(the build above generates them): 12 of the 21 compile cleanly so far; the
+other 9 wait for generated mojom and buildflag headers. What it does:
 single-process content embedder; Aura host without an HWND; software output
 device → frame buffer → `venetium_w10m_frame_copy`; touch/mouse/wheel/key/text
 input into Aura; tabs with window.open/close, fullscreen, back button; mobile
 viewport, touch pointer, mobile Chrome user agent and client hints;
 cookies/cache on disk, flushed on suspend; downloads; JavaScript dialogs and
-file chooser through the shell; delay-load failures turned into failing calls.
+file chooser through the shell; the clipboard both ways (in memory in the
+engine; what a page copies goes to the phone's, the phone's is sent in when
+the app comes to the front or it changes); delay-load failures turned into
+failing calls.
 
 Patches to Chromium for the phone's runtime (written, untested on a device):
 UI message pump without a message window (0006), no comctl32 or device window
 at browser start (0006), window creation failure non-fatal (0007), viz
-software frames to the embedder (0002).
+software frames to the embedder (0002), V8's JIT under W^X (0008: code pages
+read-execute, a vectored exception handler flipping the page that is written
+to read-write and back when it runs, through `VirtualAllocFromApp` and
+`VirtualProtectFromApp`; in PartitionAlloc, where Chromium's V8 gets its
+pages, and in V8's own platform code). 0008 compiles for ARM.
 
 ## Shell (`app/VenetiumW10m`) — built, untested
 
@@ -61,7 +70,7 @@ notice, keyboard sink, back button.
 1. Finish the dependency build; build `venetium_engine.dll`; fix what breaks.
 2. Package and run on a phone (15063/15254 first) with the log; fix what
    breaks at load and at startup (api-set forwarders, delay-loaded DLLs).
-3. GPU compositing: ANGLE Direct3D 11 (feature level 9_3) presenting into a
+3. Turn the JIT on (menu → JIT) and see what the W^X layer costs.
+4. GPU compositing: ANGLE Direct3D 11 (feature level 9_3) presenting into a
    `SwapChainPanel`, as gecko-w10m's WebRender does.
-4. V8's JIT through `VirtualAllocFromApp`/`VirtualProtectFromApp` (W^X).
 5. Audio output (WASAPI through `ActivateAudioInterfaceAsync`), hardware H.264.

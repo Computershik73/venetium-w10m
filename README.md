@@ -22,7 +22,7 @@ no Direct3D 9, no `shell32`, and executable memory only through
 | renderer, GPU, network, utility processes | **one process**: `--single-process`, everything on threads |
 | Aura in an HWND, `MessagePumpForUI` on a message window | an Aura host **without an HWND**, an event-driven UI pump |
 | ANGLE on Direct3D 9 (Tegra) | **software compositing** into the shell's bitmap first; ANGLE on Direct3D 11 FL 9_3 next |
-| V8 JIT | **jitless** first; the JIT through the `*FromApp` allocators next |
+| V8 JIT | **jitless** by default; the JIT (menu → JIT) under W^X through the `*FromApp` allocators, a fault handler flipping code pages between writable and executable |
 | sandbox, crashpad, installer | not built: the app container is the sandbox |
 
 Design: [docs/PORTING-W10M.md](docs/PORTING-W10M.md).
