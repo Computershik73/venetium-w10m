@@ -23,6 +23,9 @@ class Log {
   static void WriteNum(std::wstring_view label, long long value);
   // From the engine: UTF-8, any thread.
   static void WriteUtf8(const char* line);
+  // From inside a fault handler: straight to the file, without the lock the
+  // faulting thread may be holding.
+  static void WriteFromFault(std::wstring_view line);
 
   // The last lines, oldest first.
   static std::vector<std::wstring> Recent();

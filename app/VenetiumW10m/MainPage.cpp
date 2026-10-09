@@ -350,9 +350,13 @@ void MainPage::BuildUi() {
       });
 
   // The status bar and the navigation bar of a phone sit over the window;
-  // the browser stays inside what is visible.
+  // the browser stays inside what is visible. UseVisible alone does not do
+  // it on a phone (gecko-w10m): the room is padded by what the bars cover,
+  // again whenever they change.
   auto view = ApplicationView::GetForCurrentView();
   view.SetDesiredBoundsMode(ApplicationViewBoundsMode::UseVisible);
+  view.VisibleBoundsChanged([this](auto&&, auto&&) { ApplyVisibleBounds(); });
+  ApplyVisibleBounds();
   if (ApiInformation::IsTypePresent(L"Windows.UI.ViewManagement.StatusBar")) {
     auto status = StatusBar::GetForCurrentView();
     status.BackgroundColor(ChromeBg());
@@ -701,6 +705,35 @@ void MainPage::RebuildTabList() {
   }
 }
 
+void MainPage::ApplyVisibleBounds() {
+  auto view = ApplicationView::GetForCurrentView();
+  const auto visible = view.VisibleBounds();
+  const auto window = Window::Current().Bounds();
+  // In fullscreen nothing is padded: the navigation bar is an overlay there
+  // that comes and goes, and padding for it would resize the page each time.
+  bool fullscreen = fullscreen_;
+  try {
+    fullscreen = fullscreen || view.IsFullScreenMode();
+  } catch (winrt::hresult_error const&) {
+  }
+  if (fullscreen) {
+    root_.Padding(ThicknessHelper::FromUniformLength(0));
+    return;
+  }
+  const double left = visible.X - window.X;
+  const double top = visible.Y - window.Y;
+  const double right = (window.X + window.Width) - (visible.X + visible.Width);
+  const double bottom =
+      (window.Y + window.Height) - (visible.Y + visible.Height);
+  // Rectangles that do not compare give nonsense; no padding beats wrong.
+  auto sane = [](double v) { return (v > 0 && v < 400) ? v : 0.0; };
+  root_.Padding(ThicknessHelper::FromLengths(sane(left), sane(top),
+                                             sane(right), sane(bottom)));
+  Log::Write(L"view: visible bounds padding " +
+             std::to_wstring(static_cast<int>(sane(top))) + L" top, " +
+             std::to_wstring(static_cast<int>(sane(bottom))) + L" bottom");
+}
+
 void MainPage::SetFullscreen(bool on) {
   fullscreen_ = on;
   chrome_.Visibility(on ? Visibility::Collapsed : Visibility::Visible);
@@ -722,6 +755,7 @@ void MainPage::SetFullscreen(bool on) {
       status.ShowAsync();
     }
   }
+  ApplyVisibleBounds();
   if (!on) RefreshChrome();
 }
 

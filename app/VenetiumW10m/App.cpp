@@ -5,6 +5,7 @@
 #include <thread>
 
 #include "MainPage.h"
+#include "client/CrashLog.h"
 #include "client/Log.h"
 
 using namespace winrt;
@@ -32,6 +33,7 @@ struct App : ApplicationT<App, winrt::Windows::UI::Xaml::Markup::IXamlMetadataPr
                          L"." + std::to_wstring(version.Minor) + L"." +
                          std::to_wstring(version.Build) + L"." +
                          std::to_wstring(version.Revision));
+      client::InstallCrashLog();
     } catch (...) {
     }
     try {

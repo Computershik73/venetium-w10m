@@ -64,7 +64,7 @@ mkdir -p "$STAGE/Assets" "$OBJ"
 
 # --- the shell ---------------------------------------------------------------
 echo "=== compile the shell (cl.exe ARM, C++/WinRT) ==="
-SRCS="App.cpp MainPage.cpp client/EngineView.cpp client/Log.cpp client/Settings.cpp engine/EngineHost.cpp engine/ImportProbe.cpp"
+SRCS="App.cpp MainPage.cpp client/EngineView.cpp client/Log.cpp client/Settings.cpp engine/EngineHost.cpp engine/ImportProbe.cpp client/CrashLog.cpp"
 OBJS=()
 # The precompiled header: C++/WinRT's headers are most of every unit.
 "$CL" /nologo /c /Yc"pch.h" "$(cygpath -w "$APP/pch.cpp")" \

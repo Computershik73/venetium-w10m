@@ -96,6 +96,16 @@ void Log::Write(std::wstring_view line) {
   if (handler) handler(stamped);
 }
 
+void Log::WriteFromFault(std::wstring_view line) {
+  HANDLE file = g_file;
+  if (file == INVALID_HANDLE_VALUE) return;
+  std::string utf8 =
+      ToUtf8(Timestamp() + L"  " + std::wstring(line)) + "\r\n";
+  DWORD written = 0;
+  ::WriteFile(file, utf8.data(), (DWORD)utf8.size(), &written, nullptr);
+  ::FlushFileBuffers(file);
+}
+
 void Log::Write(std::wstring_view label, std::wstring_view value) {
   Write(std::wstring(label) + L": " + std::wstring(value));
 }
