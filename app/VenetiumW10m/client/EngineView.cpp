@@ -263,10 +263,6 @@ void EngineView::OnMouse(PointerPoint const& point, int32_t state, int32_t x,
 }
 
 void EngineView::OnPointer(PointerRoutedEventArgs const& args, int32_t state) {
-  // The performance counter as the event is handled; points the system
-  // coalesced into this one get theirs from the gaps between their own
-  // timestamps (microseconds).
-  const int64_t now = Qpc();
   auto pointer = args.Pointer();
   auto point = args.GetCurrentPoint(image_);
   int32_t x = 0, y = 0;
@@ -286,25 +282,59 @@ void EngineView::OnPointer(PointerRoutedEventArgs const& args, int32_t state) {
   } else if (state >= 2) {
     fingers_.erase(it);
   }
+  const uint64_t current = point.Timestamp();
   if (state == 1) {
+    // Moves the system coalesced into this one, each with its own time.
     try {
-      // Newest first, the current point among them.
-      auto points = args.GetIntermediatePoints(image_);
-      const uint64_t current = point.Timestamp();
+      auto points = args.GetIntermediatePoints(image_);  // newest first
       for (uint32_t i = points.Size(); i-- > 0;) {
         auto earlier = points.GetAt(i);
-        const uint64_t stamp = earlier.Timestamp();
-        if (stamp >= current) continue;
+        if (earlier.Timestamp() >= current) continue;
         int32_t ex = 0, ey = 0;
-        if (!ToFrame(earlier.Position(), &ex, &ey)) continue;
-        const int64_t age =
-            static_cast<int64_t>(current - stamp) * QpcFrequency() / 1000000;
-        Api().input_touch(static_cast<int32_t>(id), 1, ex, ey, now - age);
+        if (ToFrame(earlier.Position(), &ex, &ey)) {
+          QueueTouch(id, 1, ex, ey, earlier.Timestamp());
+        }
       }
     } catch (winrt::hresult_error const&) {
     }
   }
-  Api().input_touch(static_cast<int32_t>(id), state, x, y, now);
+  QueueTouch(id, state, x, y, current);
+}
+
+void EngineView::QueueTouch(uint32_t id, int32_t state, int32_t x, int32_t y,
+                            uint64_t timestamp) {
+  touches_.push_back(TouchPoint{id, state, x, y, timestamp});
+  if (flushPending_) return;
+  flushPending_ = true;
+  // Low priority runs after every input event of this pass, so all fingers'
+  // points go out together.
+  CoreWindow::GetForCurrentThread().Dispatcher().RunAsync(
+      CoreDispatcherPriority::Low, [this]() { FlushTouches(); });
+}
+
+// All fingers' points in time order -- the gesture recogniser takes them as
+// one stream -- stamped on the performance counter: the newest at the
+// counter's present reading, the others back from it by their own spacing.
+void EngineView::FlushTouches() {
+  flushPending_ = false;
+  if (touches_.empty() || !Api().input_touch) {
+    touches_.clear();
+    return;
+  }
+  std::vector<TouchPoint> points;
+  points.swap(touches_);
+  std::stable_sort(points.begin(), points.end(),
+                   [](TouchPoint const& a, TouchPoint const& b) {
+                     return a.timestamp < b.timestamp;
+                   });
+  const int64_t now = Qpc();
+  const uint64_t newest = points.back().timestamp;
+  for (TouchPoint const& p : points) {
+    const int64_t age =
+        static_cast<int64_t>(newest - p.timestamp) * QpcFrequency() / 1000000;
+    Api().input_touch(static_cast<int32_t>(p.id), p.state, p.x, p.y,
+                      now - age);
+  }
 }
 
 void EngineView::SendKey(int32_t vkey) {
@@ -317,8 +347,7 @@ void EngineView::WireKeyboard() {
   // The phone's keyboard types into this and nothing else. It is the size of
   // the page behind it (a one-pixel control is not somewhere the system lets
   // anyone type) and invisible, because the field being typed into is drawn
-  // by the engine inside the picture. It must stay a tab stop: a control
-  // that is not one cannot take focus at all.
+  // by the engine inside the picture.
   sink_ = TextBox();
   sink_.Opacity(0);
   sink_.HorizontalAlignment(HorizontalAlignment::Stretch);
@@ -326,6 +355,20 @@ void EngineView::WireKeyboard() {
   sink_.AcceptsReturn(false);
   sink_.IsSpellCheckEnabled(false);
   sink_.IsTextPredictionEnabled(false);
+  // Out of the Tab order, so nothing but the page's own request focuses it;
+  // a control that is not a tab stop cannot take focus at all, so it becomes
+  // one just for that (FollowTextInput).
+  sink_.IsTabStop(false);
+
+  // Focus went elsewhere (the address bar, a dialog): the page no longer
+  // has the keyboard. The engine hears that the keyboard went, so the next
+  // tap on a field asks for it again.
+  sink_.LostFocus([this](IInspectable const&, RoutedEventArgs const&) {
+    sink_.IsTabStop(false);
+    if (!typing_) return;
+    typing_ = false;
+    if (Api().set_keyboard_inset) Api().set_keyboard_inset(0);
+  });
 
   // The on-screen keyboard edits the focused control through the text
   // services; the only sign of a keystroke is that the control's text
@@ -390,10 +433,21 @@ void EngineView::WireKeyboard() {
   });
 }
 
+bool EngineView::SinkFocused() const {
+  try {
+    auto focused = FocusManager::GetFocusedElement();
+    return focused && focused == sink_;
+  } catch (winrt::hresult_error const&) {
+    return false;
+  }
+}
+
 void EngineView::ReportKeyboard(Rect occluded) {
   if (!Api().set_keyboard_inset) return;
   int32_t pixels = 0;
-  if (occluded.Height > 0) {
+  // Only a keyboard typing into the page covers the page: one raised for the
+  // address bar is the chrome's business.
+  if (occluded.Height > 0 && SinkFocused()) {
     // What the keyboard covers of the room, whatever lies below it.
     try {
       const Point origin =
@@ -453,6 +507,7 @@ void EngineView::FollowTextInput() {
     lastTextSerial_ = serial;
     typing_ = true;
     ApplyInputKind(kind);
+    sink_.IsTabStop(true);
     const bool focused = sink_.Focus(FocusState::Programmatic);
     // Focus alone raises the keyboard only for a focus from a touch, and
     // this one came from the engine, so ask outright as well.
@@ -460,6 +515,12 @@ void EngineView::FollowTextInput() {
     Log::Write(std::wstring(L"view: text field, sink ") +
                (focused ? L"focused" : L"refused") + L", keyboard " +
                (shown ? L"shown" : L"refused"));
+    // A keyboard already up (it was the address bar's) raises no Showing:
+    // report what it covers now.
+    try {
+      if (pane.OccludedRect().Height > 0) ReportKeyboard(pane.OccludedRect());
+    } catch (winrt::hresult_error const&) {
+    }
   } else if (!wanted && typing_) {
     typing_ = false;
     pane.TryHide();

@@ -95,6 +95,9 @@ struct App : ApplicationT<App, winrt::Windows::UI::Xaml::Markup::IXamlMetadataPr
   void OnFileActivated(FileActivatedEventArgs const& args) { OpenFile(args); }
 
   fire_and_forget OpenFile(FileActivatedEventArgs args) {
+    // The window first: activation has to happen promptly, and the copy can
+    // take a while.
+    ShowWindow();
     std::wstring url;
     try {
       auto files = args.Files();
@@ -113,7 +116,13 @@ struct App : ApplicationT<App, winrt::Windows::UI::Xaml::Markup::IXamlMetadataPr
       client::Log::Write(L"activation: file unreadable",
                          std::wstring(e.message()));
     }
-    Show(url);
+    // Past the await an exception would end the app with no word: say it.
+    try {
+      Show(url);
+    } catch (winrt::hresult_error const& e) {
+      client::Log::Write(L"FATAL: file activation", std::wstring(e.message()));
+      throw;
+    }
   }
 
   // file:///C:/... with what a URL cannot carry as is percent-encoded.
@@ -132,14 +141,18 @@ struct App : ApplicationT<App, winrt::Windows::UI::Xaml::Markup::IXamlMetadataPr
     return url;
   }
 
-  // The first activation starts the engine with |url| as its first page;
-  // later ones open |url| in a new tab.
-  void Show(std::wstring const& url) {
+  void ShowWindow() {
     if (!page_) {
       page_ = std::make_shared<MainPage>();
       Window::Current().Content(page_->Root());
     }
     Window::Current().Activate();
+  }
+
+  // The first activation starts the engine with |url| as its first page;
+  // later ones open |url| in a new tab.
+  void Show(std::wstring const& url) {
+    ShowWindow();
     if (!started_) {
       started_ = true;
       page_->Start(url);

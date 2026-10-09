@@ -46,9 +46,14 @@ class VwTab : public content::WebContentsDelegate,
   void GoBack();
   void GoForward();
   void Reload();
-  // Applies the desktop-site switch to the page shown and, with |reload|,
-  // loads it again with the new user agent if that changed it.
-  void SetDesktopMode(bool desktop, bool reload);
+  // Follows the desktop-site switch: the page shown is loaded again with
+  // the other user agent and its viewport rules, both at once.
+  void SetDesktopMode(bool desktop);
+  // Whether this tab's pages are the desktop ones (OverrideWebPreferences).
+  bool desktop() const { return desktop_; }
+  // The tab a WebContents of this browser belongs to (its delegate), or null
+  // while it is being made.
+  static VwTab* FromWebContents(content::WebContents* contents);
   void Stop();
   bool CanGoBack();
 
@@ -120,6 +125,7 @@ class VwTab : public content::WebContentsDelegate,
   const int32_t opener_;
   std::unique_ptr<content::WebContents> contents_;
   bool fullscreen_ = false;
+  bool desktop_ = false;
 
   // What the shell was last told.
   std::string reported_url_;

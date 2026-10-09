@@ -80,6 +80,8 @@ class VwInputMethod : public ui::InputMethodMinimal {
    private:
     raw_ptr<VwInputMethod> owner_;
     bool visible_ = false;
+    // The request the keyboard on screen was raised for.
+    uint32_t shown_serial_ = 0;
     base::ObserverList<ui::VirtualKeyboardControllerObserver>::Unchecked
         observers_;
   };

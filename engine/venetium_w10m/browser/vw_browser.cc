@@ -155,6 +155,7 @@ void VwBrowser::SelectTab(int32_t id) {
   tab->view()->SetBounds(gfx::Rect(platform_->root()->bounds().size()));
   tab->view()->Show();
   tab->contents()->Focus();
+  tab->SetDesktopMode(VwEngine::Get()->desktop_mode.load());
   PublishSelection();
   venetium_w10m_events events = VwEngine::Get()->events();
   if (events.tab_selected) {
@@ -251,8 +252,10 @@ void VwBrowser::Resize(const gfx::Size& content_pixels) {
 void VwBrowser::SetDesktopMode(bool desktop) {
   VwEngine::Get()->desktop_mode.store(desktop);
   NoteF("desktop sites %s", desktop ? "on" : "off");
-  for (auto& [id, tab] : tabs_) {
-    tab->SetDesktopMode(desktop, /*reload=*/id == selected_);
+  // The tab on screen now; each of the others when it is next selected, so
+  // none is reloaded or re-laid out unseen.
+  if (VwTab* tab = selected()) {
+    tab->SetDesktopMode(desktop);
   }
 }
 

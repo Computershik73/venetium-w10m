@@ -48,11 +48,13 @@ VwInputMethod::Keyboard::~Keyboard() = default;
 
 void VwInputMethod::Keyboard::Changed(const gfx::Rect& keyboard_rect) {
   const bool visible = !keyboard_rect.IsEmpty();
-  if (!visible && !visible_) {
-    return;
-  }
-  visible_ = visible;
   if (visible) {
+    // Only a keyboard the page asked for insets the page.
+    if (!owner_->wanted_) {
+      return;
+    }
+    visible_ = true;
+    shown_serial_ = owner_->serial_;
     // VirtualKeyboardControllerWin insets the page by the keyboard's height,
     // and the page scrolls the focused field above it.
     for (auto& observer : observers_) {
@@ -60,10 +62,18 @@ void VwInputMethod::Keyboard::Changed(const gfx::Rect& keyboard_rect) {
     }
     return;
   }
-  // Gone (the Back key, or the user closed it): the next tap on the field
-  // must ask for it again.
-  owner_->wanted_ = false;
-  owner_->Publish();
+  // Gone (the Back key, the user closed it, or focus left the page): the
+  // next tap on the field must ask for it again. A hide that belongs to an
+  // earlier request -- the shell hid the keyboard for field A just before
+  // raising it for field B -- leaves the newer request standing.
+  if (visible_ && shown_serial_ == owner_->serial_) {
+    owner_->wanted_ = false;
+    owner_->Publish();
+  }
+  visible_ = false;
+  // Either way the observers start over, also when the keyboard never came
+  // up for them (VirtualKeyboardControllerWin counts it shown from its own
+  // request): the next tap asks again.
   for (auto& observer : observers_) {
     observer.OnKeyboardHidden();
   }

@@ -38,6 +38,7 @@ VwTab::VwTab(VwBrowser* browser,
       opener_(opener),
       contents_(std::move(contents)) {
   contents_->SetDelegate(this);
+  desktop_ = VwEngine::Get()->desktop_mode.load();
   // The desktop agent goes with every navigation made while the desktop-site
   // switch is on (NavigationController::UA_OVERRIDE_TRUE); the mobile one is
   // the browser's own.
@@ -47,6 +48,8 @@ VwTab::VwTab(VwBrowser* browser,
   // navigator.languages, which the renderer takes from here.
   contents_->GetMutableRendererPrefs()->accept_languages = AcceptLanguages();
   contents_->SyncRendererPrefs();
+  // The preferences were made before the tab was its delegate.
+  contents_->OnWebPreferencesChanged();
 }
 
 VwTab::~VwTab() {
@@ -67,9 +70,8 @@ void VwTab::Navigate(const GURL& url) {
   params.transition_type = ui::PageTransitionFromInt(
       ui::PAGE_TRANSITION_TYPED | ui::PAGE_TRANSITION_FROM_ADDRESS_BAR);
   params.override_user_agent =
-      VwEngine::Get()->desktop_mode.load()
-          ? content::NavigationController::UA_OVERRIDE_TRUE
-          : content::NavigationController::UA_OVERRIDE_FALSE;
+      desktop_ ? content::NavigationController::UA_OVERRIDE_TRUE
+               : content::NavigationController::UA_OVERRIDE_FALSE;
   contents_->GetController().LoadURLWithParams(params);
   contents_->Focus();
 }
@@ -92,21 +94,38 @@ void VwTab::Reload() {
                                     /*check_for_repost=*/false);
 }
 
-void VwTab::SetDesktopMode(bool desktop, bool reload) {
+void VwTab::SetDesktopMode(bool desktop) {
+  if (desktop == desktop_) {
+    return;
+  }
+  desktop_ = desktop;
   content::NavigationController& controller = contents_->GetController();
   content::NavigationEntry* entry = controller.GetLastCommittedEntry();
-  const bool changed = entry && !entry->IsInitialEntry() &&
-                       entry->GetIsOverridingUserAgent() != desktop;
   if (entry) {
     entry->SetIsOverridingUserAgent(desktop);
   }
-  // The viewport and text-size settings (OverrideWebPreferences).
+  // The viewport and text-size settings (OverrideWebPreferences), which go
+  // with the reload below: a page is never laid out by the other mode's
+  // rules for longer than that.
   contents_->OnWebPreferencesChanged();
-  if (changed && reload) {
+  if (!entry || entry->IsInitialEntry()) {
+    return;
+  }
+  if (entry->GetHasPostData()) {
+    // LoadOriginalRequestURL would ask for a repost warning there is no
+    // dialog for, and do nothing.
+    controller.Reload(content::ReloadType::NORMAL, /*check_for_repost=*/false);
+  } else {
     // From the URL first asked for, so that a mobile redirect (m.example.com)
     // is undone, as Chrome's "Desktop site" does.
     controller.LoadOriginalRequestURL();
   }
+}
+
+// static
+VwTab* VwTab::FromWebContents(content::WebContents* contents) {
+  // Every WebContents here is a tab's, and its delegate is the tab.
+  return contents ? static_cast<VwTab*>(contents->GetDelegate()) : nullptr;
 }
 
 void VwTab::Stop() {

@@ -22,6 +22,7 @@
 #include "venetium_w10m/browser/vw_browser_context.h"
 #include "venetium_w10m/browser/vw_browser_main_parts.h"
 #include "venetium_w10m/browser/vw_engine.h"
+#include "venetium_w10m/browser/vw_tab.h"
 #include "venetium_w10m/common/vw_log.h"
 #include "venetium_w10m/common/vw_user_agent.h"
 
@@ -103,7 +104,11 @@ void VwContentBrowserClient::OverrideWebPreferences(
   // How Chrome for Android lays out pages: <meta name=viewport> honoured,
   // pages without one laid out at 980 CSS pixels and zoomed to fit, pinch and
   // double-tap zoom. The desktop-site switch turns all of this off.
-  const bool mobile = !VwEngine::Get()->desktop_mode.load();
+  // The tab's own mode, which changes together with a reload of its page;
+  // the switch's while the tab is being made.
+  VwTab* tab = VwTab::FromWebContents(web_contents);
+  const bool mobile =
+      !(tab ? tab->desktop() : VwEngine::Get()->desktop_mode.load());
   prefs->viewport_enabled = true;
   prefs->viewport_meta_enabled = mobile;
   prefs->viewport_style = mobile ? blink::mojom::ViewportStyle::kMobile
