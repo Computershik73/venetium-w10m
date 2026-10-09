@@ -1,0 +1,28 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Fri, 9 Oct 2026 09:22:06 +0400
+Subject: [PATCH] DevTools: no frontend on Windows 10 Mobile
+
+The phone browser has no DevTools window, and the frontend is a TypeScript
+bundle built with node and esbuild. enable_devtools_frontend is already
+false on iOS and Fuchsia, so content builds without it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ content/browser/devtools/features.gni | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/content/browser/devtools/features.gni b/content/browser/devtools/features.gni
+index 24c49b5bd6007ca4f2b7790d93860e7f52317ef8..dded7a65880265356edd8cff5066e75238041594 100644
+--- a/content/browser/devtools/features.gni
++++ b/content/browser/devtools/features.gni
+@@ -5,4 +5,8 @@
+ import("//build/config/chrome_build.gni")
+ 
+ # iOS and Fuchsia don't support DevTools front-end.
+-enable_devtools_frontend = !is_ios && !is_fuchsia
++import("//build/config/win/w10m.gni")
++
++# Not on Windows 10 Mobile either: the phone browser has no DevTools window,
++# and the frontend is a TypeScript build (node, esbuild) of its own.
++enable_devtools_frontend = !is_ios && !is_fuchsia && !is_w10m

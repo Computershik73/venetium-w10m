@@ -1,0 +1,61 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Fri, 9 Oct 2026 09:35:13 +0400
+Subject: [PATCH] Toolchain: ATL from another toolset (VW_ATLMFC_DIR)
+
+VS 2022 17.14 -- the last release with 32-bit ARM compilers -- may be
+installed without ATL, and base/win and Windows accessibility need it.
+VW_ATLMFC_DIR names an atlmfc directory with ARM32 libraries (VS 2017's
+14.16 has them); its include and lib directories are added when the
+toolset's own are missing.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ build/toolchain/win/setup_toolchain.py | 27 ++++++++++++++++++++++++++
+ 1 file changed, 27 insertions(+)
+
+diff --git a/build/toolchain/win/setup_toolchain.py b/build/toolchain/win/setup_toolchain.py
+index a3ea0675d5ee33dcd2179513954ae30c22f045e5..1235d4746c0279045203ea6062f63a4c4e61c2ca 100644
+--- a/build/toolchain/win/setup_toolchain.py
++++ b/build/toolchain/win/setup_toolchain.py
+@@ -120,6 +120,32 @@ def _FixupArm32SdkDirs(variables):
+   return variables
+ 
+ 
++def _AddAtlMfcDirs(variables, cpu):
++  # Venetium-W10M: VS 2022 17.14 (the last with ARM32 compilers) installed
++  # without its ATL component has no atlmfc directory, and base/win and the
++  # Windows accessibility code need ATL. VW_ATLMFC_DIR names another
++  # toolset's atlmfc (VS 2017's 14.16 has 32-bit ARM ATL libraries); its
++  # include and lib directories go on INCLUDE and LIB when the toolset's own
++  # are missing.
++  atlmfc = os.environ.get('VW_ATLMFC_DIR')
++  if not atlmfc or re.search(r'(?im)^include=.*atlmfc', variables):
++    return variables
++  include = os.path.join(atlmfc, 'include')
++  lib = os.path.join(atlmfc, 'lib', {'x64': 'x64', 'x86': 'x86',
++                                     'arm': 'arm', 'arm64': 'arm64'}[cpu])
++  if not os.path.isdir(include) or not os.path.isdir(lib):
++    return variables
++  out = []
++  for line in variables.splitlines():
++    low = line.lower()
++    if low.startswith('include='):
++      line = line.rstrip(';') + ';' + include
++    elif low.startswith('lib='):
++      line = line.rstrip(';') + ';' + lib
++    out.append(line)
++  return chr(10).join(out)
++
++
+ def _LoadToolchainEnv(cpu, toolchain_root, sdk_dir, target_store):
+   """Returns a dictionary with environment variables that must be set while
+   running binaries from the toolchain (e.g. INCLUDE and PATH for cl.exe)."""
+@@ -210,6 +236,7 @@ def _LoadToolchainEnv(cpu, toolchain_root, sdk_dir, target_store):
+     variables = _LoadEnvFromBat(args)
+     if cpu == 'arm':
+       variables = _FixupArm32SdkDirs(variables)
++  variables = _AddAtlMfcDirs(variables, cpu)
+   return _ExtractImportantEnvironment(variables)
+ 
+ 

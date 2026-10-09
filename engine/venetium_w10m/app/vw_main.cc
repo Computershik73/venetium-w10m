@@ -20,8 +20,11 @@
 #include "base/strings/utf_string_conversions.h"
 #include "content/public/app/content_main.h"
 #include "content/public/common/content_switches.h"
+#include "gpu/config/gpu_switches.h"
 #include "sandbox/policy/switches.h"
+#include "sandbox/win/src/sandbox_types.h"
 #include "third_party/blink/public/common/switches.h"
+#include "ui/gl/gl_switches.h"
 #include "venetium_w10m/app/vw_main_delegate.h"
 #include "venetium_w10m/browser/vw_engine.h"
 #include "venetium_w10m/capi/venetium_w10m_capi.h"
@@ -62,6 +65,11 @@ void SetUpCommandLine(const EngineConfig& config) {
   // RenderWidgetHostViewAura's child HWND for accessibility and legacy
   // input: no HWNDs here.
   command_line->AppendSwitch(switches::kDisableLegacyIntermediateWindow);
+  // DirectX 12 and Vulkan support is probed in a GPU process of its own --
+  // in this one, in single-process mode -- through d3d12.dll, which a phone
+  // has not got. And no DirectComposition: there is no HWND to compose into.
+  command_line->AppendSwitch(switches::kDisableGpuProcessForDX12InfoCollection);
+  command_line->AppendSwitch(switches::kDisableDirectComposition);
   command_line->AppendSwitch(switches::kEnableViewport);
   command_line->AppendSwitchASCII(switches::kTouchEventFeatureDetection,
                                   "enabled");
@@ -109,6 +117,13 @@ void SetUpPaths(const EngineConfig& config) {
   base::PathService::Override(base::DIR_ROAMING_APP_DATA, local_state);
   base::PathService::Override(base::DIR_COMMON_APP_DATA, local_state);
   base::PathService::Override(base::DIR_IE_INTERNET_CACHE, config.cache_dir);
+  // The DirectWrite font proxy reads font files from here; base would ask
+  // SHGetKnownFolderPath(FOLDERID_Fonts).
+  wchar_t windows[MAX_PATH] = {};
+  if (::GetWindowsDirectoryW(windows, MAX_PATH)) {
+    base::PathService::Override(base::DIR_WINDOWS_FONTS,
+                                base::FilePath(windows).Append(L"Fonts"));
+  }
   if (!config.install_dir.empty()) {
     base::PathService::Override(base::DIR_ASSETS, config.install_dir);
   }
@@ -157,7 +172,12 @@ extern "C" VW_EXPORT int32_t venetium_w10m_run(
   VwMainDelegate delegate;
   content::ContentMainParams params(&delegate);
   params.instance = ThisModule();
-  params.sandbox_info = nullptr;
+  // An empty sandbox interface: no broker (it would make job objects and
+  // threads for child processes there will never be) and no target. The
+  // browser process is unsandboxed, which is all Sandbox::Initialize checks
+  // then; a null pointer here it would dereference.
+  sandbox::SandboxInterfaceInfo sandbox_info = {};
+  params.sandbox_info = &sandbox_info;
   const int result = content::ContentMain(std::move(params));
   NoteF("run: ContentMain returned %d", result);
   return result;

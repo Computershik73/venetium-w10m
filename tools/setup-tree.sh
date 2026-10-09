@@ -14,6 +14,12 @@
 #   third_party/rust-toolchain/bin/rustc.exe
 #                                         named as an input by //build/rust even with a custom
 #                                         toolchain; a copy of the toolchain's rustc
+#   third_party/llvm-build/Release+Asserts
+#                                         a junction to rt2: build/toolchain/win/rc/rc.py runs the
+#                                         resource preprocessor from there, whatever clang_base_path says
+#   codec configurations for win/arm      dav1d, libaom, libvpx and ffmpeg (tools/gen-codec-configs.py,
+#                                         deps/ffmpeg), the files Venetium's deps/arm-inputs.tsv names
+#   the i686 Rust std                     V8's ARM snapshot is made by an x86 build of V8, which has Rust
 #   gn.exe                                at DEPS' gn_version (CIPD, into $VW_GN)
 set -e
 source "$(dirname "$0")/env.sh"
@@ -87,6 +93,21 @@ rt="third_party/rust-toolchain/bin"
 mkdir -p "$rt"
 cp -u "$(cygpath -u "$VW_RUST_SYSROOT")/bin/rustc.exe" "$rt/rustc.exe"
 echo "rustc.exe    $(rustc "+$VW_RUST_TOOLCHAIN" -V)"
+
+# --- llvm-build junction for rc.py --------------------------------------------
+llvm_build="third_party/llvm-build/Release+Asserts"
+if [ ! -f "$llvm_build/bin/clang-cl.exe" ]; then
+  mkdir -p third_party/llvm-build
+  powershell.exe -NoProfile -Command "New-Item -ItemType Junction -Path '$(cygpath -w "$SRC/$llvm_build")' -Target '$(cygpath -w "$VW_LLVM")'" > /dev/null
+fi
+echo "llvm-build   -> $("$llvm_build/bin/clang-cl.exe" --version | head -1)"
+
+# --- codec configurations ------------------------------------------------------
+python "$(cygpath -w "$VW_ROOT/tools/gen-codec-configs.py")" "$(cygpath -w "$SRC")"   "$(cygpath -w "$VW_ROOT/deps/ffmpeg/Chrome/win/arm-neon")" | tail -1
+
+# --- the x86 Rust std (V8's snapshot toolchain) ---------------------------------
+rustup target add i686-pc-windows-msvc --toolchain "$VW_RUST_TOOLCHAIN" > /dev/null 2>&1
+echo "rust std     i686-pc-windows-msvc for $VW_RUST_TOOLCHAIN"
 
 # --- gn.exe ------------------------------------------------------------------
 gn="$(cygpath -u "$VW_GN")"

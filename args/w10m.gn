@@ -66,6 +66,11 @@ enable_hangout_services_extension = false
 use_on_device_model_service = false
 enable_reporting = false
 enable_jxl_decoder = false
+# WebNN's TFLite/LiteRT backends: machine learning a phone of 2015 will not run,
+# and XNNPACK's pthreadpool does not build for 32-bit ARM Windows (fxdiv calls
+# the MSVC intrinsic _MulUnsignedHigh, which clang does not have).
+webnn_use_tflite = false
+webnn_use_litert = false
 disable_fieldtrial_testing_config = true
 
 # --- media: Venetium's choice, video and audio on ----------------------------

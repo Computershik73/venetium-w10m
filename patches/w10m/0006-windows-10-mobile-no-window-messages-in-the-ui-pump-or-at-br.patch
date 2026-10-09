@@ -1,0 +1,96 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Fri, 9 Oct 2026 09:56:00 +0400
+Subject: [PATCH] Windows 10 Mobile: no window messages in the UI pump or at
+ browser start
+
+CreateWindow, PostMessage and MsgWaitForMultipleObjects are stubs on Windows
+10 Mobile (gecko-w10m 0088). MessagePumpForUI makes no message-only window,
+waits on its event alone and does not poll a message queue there is none of.
+BrowserMainLoop neither initialises common controls (no comctl32, and the
+failure is PLOG(FATAL)) nor makes the hidden device-change window.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ base/message_loop/message_pump_win.cc | 18 ++++++++++++++++++
+ content/browser/browser_main_loop.cc  |  8 +++++++-
+ 2 files changed, 25 insertions(+), 1 deletion(-)
+
+diff --git a/base/message_loop/message_pump_win.cc b/base/message_loop/message_pump_win.cc
+index 51709d5ec2f91634992ef0d33603197f6780caa3..1222f7c2a1c2e052695e3bd85ae8e53aa7649337 100644
+--- a/base/message_loop/message_pump_win.cc
++++ b/base/message_loop/message_pump_win.cc
+@@ -92,9 +92,17 @@ void MessagePumpWin::Quit() {
+ // MessagePumpForUI public:
+ 
+ MessagePumpForUI::MessagePumpForUI() {
++#if defined(VENETIUM_W10M)
++  // Windows 10 Mobile has no window messages: CreateWindow and PostMessage
++  // are stubs there (gecko-w10m 0088). The pump runs on |event_| alone,
++  // which is how it wakes for tasks anyway; there is no native loop whose
++  // messages could need pumping.
++  return;
++#else
+   bool succeeded = message_window_.Create(
+       BindRepeating(&MessagePumpForUI::MessageCallback, Unretained(this)));
+   PCHECK(succeeded) << "Failed to create message-only Window";
++#endif
+ }
+ 
+ MessagePumpForUI::~MessagePumpForUI() = default;
+@@ -318,8 +326,14 @@ void MessagePumpForUI::WaitForWork(Delegate::NextWorkInfo next_work_info) {
+     base::debug::Alias(&wait_flags);
+     DWORD result;
+     HANDLE event_handle = event_.handle();
++#if defined(VENETIUM_W10M)
++    // MsgWaitForMultipleObjectsEx is a stub on Windows 10 Mobile; there are
++    // no messages to wait for, only the event.
++    result = ::WaitForSingleObject(event_handle, delay);
++#else
+     result = MsgWaitForMultipleObjectsEx(1, &event_handle, delay, QS_ALLINPUT,
+                                          wait_flags);
++#endif
+     DPCHECK(WAIT_FAILED != result);
+     if (result == WAIT_OBJECT_0) {
+       wakeup_state_ = WakeupState::kApplicationTask;
+@@ -532,6 +546,10 @@ void MessagePumpForUI::KillNativeTimer() {
+ 
+ bool MessagePumpForUI::ProcessNextWindowsMessage() {
+   DCHECK_CALLED_ON_VALID_THREAD(bound_thread_);
++#if defined(VENETIUM_W10M)
++  // No window messages on Windows 10 Mobile (see the constructor).
++  return false;
++#endif
+ 
+   MSG msg;
+   bool has_msg = false;
+diff --git a/content/browser/browser_main_loop.cc b/content/browser/browser_main_loop.cc
+index 90ee66b3e959f4f7a4f2c1d5fa7500fb886a7b96..04cc7bf70fac45e3d45b0732658d70124840e1c0 100644
+--- a/content/browser/browser_main_loop.cc
++++ b/content/browser/browser_main_loop.cc
+@@ -1412,10 +1412,14 @@ void BrowserMainLoop::PostCreateThreadsImpl() {
+   }
+ 
+ #if BUILDFLAG(IS_WIN)
++  // Device-change notifications come to a hidden window, and Windows 10
++  // Mobile has no windows.
++#if !defined(VENETIUM_W10M)
+   if (!base::FeatureList::IsEnabled(
+           video_capture::features::kWinCameraMonitoringInVideoCaptureService)) {
+     system_message_window_ = std::make_unique<media::SystemMessageWindowWin>();
+   }
++#endif
+ #elif (BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)) && defined(USE_UDEV)
+   device_monitor_linux_ = std::make_unique<media::DeviceMonitorLinux>();
+ #endif
+@@ -1521,7 +1525,9 @@ bool BrowserMainLoop::InitializeToolkit() {
+   // (Need to add InitializeToolkit stage to BrowserParts).
+   // See also GTK setup in EarlyInitialization, above, and associated comments.
+ 
+-#if BUILDFLAG(IS_WIN)
++#if BUILDFLAG(IS_WIN) && !defined(VENETIUM_W10M)
++  // (Windows 10 Mobile has no comctl32, and nothing here draws a common
++  // control.)
+   INITCOMMONCONTROLSEX config;
+   config.dwSize = sizeof(config);
+   config.dwICC = ICC_WIN95_CLASSES;

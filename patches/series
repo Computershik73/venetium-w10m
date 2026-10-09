@@ -1,0 +1,50 @@
+# The patch series under patches/w10m, in the order tools/apply-patches.sh
+# applies it to Chromium 150.0.7871.222. "supermium NAME" is NAME.patch from
+# win32ss/supermium (main, 2026-09-30); "venetium FILE" is ../venetium/patches/FILE.
+#
+# Supermium 150, in the order its README gives: core, ui, general features,
+# about flags; then the independent ones.
+supermium supermium_150_core_mem
+supermium supermium_150_core_encrypt_mojo
+supermium supermium_150_core_sandbox
+supermium ui_part_1
+supermium ui_part_2
+supermium general_features
+supermium 150_about_flags_and_finishing_touches
+supermium ptr_device_fix
+supermium client_hints
+supermium ungoogled_supermium_and_mv2
+supermium xp_tts_fix
+#
+# Venetium. Left out: 0006 (gaia; Supermium's ungoogled set already does it),
+# 0014 (Supermium 09-30 has its own fix, with a typo apply-patches.sh
+# corrects), 0021 (Direct3D 9: a phone has none) and 0032-0043 (Tegra and
+# Direct3D 9 tuning, the Windows RT renderer token). 0024 comes back from
+# superseded/: rt2 has no 32-bit ARM C++ exception handling, which is what
+# rt2.1 fixed and made 0024 unnecessary.
+venetium 0001-branding.patch
+venetium 0002-exe-rename.patch
+venetium 0003-branding-fixups.patch
+venetium 0004-branding-assets.patch
+venetium 0005-venetium-defaults.patch
+venetium 0007-toggle-translation-via-switch.patch
+venetium 0008-google-api-warning.patch
+venetium 0010-win-clang-x86-v8-arm.patch
+venetium 0011-v8-arm-invokeprologue-flags.patch
+venetium 0012-x86-1-build-fixes.patch
+venetium 0013-x86-1-toolchain-drift.patch
+venetium 0015-ua-brand-venetium.patch
+venetium 0016-arm32-build-toolchain.patch
+venetium 0017-arm32-platform-blockers.patch
+venetium 0018-v8-windows-arm32-v2.patch
+venetium 0019-sandbox-arm32-interception.patch
+venetium 0020-crashpad-arm32.patch
+venetium 0022-arm32-link-misc-v2.patch
+venetium 0023-ffmpeg-win-arm-wiring.patch
+venetium 0025-arm32-build-fix-round-v2.patch
+venetium 0026-arm32-link-fixes.patch
+venetium 0027-chrome-dll-link-sdk19041.patch
+venetium 0028-chrome-elf-no-dll-hook-arm32.patch
+venetium 0029-sandbox-no-mitigation-attr-arm32.patch
+venetium 0030-sandbox-no-win32k-claim-arm32.patch
+venetium superseded/0024-libcxx-no-exceptions-arm32.patch

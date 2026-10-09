@@ -1,0 +1,251 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Fri, 9 Oct 2026 09:01:28 +0400
+Subject: [PATCH] Build: a Windows 10 Mobile target (is_w10m)
+
+is_w10m (build/config/win/w10m.gni) builds the engine for a UWP app on a
+32-bit ARM phone. The phone's code (is_w10m_target: the arm toolchain, not
+the host tools) gets VENETIUM_W10M defined and /APPCONTAINER on every link,
+and is linked without /guard:cf (lld-link's ARM32 guard tables lack the Thumb
+bit; win_enable_cfg_guards = false keeps the compile side off).
+
+Rust targets thumbv7a-uwp-windows-msvchf, a target.json in the toolchain's
+sysroot: the app-container std, and an llvm-target ending in hf so that
+float aggregates go in VFP registers as clang-cl puts them. rustc calls a
+custom target unstable, so -Zunstable-options goes with it everywhere rustc
+is asked about it, and the spec is copied into the build's own sysroot.
+
+ARM32 import libraries from SDK 10.0.22621.0 (Venetium 0016 used 19041).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ build/config/compiler/BUILD.gn         |  5 +++++
+ build/config/rust.gni                  | 10 +++++++++-
+ build/config/win/BUILD.gn              | 16 +++++++++++++++-
+ build/config/win/w10m.gni              | 15 +++++++++++++++
+ build/rust/gni_impl/rustc_print_cfg.py |  8 ++++++++
+ build/rust/known-target-triples.txt    |  1 +
+ build/rust/std/BUILD.gn                | 17 +++++++++++++++++
+ build/rust/std/find_std_rlibs.py       |  7 +++++++
+ build/toolchain/win/setup_toolchain.py |  3 ++-
+ 9 files changed, 79 insertions(+), 3 deletions(-)
+ create mode 100644 build/config/win/w10m.gni
+
+diff --git a/build/config/compiler/BUILD.gn b/build/config/compiler/BUILD.gn
+index 298cf5fb1acbb66261c964b74210c31584418011..d685f8fe00c4206e27d425bdead12b5bb6b1079e 100644
+--- a/build/config/compiler/BUILD.gn
++++ b/build/config/compiler/BUILD.gn
+@@ -990,6 +990,11 @@ config("compiler") {
+   }
+   if (rust_abi_target != "") {
+     rustflags += [ "--target=$rust_abi_target" ]
++    if (rust_abi_target == "thumbv7a-uwp-windows-msvchf") {
++      # Windows 10 Mobile's target is a target.json in the sysroot
++      # (//build/rust/std:prebuilt_rustc_target_spec), which rustc calls unstable.
++      rustflags += [ "-Zunstable-options" ]
++    }
+   }
+   if (!use_thin_lto || !toolchain_supports_rust_thin_lto) {
+     # Don't include bitcode if it won't be used.
+diff --git a/build/config/rust.gni b/build/config/rust.gni
+index 40ec4ac45c82c8825bce21618c1acb8d9a2b9eac..475835e64e873a974a42d8fc4169abd3a293d536 100644
+--- a/build/config/rust.gni
++++ b/build/config/rust.gni
+@@ -5,6 +5,7 @@
+ import("//build/config/chrome_build.gni")
+ import("//build/config/compiler/compiler.gni")
+ import("//build/config/sanitizers/sanitizers.gni")
++import("//build/config/win/w10m.gni")
+ import("//build/toolchain/toolchain.gni")
+ 
+ if (is_android) {
+@@ -351,7 +352,14 @@ if (is_linux || is_chromeos) {
+   } else if (current_cpu == "x86") {
+     rust_abi_target = "i686-pc-windows-msvc"
+   } else if (current_cpu == "arm") {
+-    rust_abi_target = "thumbv7a-pc-windows-msvc"
++    if (is_w10m) {
++      # Windows 10 Mobile: an app-container std (vendor "uwp"), and a target
++      # whose llvm-target ends in "hf" so that rustc passes float aggregates
++      # in VFP registers as clang-cl does (tools/rust-targets in venetium-w10m).
++      rust_abi_target = "thumbv7a-uwp-windows-msvchf"
++    } else {
++      rust_abi_target = "thumbv7a-pc-windows-msvc"
++    }
+   } else {
+     assert(false, "Architecture not supported")
+   }
+diff --git a/build/config/win/BUILD.gn b/build/config/win/BUILD.gn
+index c1bac78c594c7a63ddf93faec686e60ea46c94e5..46725dd377f5c75e3641922f25d2c95697df5c02 100644
+--- a/build/config/win/BUILD.gn
++++ b/build/config/win/BUILD.gn
+@@ -10,6 +10,7 @@ import("//build/config/rust.gni")
+ import("//build/config/sanitizers/sanitizers.gni")
+ import("//build/config/win/control_flow_guard.gni")
+ import("//build/config/win/visual_studio_version.gni")
++import("//build/config/win/w10m.gni")
+ import("//build/timestamp.gni")
+ import("//build/toolchain/rbe.gni")
+ import("//build/toolchain/toolchain.gni")
+@@ -151,6 +152,15 @@ config("compiler") {
+ 
+   ldflags = []
+ 
++  if (is_w10m_target) {
++    # Windows 10 Mobile: the code the engine is made of, as opposed to the
++    # build's host tools. Every W10M-specific path is under this define.
++    cflags += [ "/DVENETIUM_W10M" ]
++
++    # Every module of a UWP app carries IMAGE_DLLCHARACTERISTICS_APPCONTAINER.
++    ldflags += [ "/APPCONTAINER" ]
++  }
++
+   if (use_lld) {
+     # lld defaults to writing the current time in the pe/coff header.
+     # For build reproducibility, pass an explicit timestamp. See
+@@ -371,7 +381,11 @@ config("cfi_linker") {
+   # ASan and CFG leads to slow process startup. Chromium's test runner uses
+   # lots of child processes, so this means things are really slow. Disable CFG
+   # for now. https://crbug.com/846966
+-  if (!is_debug && !is_asan) {
++  # Not for Windows 10 Mobile: lld-link records 32-bit ARM guard targets
++  # without the Thumb bit and leaves the address-taken IAT table empty, so the
++  # first guarded indirect call fails fast (gecko-w10m tools/strip-cfg.py,
++  # Venetium 0031). The compile side is off through win_enable_cfg_guards.
++  if (!is_debug && !is_asan && !is_w10m_target) {
+     # Turn on CFG bitmap generation and CFG load config.
+     ldflags = [ "/guard:cf" ]
+   }
+diff --git a/build/config/win/w10m.gni b/build/config/win/w10m.gni
+new file mode 100644
+index 0000000000000000000000000000000000000000..2dca062b4e6a2bedd7ce963200f5c75dfa35f732
+--- /dev/null
++++ b/build/config/win/w10m.gni
+@@ -0,0 +1,15 @@
++# Copyright 2026 The Venetium-W10M Authors
++# Use of this source code is governed by a BSD-style license that can be
++# found in the LICENSE file.
++
++declare_args() {
++  # Build the engine of Venetium for Windows 10 Mobile: 32-bit ARM code that
++  # runs single-process inside a UWP app container on a phone (no window
++  # messages, no child processes, JIT only through the *FromApp allocators).
++  # Host tools of such a build are ordinary desktop programs.
++  is_w10m = false
++}
++
++# True for the code that runs on the phone, false for the build's host tools
++# (the x64 tools and the x86 toolchain V8's ARM snapshot is made with).
++is_w10m_target = is_w10m && current_os == "win" && current_cpu == "arm"
+diff --git a/build/rust/gni_impl/rustc_print_cfg.py b/build/rust/gni_impl/rustc_print_cfg.py
+index 01bd7521abb40dd4d8e2053f3333c3444edc0ffe..ae92d3749dd757b7000b73ebccdd611530cd5fe1 100644
+--- a/build/rust/gni_impl/rustc_print_cfg.py
++++ b/build/rust/gni_impl/rustc_print_cfg.py
+@@ -19,6 +19,10 @@ import sys
+ import tempfile
+ 
+ 
++# Rust targets defined by a target.json rather than built into rustc.
++CUSTOM_RUST_TARGETS = {"thumbv7a-uwp-windows-msvchf"}
++
++
+ def rustc_name():
+   if platform.system() == 'Windows':
+     return "rustc.exe"
+@@ -37,6 +41,10 @@ def capture_rustc_cfg(rust_prefix, target, output_path):
+   # output of `--print-cfg`.  If so, then consider also passing extra `args`
+   # (derived from `rustflags` maybe?).
+   args = [rustc_path, "--print=cfg", f"--target={target}"]
++  # A target that rustc knows only from a target.json in its sysroot (the
++  # Windows 10 Mobile build's thumbv7a-uwp-windows-msvchf) is unstable.
++  if target in CUSTOM_RUST_TARGETS:
++    args.append("-Zunstable-options")
+ 
+   os.makedirs(os.path.dirname(output_path), exist_ok=True)
+   with open(output_path, 'w') as output_file:
+diff --git a/build/rust/known-target-triples.txt b/build/rust/known-target-triples.txt
+index 64ec4052066431d119913f77d5c12f86b1d2ef2e..791b7cc79b2dcf42bf9735d90572f3f80ed1e1f8 100644
+--- a/build/rust/known-target-triples.txt
++++ b/build/rust/known-target-triples.txt
+@@ -32,6 +32,7 @@ loongarch64-unknown-linux-gnu
+ riscv64-linux-android
+ riscv64gc-unknown-linux-gnu
+ thumbv7a-pc-windows-msvc
++thumbv7a-uwp-windows-msvchf
+ thumbv7neon-linux-androideabi
+ thumbv7neon-unknown-linux-gnueabihf
+ x86_64-apple-darwin
+diff --git a/build/rust/std/BUILD.gn b/build/rust/std/BUILD.gn
+index 105a1d52a16825c621416a9def8d0f6edaca9db0..0bcd94e566a0179b764be2165d0eb864d726bca8 100644
+--- a/build/rust/std/BUILD.gn
++++ b/build/rust/std/BUILD.gn
+@@ -333,6 +333,20 @@ if (toolchain_has_rust) {
+       visibility = [ ":*" ]
+     }
+ 
++    # A target rustc does not have built in (Windows 10 Mobile's
++    # thumbv7a-uwp-windows-msvchf) is a target.json beside its libraries in
++    # the toolchain's sysroot, and rustc looks for it in the sysroot it is
++    # given -- this one.
++    _has_target_spec = rust_abi_target == "thumbv7a-uwp-windows-msvchf"
++    if (_has_target_spec) {
++      copy("prebuilt_rustc_target_spec") {
++        sources =
++            [ "${rust_sysroot}/lib/rustlib/$rust_abi_target/target.json" ]
++        outputs = [ "$prebuilt_rustc_sysroot/lib/rustlib/$rust_abi_target/target.json" ]
++        visibility = [ ":*" ]
++      }
++    }
++
+     config("prebuilt_stdlib_sysroot") {
+       # Match the output directory of :prebuilt_rustc_copy_to_sysroot
+       sysroot = rebase_path(prebuilt_rustc_sysroot, root_build_dir)
+@@ -369,6 +383,9 @@ if (toolchain_has_rust) {
+         ":stdlib_public_dependent_libs",
+       ]
+       deps = [ ":prebuilt_rustc_copy_to_sysroot" ]
++      if (_has_target_spec) {
++        deps += [ ":prebuilt_rustc_target_spec" ]
++      }
+     }
+   }
+ }
+diff --git a/build/rust/std/find_std_rlibs.py b/build/rust/std/find_std_rlibs.py
+index f35ae4482082db010ad42d9e4930a6c370ae361a..80d9156631767e543d1bed11dffce9dccccfe45c 100644
+--- a/build/rust/std/find_std_rlibs.py
++++ b/build/rust/std/find_std_rlibs.py
+@@ -19,6 +19,9 @@ from collections import defaultdict
+ EXPECTED_STDLIB_INPUT_REGEX = re.compile(r"([0-9a-z_]+)(?:-([0-9]+))?$")
+ RLIB_NAME_REGEX = re.compile(r"lib([0-9a-z_]+)-([0-9a-f]+)\.rlib$")
+ 
++# Rust targets defined by a target.json rather than built into rustc.
++CUSTOM_RUST_TARGETS = {"thumbv7a-uwp-windows-msvchf"}
++
+ 
+ def main():
+   parser = argparse.ArgumentParser("find_std_rlibs.py")
+@@ -50,6 +53,10 @@ def main():
+   rustc_args = [rustc, "--print", "target-libdir"]
+   if args.target:
+     rustc_args.extend(["--target", args.target])
++    # A target defined by a target.json in the toolchain's sysroot (the
++    # Windows 10 Mobile build's thumbv7a-uwp-windows-msvchf) is unstable.
++    if args.target in CUSTOM_RUST_TARGETS:
++      rustc_args.append("-Zunstable-options")
+   rustlib_dir = subprocess.check_output(rustc_args).rstrip().decode()
+   # crbug.com/467351944 - rustc --print target-libdir loses Windows subst paths
+   # due to calling GetFinalPathNameByHandle() during canonicalization. This
+diff --git a/build/toolchain/win/setup_toolchain.py b/build/toolchain/win/setup_toolchain.py
+index 9971b9eed86a6a916329fe9687fc66e523f99554..a3ea0675d5ee33dcd2179513954ae30c22f045e5 100644
+--- a/build/toolchain/win/setup_toolchain.py
++++ b/build/toolchain/win/setup_toolchain.py
+@@ -23,7 +23,8 @@ import gn_helpers
+ SCRIPT_DIR = os.path.dirname(__file__)
+ SDK_VERSION = '10.0.26100.0'
+ # Venetium 0016 (D9): the last SDK that ships the ARM32 import libs (Lib/<ver>/um/arm, Lib/<ver>/ucrt/arm).
+-ARM32_LIB_SDK_VERSION = '10.0.19041.0'
++# Venetium-W10M: 10.0.22621.0, the newest SDK that still ships them (installed beside 26100).
++ARM32_LIB_SDK_VERSION = '10.0.22621.0'
+ MSVC_DIR = re.compile('^.*/VC/Tools/MSVC/[^/]+/include$')
+ WINDOWS_KITS_DIR = re.compile(r'^(.*/Windows Kits/\d+/Include/[^/]+)/.*')
+ 

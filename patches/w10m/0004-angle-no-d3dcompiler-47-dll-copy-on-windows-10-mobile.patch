@@ -1,0 +1,37 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Fri, 9 Oct 2026 09:25:56 +0400
+Subject: [PATCH] ANGLE: no d3dcompiler_47.dll copy on Windows 10 Mobile
+
+The OS carries d3dcompiler_47.dll, and the SDK has no 32-bit ARM copy to
+redistribute.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ third_party/angle/BUILD.gn | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/third_party/angle/BUILD.gn b/third_party/angle/BUILD.gn
+index 3e1af3bc00c5e57a3a4b605952da11686e597225..47432fa1e683680fb128de9b223fcf6adb47b3a1 100644
+--- a/third_party/angle/BUILD.gn
++++ b/third_party/angle/BUILD.gn
+@@ -3,6 +3,7 @@
+ # found in the LICENSE file.
+ 
+ # import the ozone_platform_x11 variable
++import("//build/config/win/w10m.gni")
+ import("gni/angle.gni")
+ if (angle_enable_vulkan) {
+   import("//build_overrides//vulkan_headers.gni")
+@@ -426,7 +427,10 @@ config("build_id_config") {
+   ldflags = [ "-Wl,--build-id" ]
+ }
+ 
+-_use_copy_compiler_dll = angle_has_build && is_win
++# Windows 10 Mobile: d3dcompiler_47.dll is part of the OS (and the SDK has no
++# 32-bit ARM copy to redistribute).
++_use_copy_compiler_dll =
++    angle_has_build && is_win && !(build_with_chromium && is_w10m)
+ 
+ if (_use_copy_compiler_dll) {
+   copy("copy_compiler_dll") {

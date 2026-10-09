@@ -1,0 +1,57 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Fri, 9 Oct 2026 09:57:19 +0400
+Subject: [PATCH] Windows 10 Mobile: a window that cannot be made is not a
+ crash
+
+CreateWindowEx is a stub on Windows 10 Mobile. gfx::SingletonHwnd (session,
+power, screen-lock and accessibility notifications) makes no window there,
+and WindowImpl::Init returns with hwnd() null instead of hitting
+NOTREACHED/CHECK when creation fails.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ ui/gfx/win/singleton_hwnd.cc | 8 ++++++++
+ ui/gfx/win/window_impl.cc    | 7 +++++++
+ 2 files changed, 15 insertions(+)
+
+diff --git a/ui/gfx/win/singleton_hwnd.cc b/ui/gfx/win/singleton_hwnd.cc
+index 40506b87ff331bcb9c60d70026c8648c367f6279..ef3312167eb0431536d3ca48972f67a7030493b2 100644
+--- a/ui/gfx/win/singleton_hwnd.cc
++++ b/ui/gfx/win/singleton_hwnd.cc
+@@ -45,9 +45,17 @@ base::CallbackListSubscription SingletonHwnd::RegisterCallback(
+ SingletonHwnd::SingletonHwnd() {
+   // Creating this window in (e.g.) a renderer inhibits Windows shutdown. See
+   // http://crbug.com/40312501 and http://crbug.com/40315446.
++#if defined(VENETIUM_W10M)
++  // Windows 10 Mobile has no windows (CreateWindow is a stub there): no
++  // hwnd(), and callbacks registered here are simply never called. Its
++  // callers ask for session, power and accessibility messages a phone app
++  // does not get anyway.
++  return;
++#else
+   if (base::CurrentUIThread::IsSet()) {
+     WindowImpl::Init(NULL, Rect());
+   }
++#endif
+ }
+ 
+ SingletonHwnd::~SingletonHwnd() {
+diff --git a/ui/gfx/win/window_impl.cc b/ui/gfx/win/window_impl.cc
+index 365c97db5a60fe507007494525541c12f92c8379..d3176dfd4368cd96aae1c324117aeed0d2747266 100644
+--- a/ui/gfx/win/window_impl.cc
++++ b/ui/gfx/win/window_impl.cc
+@@ -225,6 +225,13 @@ void WindowImpl::Init(HWND parent, const Rect& bounds) {
+                              window_name_, window_style_, x, y, width, height,
+                              parent, NULL, NULL, this);
+   const DWORD create_window_error = ::GetLastError();
++#if defined(VENETIUM_W10M)
++  // CreateWindowEx is a stub on Windows 10 Mobile: a window that could not be
++  // made is no window, not a crash. Callers see hwnd() == nullptr.
++  if (!hwnd) {
++    return;
++  }
++#endif
+ 
+   // First nccalcsize (during CreateWindow) for captioned windows is
+   // deliberately ignored so force a second one here to get the right
