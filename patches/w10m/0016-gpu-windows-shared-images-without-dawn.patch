@@ -11,9 +11,9 @@ Graphite-Dawn context, which such a build never has.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
- gpu/command_buffer/service/BUILD.gn           | 10 ++++++
- .../service/shared_image/dawn_absent_win.cc   | 32 +++++++++++++++++++
- 2 files changed, 42 insertions(+)
+ gpu/command_buffer/service/BUILD.gn           | 10 +++
+ .../service/shared_image/dawn_absent_win.cc   | 66 +++++++++++++++++++
+ 2 files changed, 76 insertions(+)
  create mode 100644 gpu/command_buffer/service/shared_image/dawn_absent_win.cc
 
 diff --git a/gpu/command_buffer/service/BUILD.gn b/gpu/command_buffer/service/BUILD.gn
@@ -39,10 +39,10 @@ index b35ca606a2cadf8c5421bca2460b05cdece1b3f5..34232e5cb41f55f5dd1a5ad9ee5a34b8
        "d3d12.lib",
 diff --git a/gpu/command_buffer/service/shared_image/dawn_absent_win.cc b/gpu/command_buffer/service/shared_image/dawn_absent_win.cc
 new file mode 100644
-index 0000000000000000000000000000000000000000..c68add8386a677f4cbfbb29aeec78413a8f71f95
+index 0000000000000000000000000000000000000000..47897efa5d0e2afe8675d21eea1146f9d2712942
 --- /dev/null
 +++ b/gpu/command_buffer/service/shared_image/dawn_absent_win.cc
-@@ -0,0 +1,32 @@
+@@ -0,0 +1,66 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -66,11 +66,45 @@ index 0000000000000000000000000000000000000000..c68add8386a677f4cbfbb29aeec78413
 +  NOTREACHED();
 +}
 +
++// Its destructor brings the class's vftable here, and with it every
++// virtual member.
 +SkiaGraphiteDawnImageRepresentation::~SkiaGraphiteDawnImageRepresentation() {
 +  NOTREACHED();
 +}
 +
 +wgpu::Device SkiaGraphiteDawnImageRepresentation::GetDevice() const {
++  NOTREACHED();
++}
++
++std::vector<sk_sp<SkSurface>>
++SkiaGraphiteDawnImageRepresentation::BeginWriteAccess(
++    const SkSurfaceProps& surface_props,
++    const gfx::Rect& update_rect) {
++  NOTREACHED();
++}
++
++std::vector<scoped_refptr<SkiaImageRepresentation::GraphiteTextureHolder>>
++SkiaGraphiteDawnImageRepresentation::BeginWriteAccess() {
++  NOTREACHED();
++}
++
++void SkiaGraphiteDawnImageRepresentation::EndWriteAccess() {
++  NOTREACHED();
++}
++
++std::vector<scoped_refptr<SkiaImageRepresentation::GraphiteTextureHolder>>
++SkiaGraphiteDawnImageRepresentation::BeginReadAccess() {
++  NOTREACHED();
++}
++
++void SkiaGraphiteDawnImageRepresentation::EndReadAccess() {
++  NOTREACHED();
++}
++
++std::vector<scoped_refptr<SkiaImageRepresentation::GraphiteTextureHolder>>
++SkiaGraphiteDawnImageRepresentation::WrapBackendTextures(
++    wgpu::Texture texture,
++    std::vector<skgpu::graphite::BackendTexture> backend_textures) {
 +  NOTREACHED();
 +}
 +
