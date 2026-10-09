@@ -91,7 +91,7 @@ Delay-load failures return each function's own failure value (`E_NOTIMPL`,
 
 Reviewed before its first run by five reviewers and adversarial verifiers
 (threading and lifetime, content API use, input and frames, the patches, the
-shell): 33 defects confirmed and fixed, among them the network service never
+shell): 27 distinct defects confirmed and fixed, among them the network service never
 being created (`IsShuttingDown` true during startup), pages laid out in
 pixels instead of DIPs, an encrypting cookie store without a provider
 (`NOTREACHED`), COM worker threads spinning on `MsgWaitForMultipleObjectsEx`
