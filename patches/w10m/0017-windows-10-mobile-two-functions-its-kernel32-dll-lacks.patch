@@ -1,0 +1,111 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Fri, 9 Oct 2026 20:14:51 +0400
+Subject: [PATCH] Windows 10 Mobile: two functions its kernel32.dll lacks
+
+On 15254 (1709) the engine's import of KERNEL32.dll names 333 functions
+and the phone has all but GetMaximumProcessorCount and
+GetPackagePathByFullName, so the module would not load at all (127).
+The first is the active count on a phone (one group, no hot-add); the
+second comes from the app model's api-set at run time.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ ...media_foundation_package_locator_helper.cc | 25 +++++++++++++++++++
+ .../public/cpp/platform_functions_win.cc      | 25 +++++++++++++++++++
+ .../arm/windows/init-by-logical-sys-info.c    | 10 +++++++-
+ 3 files changed, 59 insertions(+), 1 deletion(-)
+
+diff --git a/media/base/win/media_foundation_package_locator_helper.cc b/media/base/win/media_foundation_package_locator_helper.cc
+index a89fbd82dc1af9f979b38b71946d712b34892680..92ee8e68b9f4bbe331cfa7545e6df55912f4c26d 100644
+--- a/media/base/win/media_foundation_package_locator_helper.cc
++++ b/media/base/win/media_foundation_package_locator_helper.cc
+@@ -15,6 +15,31 @@
+ namespace media {
+ 
+ namespace {
++
++#if defined(VENETIUM_W10M)
++// Windows 10 Mobile's kernel32.dll has no GetPackagePathByFullName (1709
++// included); the app model's api-set has it. Imported by name, it would keep
++// the whole module from loading.
++LONG GetPackagePathByFullNameW10m(PCWSTR package_full_name,
++                                  UINT32* path_length,
++                                  PWSTR path) {
++  using Fn = LONG(WINAPI*)(PCWSTR, UINT32*, PWSTR);
++  static const Fn fn = []() -> Fn {
++    for (const wchar_t* apiset : {L"api-ms-win-appmodel-runtime-l1-1-1.dll",
++                                  L"api-ms-win-appmodel-runtime-l1-1-0.dll"}) {
++      if (HMODULE module = ::LoadLibraryExW(apiset, nullptr,
++                                            LOAD_LIBRARY_SEARCH_SYSTEM32)) {
++        if (FARPROC proc = ::GetProcAddress(module, "GetPackagePathByFullName")) {
++          return reinterpret_cast<Fn>(proc);
++        }
++      }
++    }
++    return nullptr;
++  }();
++  return fn ? fn(package_full_name, path_length, path) : ERROR_NOT_SUPPORTED;
++}
++#define GetPackagePathByFullName GetPackagePathByFullNameW10m
++#endif  // defined(VENETIUM_W10M)
+ #if defined(_M_AMD64)
+ constexpr std::array<std::wstring_view, 1> kArchSubDirs = {L"x64"};
+ #elif defined(_M_IX86)
+diff --git a/services/webnn/public/cpp/platform_functions_win.cc b/services/webnn/public/cpp/platform_functions_win.cc
+index e8a27ab87ef0340e61fbadf1eaa8e68db8a8d408..68816992451da593d8ae68385005b3cdf51fe720 100644
+--- a/services/webnn/public/cpp/platform_functions_win.cc
++++ b/services/webnn/public/cpp/platform_functions_win.cc
+@@ -17,6 +17,31 @@ namespace webnn {
+ 
+ namespace {
+ 
++#if defined(VENETIUM_W10M)
++// Windows 10 Mobile's kernel32.dll has no GetPackagePathByFullName (1709
++// included); the app model's api-set has it. Imported by name, it would keep
++// the whole module from loading.
++LONG GetPackagePathByFullNameW10m(PCWSTR package_full_name,
++                                  UINT32* path_length,
++                                  PWSTR path) {
++  using Fn = LONG(WINAPI*)(PCWSTR, UINT32*, PWSTR);
++  static const Fn fn = []() -> Fn {
++    for (const wchar_t* apiset : {L"api-ms-win-appmodel-runtime-l1-1-1.dll",
++                                  L"api-ms-win-appmodel-runtime-l1-1-0.dll"}) {
++      if (HMODULE module = ::LoadLibraryExW(apiset, nullptr,
++                                            LOAD_LIBRARY_SEARCH_SYSTEM32)) {
++        if (FARPROC proc = ::GetProcAddress(module, "GetPackagePathByFullName")) {
++          return reinterpret_cast<Fn>(proc);
++        }
++      }
++    }
++    return nullptr;
++  }();
++  return fn ? fn(package_full_name, path_length, path) : ERROR_NOT_SUPPORTED;
++}
++#define GetPackagePathByFullName GetPackagePathByFullNameW10m
++#endif  // defined(VENETIUM_W10M)
++
+ struct ScopedWcharTypeTraits {
+   static wchar_t* InvalidValue() { return nullptr; }
+   static void Free(wchar_t* value) {
+diff --git a/third_party/cpuinfo/src/src/arm/windows/init-by-logical-sys-info.c b/third_party/cpuinfo/src/src/arm/windows/init-by-logical-sys-info.c
+index 815ecb770a5bc5c48c7dff049f50b111b427954a..5dc8829c26d0355a8910dbdf3f07b2f7640eddf7 100644
+--- a/third_party/cpuinfo/src/src/arm/windows/init-by-logical-sys-info.c
++++ b/third_party/cpuinfo/src/src/arm/windows/init-by-logical-sys-info.c
+@@ -376,7 +376,15 @@ static uint32_t count_logical_processors(const uint32_t max_group_count, uint32_
+ 	uint32_t nr_of_processors = 0;
+ 
+ 	for (uint32_t i = 0; i < max_group_count; i++) {
+-		uint32_t nr_of_processors_per_group = GetMaximumProcessorCount((WORD)i);
++#if defined(VENETIUM_W10M)
++		/* Windows 10 Mobile's kernel32.dll has no GetMaximumProcessorCount,
++		 * and imported by name it keeps the whole module from loading. A
++		 * phone has one group and no processors added while it runs: the
++		 * active count is the maximum. */
++		uint32_t nr_of_processors_per_group = GetActiveProcessorCount((WORD)i);
++#else
++		uint32_t nr_of_processors_per_group = GetMaximumProcessorCount((WORD)i);
++#endif
+ 		cpuinfo_log_debug(
+ 			"detected %" PRIu32 " processor(s) in group %" PRIu32 "", nr_of_processors_per_group, i);
+ 		global_proc_index_per_group[i] = nr_of_processors;

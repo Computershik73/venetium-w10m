@@ -4,6 +4,7 @@
 #include "engine/EngineHost.h"
 
 #include "client/Log.h"
+#include "engine/ImportProbe.h"
 
 namespace venetium_w10m::engine {
 
@@ -78,9 +79,12 @@ bool EngineHost::Load(winrt::Windows::UI::Core::CoreDispatcher const& dispatcher
   const ULONGLONG started = ::GetTickCount64();
   module_ = ::LoadPackagedLibrary(L"venetium_engine.dll", 0);
   if (!module_) {
+    const DWORD error = ::GetLastError();
     Log::WriteNum(L"engine: LoadPackagedLibrary(venetium_engine.dll) failed, "
                   L"error",
-                  static_cast<long long>(::GetLastError()));
+                  static_cast<long long>(error));
+    // 126/127 name nothing: ask the phone for each import, the loader's way.
+    ProbeImports(L"venetium_engine.dll");
     return false;
   }
   Log::WriteNum(L"engine: venetium_engine.dll loaded in ms",
