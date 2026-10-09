@@ -66,6 +66,7 @@ DWORD WINAPI EngineThread(LPVOID raw) {
   Log::Write(L"engine: thread started, entering venetium_w10m_run");
   const int32_t rc = args->run(&config);
   Log::WriteNum(L"engine: venetium_w10m_run returned", rc);
+  EngineHost::Get().OnRunReturned(rc);
   return static_cast<DWORD>(rc);
 }
 
@@ -167,6 +168,14 @@ bool EngineHost::Start(const StartParams& params) {
   ::CloseHandle(thread);
   started_ = true;
   return true;
+}
+
+void EngineHost::OnRunReturned(int32_t code) {
+  Post([code]() {
+    EngineHost& host = Get();
+    host.started_ = false;
+    if (host.events_.engineStopped) host.events_.engineStopped(code);
+  });
 }
 
 void EngineHost::Post(std::function<void()> work) {

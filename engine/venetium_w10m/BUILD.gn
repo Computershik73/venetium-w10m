@@ -82,6 +82,7 @@ shared_library("venetium_engine") {
 
   deps = [
     "//base",
+    "//base:i18n",
     "//components/download/public/common:public",
     "//components/headless/clipboard",
     "//components/embedder_support:user_agent",

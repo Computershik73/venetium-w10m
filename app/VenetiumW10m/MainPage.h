@@ -61,6 +61,8 @@ class MainPage {
   void ShowNotice(std::wstring const& text);
   void ShowLog();
   void SendPhoneClipboard();
+  void ReportScreen();
+  void OnEngineStopped(int32_t code);
 
   TabInfo* Selected();
 
@@ -90,6 +92,7 @@ class MainPage {
   winrt::Windows::UI::Xaml::Controls::Grid content_{nullptr};
   winrt::Windows::UI::Xaml::Controls::Grid splash_{nullptr};
   winrt::Windows::UI::Xaml::Controls::TextBlock splashText_{nullptr};
+  winrt::Windows::UI::Xaml::Controls::ProgressRing splashRing_{nullptr};
   winrt::Windows::UI::Xaml::Controls::Grid tabsPanel_{nullptr};
   winrt::Windows::UI::Xaml::Controls::StackPanel tabsList_{nullptr};
   winrt::Windows::UI::Xaml::Controls::Border notice_{nullptr};

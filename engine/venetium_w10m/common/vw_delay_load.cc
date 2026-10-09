@@ -26,6 +26,7 @@
 #include <string.h>
 
 #include <atomic>
+#include <iterator>
 
 #include "venetium_w10m/common/vw_log.h"
 
@@ -46,6 +47,126 @@ HRESULT WINAPI ReturnNotImplemented() {
 
 LONG WINAPI ReturnCallNotImplemented() {
   return ERROR_CALL_NOT_IMPLEMENTED;
+}
+
+// For some functions no failure value will do, and gecko-w10m met each of
+// these on a phone: they get a substitute that does what the call means here.
+
+// Zero would read as "the first handle is signalled": a message loop that
+// waits with it spins at full speed. There are no messages to wait for here,
+// but the handles are real, and waiting on them is what the call comes to.
+DWORD WINAPI SubstituteMsgWaitForMultipleObjectsEx(DWORD count,
+                                                   const HANDLE* handles,
+                                                   DWORD milliseconds,
+                                                   DWORD wake_mask,
+                                                   DWORD flags) {
+  const BOOL alertable = (flags & MWMO_ALERTABLE) != 0;
+  if (!count) {
+    // WaitForMultipleObjectsEx rejects an empty set, and a caller with no
+    // handles was only ever waiting for messages.
+    ::SleepEx(milliseconds, alertable);
+    return WAIT_TIMEOUT;
+  }
+  return ::WaitForMultipleObjectsEx(count, handles,
+                                    (flags & MWMO_WAITALL) != 0,
+                                    milliseconds, alertable);
+}
+
+DWORD WINAPI SubstituteMsgWaitForMultipleObjects(DWORD count,
+                                                 const HANDLE* handles,
+                                                 BOOL wait_all,
+                                                 DWORD milliseconds,
+                                                 DWORD wake_mask) {
+  if (!count) {
+    ::Sleep(milliseconds);
+    return WAIT_TIMEOUT;
+  }
+  return ::WaitForMultipleObjects(count, handles, wait_all, milliseconds);
+}
+
+// The raw input calls report failure as (UINT)-1, their result through an
+// out parameter: zero is "it worked", with a count never written.
+UINT WINAPI ReturnFailingUint() {
+  return static_cast<UINT>(-1);
+}
+
+// Zero paints every system colour black. Windows 10's light-theme defaults
+// (COLORREF, 0x00BBGGRR).
+DWORD WINAPI SubstituteGetSysColor(int index) {
+  static const DWORD kColors[] = {
+      0x00C8C8C8,  // 0  COLOR_SCROLLBAR
+      0x00000000,  // 1  COLOR_BACKGROUND
+      0x00D1B499,  // 2  COLOR_ACTIVECAPTION
+      0x00DBCDBF,  // 3  COLOR_INACTIVECAPTION
+      0x00F0F0F0,  // 4  COLOR_MENU
+      0x00FFFFFF,  // 5  COLOR_WINDOW
+      0x00646464,  // 6  COLOR_WINDOWFRAME
+      0x00000000,  // 7  COLOR_MENUTEXT
+      0x00000000,  // 8  COLOR_WINDOWTEXT
+      0x00000000,  // 9  COLOR_CAPTIONTEXT
+      0x00B4B4B4,  // 10 COLOR_ACTIVEBORDER
+      0x00FCF7F4,  // 11 COLOR_INACTIVEBORDER
+      0x00ABABAB,  // 12 COLOR_APPWORKSPACE
+      0x00D77800,  // 13 COLOR_HIGHLIGHT
+      0x00FFFFFF,  // 14 COLOR_HIGHLIGHTTEXT
+      0x00F0F0F0,  // 15 COLOR_BTNFACE
+      0x00A0A0A0,  // 16 COLOR_BTNSHADOW
+      0x006D6D6D,  // 17 COLOR_GRAYTEXT
+      0x00000000,  // 18 COLOR_BTNTEXT
+      0x00000000,  // 19 COLOR_INACTIVECAPTIONTEXT
+      0x00FFFFFF,  // 20 COLOR_BTNHIGHLIGHT
+      0x00696969,  // 21 COLOR_3DDKSHADOW
+      0x00E3E3E3,  // 22 COLOR_3DLIGHT
+      0x00000000,  // 23 COLOR_INFOTEXT
+      0x00E1FFFF,  // 24 COLOR_INFOBK
+      0x00000000,  // 25 (unused)
+      0x00CC6600,  // 26 COLOR_HOTLIGHT
+      0x00EAD1B9,  // 27 COLOR_GRADIENTACTIVECAPTION
+      0x00F2E4D7,  // 28 COLOR_GRADIENTINACTIVECAPTION
+      0x00D77800,  // 29 COLOR_MENUHILIGHT
+      0x00F0F0F0,  // 30 COLOR_MENUBAR
+  };
+  if (index < 0 || index >= static_cast<int>(std::size(kColors))) {
+    return 0;
+  }
+  return kColors[index];
+}
+
+// Zero means "never blink", which reads as a dead field.
+UINT WINAPI SubstituteGetCaretBlinkTime() {
+  return 530;
+}
+
+struct Substitute {
+  const char* name;
+  FARPROC proc;
+};
+
+const Substitute kSubstitutes[] = {
+    {"MsgWaitForMultipleObjectsEx",
+     reinterpret_cast<FARPROC>(&SubstituteMsgWaitForMultipleObjectsEx)},
+    {"MsgWaitForMultipleObjects",
+     reinterpret_cast<FARPROC>(&SubstituteMsgWaitForMultipleObjects)},
+    {"GetRawInputDeviceList", reinterpret_cast<FARPROC>(&ReturnFailingUint)},
+    {"GetRawInputDeviceInfoW", reinterpret_cast<FARPROC>(&ReturnFailingUint)},
+    {"GetRawInputDeviceInfoA", reinterpret_cast<FARPROC>(&ReturnFailingUint)},
+    {"GetRawInputData", reinterpret_cast<FARPROC>(&ReturnFailingUint)},
+    {"GetRawInputBuffer", reinterpret_cast<FARPROC>(&ReturnFailingUint)},
+    {"GetSysColor", reinterpret_cast<FARPROC>(&SubstituteGetSysColor)},
+    {"GetCaretBlinkTime",
+     reinterpret_cast<FARPROC>(&SubstituteGetCaretBlinkTime)},
+};
+
+FARPROC SubstituteFor(const char* name) {
+  if (!name) {
+    return nullptr;
+  }
+  for (const Substitute& substitute : kSubstitutes) {
+    if (strcmp(name, substitute.name) == 0) {
+      return substitute.proc;
+    }
+  }
+  return nullptr;
 }
 
 enum class Failure { kZero, kHresult, kErrorCode };
@@ -191,8 +312,12 @@ FARPROC WINAPI OnDelayLoadFailure(unsigned reason, PDelayLoadInfo info) {
       venetium_w10m::NoteF("delay-load: %s!#%u is not on this phone, stubbed",
                            dll, static_cast<unsigned>(info->dlp.dwOrdinal));
     }
-    switch (FailureFor(dll, info->dlp.fImportByName ? info->dlp.szProcName
-                                                    : nullptr)) {
+    const char* name =
+        info->dlp.fImportByName ? info->dlp.szProcName : nullptr;
+    if (FARPROC substitute = SubstituteFor(name)) {
+      return substitute;
+    }
+    switch (FailureFor(dll, name)) {
       case Failure::kHresult:
         return reinterpret_cast<FARPROC>(&ReturnNotImplemented);
       case Failure::kErrorCode:

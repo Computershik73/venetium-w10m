@@ -118,6 +118,10 @@ void VwBrowser::CloseTab(int32_t id) {
     } else {
       PublishSelection();
     }
+  } else {
+    // The selected tab may have been opened by this one: Back no longer
+    // closes it.
+    PublishSelection();
   }
   tab.reset();
 }
@@ -247,6 +251,13 @@ void VwBrowser::Resize(const gfx::Size& content_pixels) {
 void VwBrowser::SetDesktopMode(bool desktop) {
   VwEngine::Get()->desktop_mode.store(desktop);
   NoteF("desktop sites %s", desktop ? "on" : "off");
+  for (auto& [id, tab] : tabs_) {
+    tab->SetDesktopMode(desktop, /*reload=*/id == selected_);
+  }
+}
+
+void VwBrowser::SetKeyboardInset(int32_t pixels) {
+  platform_->SetKeyboardInset(pixels);
 }
 
 void VwBrowser::AppStateChanged(bool suspended) {
@@ -278,7 +289,8 @@ void VwBrowser::OnTabStateChanged(VwTab* tab) {
 
 void VwBrowser::OnFullscreenChanged(VwTab* tab, bool on) {
   if (tab->id() == selected_) {
-    VwEngine::Get()->fullscreen.store(on);
+    // Back leaves fullscreen first.
+    PublishSelection();
   }
   venetium_w10m_events events = VwEngine::Get()->events();
   if (events.fullscreen) {

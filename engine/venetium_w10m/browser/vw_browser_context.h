@@ -59,6 +59,8 @@ class VwBrowserContext : public content::BrowserContext {
   const base::FilePath cache_;
   std::unique_ptr<content::PermissionControllerDelegate> permissions_;
   std::unique_ptr<VwDownloadDelegate> downloads_;
+  // The DownloadManager exists (it asks for its delegate when it is made).
+  bool download_manager_created_ = false;
 };
 
 }  // namespace venetium_w10m

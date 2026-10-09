@@ -8,7 +8,9 @@
 // Fingers go to the engine as touch points in frame pixels; Aura's gesture
 // recogniser makes taps, scrolls, flings and pinches of them. Typing: the
 // phone raises its keyboard only for a focused text control, so an invisible
-// TextBox takes the keyboard's edits and passes them on.
+// TextBox takes the keyboard's edits and passes them on. The keyboard comes
+// up when the page asks for it -- the user tapped a field -- and while it is
+// up the page is inset by what it covers, so the field stays in view.
 //
 // Adapted from gecko-w10m's client/EngineView, which found out the hard way
 // how a Windows 10 Mobile keyboard and back button behave.
@@ -31,6 +33,8 @@ class EngineView {
   // Starts copying frames and reporting the room. Call once the engine has
   // been asked to start.
   void Start();
+  // Stops copying frames (the engine has ended).
+  void Stop();
   // The display's scale (raw pixels per view pixel) changed.
   void SetScale(double rawPerView);
 
@@ -53,9 +57,13 @@ class EngineView {
   void OnPointer(winrt::Windows::UI::Xaml::Input::PointerRoutedEventArgs const&
                      args,
                  int32_t state);
+  void OnMouse(winrt::Windows::UI::Input::PointerPoint const& point,
+               int32_t state, int32_t x, int32_t y);
   void WireKeyboard();
+  bool TextInputChanged(uint32_t state) const;
   void FollowTextInput();
   void ApplyInputKind(int32_t kind);
+  void ReportKeyboard(winrt::Windows::Foundation::Rect occluded);
   void SendKey(int32_t vkey);
   static void PostToUi(std::function<void()> work);
 
@@ -75,7 +83,8 @@ class EngineView {
 
   // Fingers on the glass, by XAML pointer id.
   std::vector<uint32_t> fingers_;
-  bool touched_ = false;
+  // The mouse button held down, as its WM_*DOWN number (0: none).
+  int32_t mouseDown_ = 0;
 
   // Text input.
   bool typing_ = false;

@@ -68,6 +68,10 @@ void SetUpCommandLine(const EngineConfig& config) {
   // rasterizer through ANGLE, which loads libGLESv2 and asks for a screen
   // DC; with it the GPU thread only composites, and GL stays off.
   command_line->AppendSwitch(switches::kDisableSoftwareRasterizer);
+  // TimeTicks on the performance counter: on ARM, base otherwise flips a
+  // coin between it and timeGetTime's milliseconds, which animations and
+  // frame timing feel.
+  command_line->AppendSwitchASCII(switches::kForceHighResTimeTicks, "enabled");
   // RenderWidgetHostViewAura's child HWND for accessibility and legacy
   // input: no HWNDs here.
   command_line->AppendSwitch(switches::kDisableLegacyIntermediateWindow);
@@ -146,6 +150,11 @@ void SetUpPaths(const EngineConfig& config) {
 extern "C" VW_EXPORT int32_t venetium_w10m_run(
     const venetium_w10m_config* config) {
   using namespace venetium_w10m;
+  // However this returns, the shell's later requests are dropped, not queued
+  // for a browser that will never run them.
+  struct ExitNote {
+    ~ExitNote() { VwEngine::Get()->EngineExited(); }
+  } exit_note;
   if (!config) {
     return -1;
   }

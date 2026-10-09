@@ -4,6 +4,7 @@
 
 #include "ui/base/ime/composition_text.h"
 #include "ui/base/ime/text_input_client.h"
+#include "ui/base/ime/virtual_keyboard_controller_observer.h"
 #include "venetium_w10m/browser/vw_engine.h"
 #include "venetium_w10m/common/vw_log.h"
 
@@ -36,7 +37,63 @@ int32_t KindOf(ui::TextInputType type) {
   }
 }
 
+// venetium_w10m_text_input_state's flag: the page wants the keyboard up.
+constexpr uint32_t kKeyboardWanted = 0x80;
+
 }  // namespace
+
+VwInputMethod::Keyboard::Keyboard(VwInputMethod* owner) : owner_(owner) {}
+
+VwInputMethod::Keyboard::~Keyboard() = default;
+
+void VwInputMethod::Keyboard::Changed(const gfx::Rect& keyboard_rect) {
+  const bool visible = !keyboard_rect.IsEmpty();
+  if (!visible && !visible_) {
+    return;
+  }
+  visible_ = visible;
+  if (visible) {
+    // VirtualKeyboardControllerWin insets the page by the keyboard's height,
+    // and the page scrolls the focused field above it.
+    for (auto& observer : observers_) {
+      observer.OnKeyboardVisible(keyboard_rect);
+    }
+    return;
+  }
+  // Gone (the Back key, or the user closed it): the next tap on the field
+  // must ask for it again.
+  owner_->wanted_ = false;
+  owner_->Publish();
+  for (auto& observer : observers_) {
+    observer.OnKeyboardHidden();
+  }
+}
+
+bool VwInputMethod::Keyboard::DisplayVirtualKeyboard() {
+  ++owner_->serial_;
+  owner_->wanted_ = true;
+  owner_->Publish();
+  return true;
+}
+
+void VwInputMethod::Keyboard::DismissVirtualKeyboard() {
+  owner_->wanted_ = false;
+  owner_->Publish();
+}
+
+void VwInputMethod::Keyboard::AddObserver(
+    ui::VirtualKeyboardControllerObserver* observer) {
+  observers_.AddObserver(observer);
+}
+
+void VwInputMethod::Keyboard::RemoveObserver(
+    ui::VirtualKeyboardControllerObserver* observer) {
+  observers_.RemoveObserver(observer);
+}
+
+bool VwInputMethod::Keyboard::IsKeyboardVisible() {
+  return visible_;
+}
 
 VwInputMethod::VwInputMethod(ui::ImeKeyEventDispatcher* dispatcher)
     : ui::InputMethodMinimal(dispatcher) {}
@@ -72,20 +129,20 @@ void VwInputMethod::SetComposition(const std::u16string& text) {
   client->SetCompositionText(composition);
 }
 
-void VwInputMethod::OnTextInputTypeChanged(ui::TextInputClient* client) {
-  ui::InputMethodMinimal::OnTextInputTypeChanged(client);
-  const ui::TextInputType type = GetTextInputType();
-  // Blink reports every focus move as a text input state change, so a type
-  // that stays "text" from one field to the next still arrives here; the
-  // shell is told it is a new field and raises the keyboard again.
-  Publish(type != ui::TEXT_INPUT_TYPE_NONE);
+void VwInputMethod::KeyboardChanged(const gfx::Rect& keyboard_rect) {
+  keyboard_.Changed(keyboard_rect);
 }
 
-void VwInputMethod::SetVirtualKeyboardVisibilityIfEnabled(bool should_show) {
-  ui::InputMethodMinimal::SetVirtualKeyboardVisibilityIfEnabled(should_show);
-  if (should_show) {
-    Publish(true);
+void VwInputMethod::OnTextInputTypeChanged(ui::TextInputClient* client) {
+  ui::InputMethodMinimal::OnTextInputTypeChanged(client);
+  if (GetTextInputType() == ui::TEXT_INPUT_TYPE_NONE) {
+    wanted_ = false;
   }
+  Publish();
+}
+
+ui::VirtualKeyboardController* VwInputMethod::GetVirtualKeyboardController() {
+  return &keyboard_;
 }
 
 bool VwInputMethod::OnUntranslatedIMEMessage(const CHROME_MSG event,
@@ -105,26 +162,24 @@ void VwInputMethod::OnDidChangeFocusedClient(
     ui::TextInputClient* focused_before,
     ui::TextInputClient* focused) {
   ui::InputMethodMinimal::OnDidChangeFocusedClient(focused_before, focused);
-  Publish(focused != nullptr);
+  if (!focused) {
+    wanted_ = false;
+  }
+  Publish();
 }
 
-void VwInputMethod::Publish(bool new_field) {
-  VwEngine* engine = VwEngine::Get();
-  if (!engine) {
-    return;
-  }
+void VwInputMethod::Publish() {
   const ui::TextInputType type = GetTextInputType();
   const int32_t kind = KindOf(type);
-  if (new_field && kind != 0) {
-    ++serial_;
-  }
   if (type != last_type_) {
     NoteF("ime: text input type %d (kind %d)", static_cast<int>(type), kind);
     last_type_ = type;
   }
+  VwEngine* engine = VwEngine::Get();
   engine->text_input_wanted.store(kind != 0 ? 1 : 0);
-  engine->text_input_state.store(((serial_ & 0xffffff) << 8) |
-                                 static_cast<uint32_t>(kind));
+  engine->text_input_state.store(
+      ((serial_ & 0xffffff) << 8) | (wanted_ && kind ? kKeyboardWanted : 0) |
+      static_cast<uint32_t>(kind));
 }
 
 }  // namespace venetium_w10m

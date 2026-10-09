@@ -4,6 +4,7 @@
 
 #include "components/keyed_service/content/browser_context_dependency_manager.h"
 #include "content/public/browser/browser_thread.h"
+#include "content/public/browser/download_manager.h"
 #include "content/public/browser/render_process_host.h"
 #include "content/public/browser/zoom_level_delegate.h"
 #include "venetium_w10m/browser/vw_download_delegate.h"
@@ -23,6 +24,13 @@ VwBrowserContext::VwBrowserContext(const base::FilePath& path,
 
 VwBrowserContext::~VwBrowserContext() {
   NotifyWillBeDestroyed();
+  // The DownloadManager outlives this destructor (BrowserContext's own
+  // destructor shuts it down), but its delegate does not: shut it down while
+  // the delegate is still here. Only if it exists -- asking for it would make
+  // one, and with it the storage partition being shut down below.
+  if (download_manager_created_) {
+    GetDownloadManager()->Shutdown();
+  }
   // Single process: the renderer runs on a thread of this process and is
   // shut down with the only browser context there is.
   if (content::RenderProcessHost::run_renderer_in_process()) {
@@ -48,6 +56,7 @@ bool VwBrowserContext::IsOffTheRecord() {
 
 content::DownloadManagerDelegate*
 VwBrowserContext::GetDownloadManagerDelegate() {
+  download_manager_created_ = true;
   return downloads_.get();
 }
 

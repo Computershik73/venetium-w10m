@@ -4,10 +4,14 @@
 
 #include <utility>
 
+#include "base/i18n/rtl.h"
 #include "base/strings/string_util.h"
 #include "content/public/browser/browser_context.h"
+#include "content/public/browser/client_certificate_delegate.h"
 #include "content/public/browser/web_contents.h"
 #include "net/proxy_resolution/proxy_config_with_annotation.h"
+#include "net/ssl/client_cert_identity.h"
+#include "net/ssl/ssl_private_key.h"
 #include "services/network/public/mojom/network_context.mojom.h"
 #include "third_party/blink/public/common/user_agent/user_agent_metadata.h"
 #include "third_party/blink/public/common/web_preferences/web_preferences.h"
@@ -31,6 +35,30 @@ base::FilePath ProfileDir() {
 
 }  // namespace
 
+std::string ApplicationLocale() {
+  // l10n_util only answers with a locale it has a locales/*.pak for, and the
+  // package carries none (the engine's strings are in venetium_engine.pak):
+  // the phone's own language, as headless does.
+  std::string locale = l10n_util::GetApplicationLocale(std::string());
+  if (locale.empty()) {
+    locale = base::i18n::GetConfiguredLocale();
+  }
+  return locale.empty() ? "en-US" : locale;
+}
+
+std::string AcceptLanguages() {
+  const std::string locale = ApplicationLocale();
+  std::string langs = locale;
+  const size_t dash = locale.find('-');
+  if (dash != std::string::npos) {
+    langs += "," + locale.substr(0, dash);
+  }
+  if (!base::StartsWith(locale, "en")) {
+    langs += ",en-US,en";
+  }
+  return langs;
+}
+
 VwContentBrowserClient::VwContentBrowserClient() = default;
 VwContentBrowserClient::~VwContentBrowserClient() = default;
 
@@ -50,21 +78,12 @@ blink::UserAgentMetadata VwContentBrowserClient::GetUserAgentMetadata() {
 }
 
 std::string VwContentBrowserClient::GetApplicationLocale() {
-  return l10n_util::GetApplicationLocale(std::string());
+  return ApplicationLocale();
 }
 
 std::string VwContentBrowserClient::GetAcceptLangs(
     content::BrowserContext* context) {
-  const std::string locale = GetApplicationLocale();
-  std::string langs = locale;
-  const size_t dash = locale.find('-');
-  if (dash != std::string::npos) {
-    langs += "," + locale.substr(0, dash);
-  }
-  if (!base::StartsWith(locale, "en")) {
-    langs += ",en-US,en";
-  }
-  return langs;
+  return AcceptLanguages();
 }
 
 void VwContentBrowserClient::OverrideWebPreferences(
@@ -114,6 +133,11 @@ void VwContentBrowserClient::ConfigureNetworkContextParams(
   // browser like a session that ended: session cookies are kept so a
   // relaunch is still signed in.
   params->persist_session_cookies = true;
+  params->restore_old_session_cookies = true;
+  // Cookies on disk unencrypted: there is no OSCrypt key store here, and
+  // without a cookie_encryption_provider an encrypting store is NOTREACHED.
+  // The profile is in the app's own container, which only it can read.
+  params->enable_encrypted_cookies = false;
   // No system proxy service: ProxyConfigServiceWin reads Internet Explorer's
   // settings through WinHTTP and registry watchers the phone does not have.
   params->initial_proxy_config =
@@ -221,7 +245,20 @@ bool VwContentBrowserClient::ShouldSandboxAudioService() {
 }
 
 bool VwContentBrowserClient::IsShuttingDown() {
-  return !VwEngine::Get()->browser_running();
+  return VwEngine::Get()->shutting_down();
+}
+
+base::OnceClosure VwContentBrowserClient::SelectClientCertificate(
+    content::BrowserContext* browser_context,
+    int process_id,
+    content::WebContents* web_contents,
+    net::SSLCertRequestInfo* cert_request_info,
+    net::ClientCertIdentityList client_certs,
+    std::unique_ptr<content::ClientCertificateDelegate> delegate) {
+  // No client certificates on the phone: go on without one, which a server
+  // asking for one optionally accepts.
+  delegate->ContinueWithCertificate(nullptr, nullptr);
+  return base::OnceClosure();
 }
 
 }  // namespace venetium_w10m

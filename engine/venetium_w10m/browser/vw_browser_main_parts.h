@@ -29,9 +29,17 @@ class VwBrowserMainParts : public content::BrowserMainParts {
       std::unique_ptr<base::RunLoop>& run_loop) override;
   void PostMainMessageLoopRun() override;
 
+  // venetium_w10m_quit, on the UI thread: the tabs go first (the in-process
+  // renderer is shut down right after the main loop, and no RenderFrameHost
+  // may outlive it), then the loop ends -- at once, or as soon as it runs
+  // if the quit came during startup.
+  void Quit();
+
  private:
   std::unique_ptr<VwBrowserContext> browser_context_;
   std::unique_ptr<VwBrowser> browser_;
+  base::OnceClosure quit_;
+  bool quit_requested_ = false;
 };
 
 // Ends the browser's main loop (venetium_w10m_quit). UI thread.

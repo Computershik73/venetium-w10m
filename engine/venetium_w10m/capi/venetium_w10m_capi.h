@@ -98,18 +98,22 @@ VW_EXPORT void venetium_w10m_set_dpi(int32_t dpi);
 // Device pixels per DIP changed (rotation to a display with another scale).
 VW_EXPORT void venetium_w10m_set_scale(double scale);
 // Bottom inset the on-screen keyboard covers, in device pixels (0: hidden).
+// The shell keeps the content area its full size while the keyboard is up;
+// the page is inset by this much and scrolls the focused field into view.
 VW_EXPORT void venetium_w10m_set_keyboard_inset(int32_t pixels);
 
 // ---- Input ------------------------------------------------------------------
-// One finger: state 0 down, 1 move, 2 up, 3 cancel. time_ms is the shell's
-// GetTickCount64 at the event, so moves that queue up keep their spacing.
+// One finger: state 0 down, 1 move, 2 up, 3 cancel. time_qpc is
+// QueryPerformanceCounter when the shell got the event (0: now), so moves
+// that queue up keep their spacing.
 VW_EXPORT void venetium_w10m_input_touch(int32_t pointer_id, int32_t state,
                                          int32_t x, int32_t y,
-                                         uint64_t time_ms);
+                                         int64_t time_qpc);
 // Mouse, as WM_* numbers: 0x200 move, 0x201 left down, 0x202 left up,
 // 0x204/0x205 right, 0x207/0x208 middle.
 VW_EXPORT void venetium_w10m_input_mouse(int32_t message, int32_t x, int32_t y);
-// Wheel or precision pan, in device pixels.
+// Wheel or precision pan, in device pixels, signed as the wheel messages are:
+// dy > 0 scrolls up (the wheel turned away from the user), dx > 0 right.
 VW_EXPORT void venetium_w10m_input_wheel(int32_t x, int32_t y, double dx,
                                          double dy);
 // A key with no text: Windows virtual-key code, down (1) or up (0), and the
@@ -124,9 +128,11 @@ VW_EXPORT void venetium_w10m_input_composition(const uint16_t* text,
 
 // Whether the focused element takes text (1) or not (0).
 VW_EXPORT int32_t venetium_w10m_text_input_wanted(void);
-// The focused field: low byte its kind (0 none, 1 text, 2 password, 3 search,
-// 4 email, 5 number, 6 telephone, 7 url, 8 textarea/contenteditable), the
-// upper 24 bits a serial that changes whenever focus moves to a new field.
+// The focused field: bits 0-6 its kind (0 none, 1 text, 2 password, 3 search,
+// 4 email, 5 number, 6 telephone, 7 url, 8 textarea/contenteditable); bit 7
+// set while the page wants the on-screen keyboard (the user tapped a field;
+// a page focusing one by itself does not ask); the upper 24 bits a serial
+// that changes on every such request, also for a field already focused.
 VW_EXPORT uint32_t venetium_w10m_text_input_state(void);
 
 // ---- Tabs and navigation ----------------------------------------------------

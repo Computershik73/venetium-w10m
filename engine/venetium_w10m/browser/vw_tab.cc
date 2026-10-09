@@ -18,7 +18,9 @@
 #include "third_party/blink/public/common/user_agent/user_agent_metadata.h"
 #include "third_party/blink/public/mojom/mediastream/media_stream.mojom.h"
 #include "ui/aura/window.h"
+#include "third_party/blink/public/common/renderer_preferences/renderer_preferences.h"
 #include "venetium_w10m/browser/vw_browser.h"
+#include "venetium_w10m/browser/vw_browser_client.h"
 #include "venetium_w10m/browser/vw_dialogs.h"
 #include "venetium_w10m/browser/vw_engine.h"
 #include "venetium_w10m/common/vw_log.h"
@@ -42,6 +44,9 @@ VwTab::VwTab(VwBrowser* browser,
   contents_->SetUserAgentOverride(
       blink::UserAgentOverride{DesktopUserAgent(), DesktopUserAgentMetadata()},
       /*override_in_new_tabs=*/false);
+  // navigator.languages, which the renderer takes from here.
+  contents_->GetMutableRendererPrefs()->accept_languages = AcceptLanguages();
+  contents_->SyncRendererPrefs();
 }
 
 VwTab::~VwTab() {
@@ -82,7 +87,26 @@ void VwTab::GoForward() {
 }
 
 void VwTab::Reload() {
-  contents_->GetController().Reload(content::ReloadType::NORMAL, true);
+  // No repost warning to show: a page reached by a form is posted again.
+  contents_->GetController().Reload(content::ReloadType::NORMAL,
+                                    /*check_for_repost=*/false);
+}
+
+void VwTab::SetDesktopMode(bool desktop, bool reload) {
+  content::NavigationController& controller = contents_->GetController();
+  content::NavigationEntry* entry = controller.GetLastCommittedEntry();
+  const bool changed = entry && !entry->IsInitialEntry() &&
+                       entry->GetIsOverridingUserAgent() != desktop;
+  if (entry) {
+    entry->SetIsOverridingUserAgent(desktop);
+  }
+  // The viewport and text-size settings (OverrideWebPreferences).
+  contents_->OnWebPreferencesChanged();
+  if (changed && reload) {
+    // From the URL first asked for, so that a mobile redirect (m.example.com)
+    // is undone, as Chrome's "Desktop site" does.
+    controller.LoadOriginalRequestURL();
+  }
 }
 
 void VwTab::Stop() {

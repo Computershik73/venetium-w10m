@@ -112,12 +112,16 @@ class VwPlatform {
   void SetScale(float scale);
   void SetDpi(int32_t dpi) { dpi_ = dpi; }
 
-  // Input in content pixels; time_ms is the shell's GetTickCount64.
+  // The shell's keyboard covers |pixels| at the bottom (0: hidden).
+  void SetKeyboardInset(int32_t pixels);
+
+  // Input in content pixels; time_qpc is QueryPerformanceCounter when the
+  // shell got the event (0: now).
   void Touch(int32_t pointer_id,
              int32_t state,
              int32_t x,
              int32_t y,
-             uint64_t time_ms);
+             int64_t time_qpc);
   void Mouse(int32_t message, int32_t x, int32_t y);
   void Wheel(int32_t x, int32_t y, double dx, double dy);
   void Key(int32_t vkey, bool down, uint32_t modifiers);
@@ -125,7 +129,7 @@ class VwPlatform {
   void Composition(const std::u16string& text);
 
  private:
-  base::TimeTicks EventTime(uint64_t time_ms);
+  base::TimeTicks EventTime(int64_t time_qpc);
   void Dispatch(ui::Event* event);
 
   std::unique_ptr<VwScreen> screen_;
@@ -145,6 +149,10 @@ class VwPlatform {
   // Last mouse button state, for the flags of moves.
   int mouse_flags_ = 0;
   uint32_t modifiers_ = 0;
+  // Wheel scrolling below a whole DIP, carried to the next event.
+  gfx::Vector2dF wheel_remainder_;
+  // Event times never go backwards.
+  base::TimeTicks last_event_time_;
 };
 
 }  // namespace venetium_w10m

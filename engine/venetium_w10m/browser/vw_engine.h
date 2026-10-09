@@ -63,7 +63,8 @@ class VwEngine {
 
   // Runs |task| on the browser UI thread with the browser, as soon as there
   // is one. Any thread. Tasks posted before the browser exists run in order
-  // when it starts; tasks that arrive after it is gone are dropped.
+  // when it starts; tasks that arrive after it is gone, or after the engine
+  // has ended, are dropped.
   using BrowserTask = base::OnceCallback<void(VwBrowser*)>;
   void PostToBrowser(BrowserTask task);
 
@@ -72,6 +73,14 @@ class VwEngine {
                       scoped_refptr<base::SingleThreadTaskRunner> ui);
   void BrowserStopping();
   bool browser_running() const { return running_.load(); }
+  // From the start of shutdown on (ContentBrowserClient::IsShuttingDown).
+  // Not "not running yet": during startup Chromium asks this before creating
+  // the network service, and a yes there leaves it never created.
+  bool shutting_down() const { return stopping_.load(); }
+
+  // Any thread: venetium_w10m_run has returned, whether the browser ever
+  // started or not.
+  void EngineExited();
 
   // Tab ids are handed out here so that venetium_w10m_tab_create can return
   // one at once, before the tab exists. Never reused within a run.
@@ -102,6 +111,9 @@ class VwEngine {
   scoped_refptr<base::SingleThreadTaskRunner> ui_;
   std::string search_template_ = "https://www.google.com/search?q=%s";
   std::atomic<bool> running_{false};
+  std::atomic<bool> stopping_{false};
+  // No more tasks are taken (the browser is going or the engine has ended).
+  bool stopped_ = false;  // under lock_
   std::atomic<int32_t> next_tab_id_{1};
 };
 

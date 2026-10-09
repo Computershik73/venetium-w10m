@@ -4,6 +4,8 @@
 
 #include <windows.h>
 
+#include <algorithm>
+#include <cmath>
 #include <tuple>
 #include <utility>
 
@@ -185,7 +187,7 @@ gfx::Rect VwWindowTreeHost::GetBoundsInPixels() const {
 }
 
 void VwWindowTreeHost::SetBoundsInPixels(const gfx::Rect& bounds) {
-  window()->SetBounds(gfx::Rect(bounds.size()));
+  // The root window's bounds are DIPs: OnHostResizedInPixels sizes it.
   if (bounds_ == bounds) {
     return;
   }
@@ -303,19 +305,35 @@ void VwPlatform::SetScale(float scale) {
   host_->RefreshScale();
 }
 
-base::TimeTicks VwPlatform::EventTime(uint64_t time_ms) {
-  const base::TimeTicks now = base::TimeTicks::Now();
-  if (!time_ms) {
-    return now;
+base::TimeTicks VwPlatform::EventTime(int64_t time_qpc) {
+  base::TimeTicks now = base::TimeTicks::Now();
+  if (time_qpc > 0) {
+    // The shell stamps an event with the performance counter when it gets
+    // it; it may reach us a frame or two later. Keeping the spacing keeps
+    // flings from reading a burst of queued moves as a very fast flick. The
+    // counter is only used for the event's age: TimeTicks may run on another
+    // clock (on ARM, base picks QPC or timeGetTime at random).
+    LARGE_INTEGER counter = {};
+    ::QueryPerformanceCounter(&counter);
+    if (counter.QuadPart >= time_qpc) {
+      now -= base::TimeDelta::FromQPCValue(counter.QuadPart - time_qpc);
+    }
   }
-  const uint64_t tick_now = ::GetTickCount64();
-  if (time_ms > tick_now) {
-    return now;
+  if (now < last_event_time_) {
+    now = last_event_time_;
   }
-  // The shell stamps an event with GetTickCount64 when the finger moves; it
-  // may reach us a frame or two later. Keeping the spacing keeps flings
-  // from reading a burst of queued moves as a very fast flick.
-  return now - base::Milliseconds(static_cast<int64_t>(tick_now - time_ms));
+  last_event_time_ = now;
+  return now;
+}
+
+void VwPlatform::SetKeyboardInset(int32_t pixels) {
+  const float scale = scale_ > 0 ? scale_ : 1.0f;
+  const gfx::Size area = root()->bounds().size();
+  const int height = std::min(
+      area.height(), static_cast<int>(std::lround(std::max(pixels, 0) / scale)));
+  input_method_->KeyboardChanged(
+      height > 0 ? gfx::Rect(0, area.height() - height, area.width(), height)
+                 : gfx::Rect());
 }
 
 void VwPlatform::Dispatch(ui::Event* event) {
@@ -326,7 +344,7 @@ void VwPlatform::Touch(int32_t pointer_id,
                        int32_t state,
                        int32_t x,
                        int32_t y,
-                       uint64_t time_ms) {
+                       int64_t time_qpc) {
   ui::EventType type;
   switch (state) {
     case 0:
@@ -373,7 +391,7 @@ void VwPlatform::Touch(int32_t pointer_id,
   ui::PointerDetails details(ui::EventPointerType::kTouch, id, radius, radius,
                              /*force=*/0.5f);
   const gfx::PointF location(x, y);
-  ui::TouchEvent event(type, location, location, EventTime(time_ms), details);
+  ui::TouchEvent event(type, location, location, EventTime(time_qpc), details);
   Dispatch(&event);
 
   if (type == ui::EventType::kTouchReleased ||
@@ -416,6 +434,14 @@ void VwPlatform::Mouse(int32_t message, int32_t x, int32_t y) {
       }
       break;
   }
+  if (type == ui::EventType::kMouseReleased && !(mouse_flags_ & changed)) {
+    // A release of a button that is not down: the shell's idea of which one
+    // it was differs, or the release is a stray one. Release what is down.
+    if (!mouse_flags_) {
+      return;
+    }
+    changed = mouse_flags_;
+  }
   if (type == ui::EventType::kMousePressed) {
     mouse_flags_ |= changed;
   }
@@ -433,14 +459,18 @@ void VwPlatform::Mouse(int32_t message, int32_t x, int32_t y) {
 }
 
 void VwPlatform::Wheel(int32_t x, int32_t y, double dx, double dy) {
-  // MouseWheelEvent offsets are pixels for Blink; the shell sends device
-  // pixels, the page scrolls in DIPs.
+  // The shell's deltas are the wheel's (WM_MOUSEWHEEL and WM_MOUSEHWHEEL):
+  // dy > 0 scrolls up, dx > 0 right, in device pixels. MouseWheelEvent
+  // offsets are DIPs with x > 0 meaning left.
   const float scale = scale_ > 0 ? scale_ : 1.0f;
-  const gfx::Vector2d offset(static_cast<int>(dx / scale),
-                             static_cast<int>(dy / scale));
+  wheel_remainder_ += gfx::Vector2dF(static_cast<float>(-dx / scale),
+                                     static_cast<float>(dy / scale));
+  const gfx::Vector2d offset(static_cast<int>(wheel_remainder_.x()),
+                             static_cast<int>(wheel_remainder_.y()));
   if (offset.IsZero()) {
     return;
   }
+  wheel_remainder_ -= gfx::Vector2dF(offset.x(), offset.y());
   const gfx::PointF location(x, y);
   ui::MouseWheelEvent event(offset, location, location, base::TimeTicks::Now(),
                             ModifierFlags(modifiers_), 0);

@@ -119,22 +119,24 @@ VW_EXPORT void venetium_w10m_set_scale(double scale) {
 }
 
 VW_EXPORT void venetium_w10m_set_keyboard_inset(int32_t pixels) {
-  // The shell shrinks the content area itself (venetium_w10m_resize); the
-  // inset is only noted, for the focused field to be scrolled into view.
-  venetium_w10m::NoteF("keyboard inset %d px", pixels);
+  Post(base::BindOnce(
+      [](int32_t pixels, VwBrowser* browser) {
+        browser->SetKeyboardInset(pixels);
+      },
+      pixels));
 }
 
 VW_EXPORT void venetium_w10m_input_touch(int32_t pointer_id,
                                          int32_t state,
                                          int32_t x,
                                          int32_t y,
-                                         uint64_t time_ms) {
+                                         int64_t time_qpc) {
   Post(base::BindOnce(
-      [](int32_t id, int32_t state, int32_t x, int32_t y, uint64_t time,
+      [](int32_t id, int32_t state, int32_t x, int32_t y, int64_t time,
          VwBrowser* browser) {
         browser->platform()->Touch(id, state, x, y, time);
       },
-      pointer_id, state, x, y, time_ms));
+      pointer_id, state, x, y, time_qpc));
 }
 
 VW_EXPORT void venetium_w10m_input_mouse(int32_t message, int32_t x, int32_t y) {

@@ -19,14 +19,18 @@ namespace venetium_w10m {
 
 namespace {
 
-// venetium_w10m_quit ends the main loop through this.
-base::OnceClosure* g_quit = nullptr;
+// venetium_w10m_quit reaches the main parts through this. UI thread.
+VwBrowserMainParts* g_parts = nullptr;
 
 }  // namespace
 
-VwBrowserMainParts::VwBrowserMainParts() = default;
+VwBrowserMainParts::VwBrowserMainParts() {
+  g_parts = this;
+}
 
-VwBrowserMainParts::~VwBrowserMainParts() = default;
+VwBrowserMainParts::~VwBrowserMainParts() {
+  g_parts = nullptr;
+}
 
 int VwBrowserMainParts::PreEarlyInitialization() {
   // Before viz's thread exists: every root surface gets the shell's output.
@@ -58,7 +62,10 @@ int VwBrowserMainParts::PreMainMessageLoopRun() {
 
 void VwBrowserMainParts::WillRunMainMessageLoop(
     std::unique_ptr<base::RunLoop>& run_loop) {
-  g_quit = new base::OnceClosure(run_loop->QuitWhenIdleClosure());
+  quit_ = run_loop->QuitWhenIdleClosure();
+  if (quit_requested_) {
+    std::move(quit_).Run();
+  }
 }
 
 void VwBrowserMainParts::PostMainMessageLoopRun() {
@@ -66,14 +73,25 @@ void VwBrowserMainParts::PostMainMessageLoopRun() {
   VwEngine::Get()->BrowserStopping();
   browser_.reset();
   browser_context_.reset();
-  delete g_quit;
-  g_quit = nullptr;
+}
+
+void VwBrowserMainParts::Quit() {
+  NoteF("browser: quitting");
+  // Queued and later shell requests are dropped from here on, so none makes
+  // a new tab.
+  VwEngine::Get()->BrowserStopping();
+  browser_.reset();
+  if (quit_) {
+    std::move(quit_).Run();
+  } else {
+    quit_requested_ = true;
+  }
 }
 
 void QuitBrowserMainLoop() {
   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
-  if (g_quit && *g_quit) {
-    std::move(*g_quit).Run();
+  if (g_parts) {
+    g_parts->Quit();
   }
 }
 

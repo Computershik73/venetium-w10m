@@ -88,17 +88,25 @@ struct App : ApplicationT<App, winrt::Windows::UI::Xaml::Markup::IXamlMetadataPr
     Show(url);
   }
 
-  void OnFileActivated(FileActivatedEventArgs const& args) {
+  // A file handed over by another app is reachable only through the
+  // brokered StorageFile; the engine opens files with Win32 calls, which see
+  // the app's own folders alone. So it is copied into TempState and the
+  // copy opened, as a file the page picks is.
+  void OnFileActivated(FileActivatedEventArgs const& args) { OpenFile(args); }
+
+  fire_and_forget OpenFile(FileActivatedEventArgs args) {
     std::wstring url;
     try {
       auto files = args.Files();
       if (files && files.Size() > 0) {
-        if (auto item = files.GetAt(0)) {
-          std::wstring path(item.Path());
-          for (auto& ch : path) {
-            if (ch == L'\\') ch = L'/';
-          }
-          url = L"file:///" + path;
+        if (auto file =
+                files.GetAt(0).try_as<winrt::Windows::Storage::StorageFile>()) {
+          auto copy = co_await file.CopyAsync(
+              winrt::Windows::Storage::ApplicationData::Current()
+                  .TemporaryFolder(),
+              file.Name(),
+              winrt::Windows::Storage::NameCollisionOption::GenerateUniqueName);
+          url = FileUrl(std::wstring(copy.Path()));
         }
       }
     } catch (winrt::hresult_error const& e) {
@@ -106,6 +114,22 @@ struct App : ApplicationT<App, winrt::Windows::UI::Xaml::Markup::IXamlMetadataPr
                          std::wstring(e.message()));
     }
     Show(url);
+  }
+
+  // file:///C:/... with what a URL cannot carry as is percent-encoded.
+  static std::wstring FileUrl(std::wstring const& path) {
+    std::wstring url = L"file:///";
+    for (wchar_t ch : path) {
+      switch (ch) {
+        case L'\\': url += L'/'; break;
+        case L'%': url += L"%25"; break;
+        case L'#': url += L"%23"; break;
+        case L'?': url += L"%3F"; break;
+        case L' ': url += L"%20"; break;
+        default: url += ch; break;
+      }
+    }
+    return url;
   }
 
   // The first activation starts the engine with |url| as its first page;

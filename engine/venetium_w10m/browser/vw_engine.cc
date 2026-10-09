@@ -70,6 +70,9 @@ venetium_w10m_events VwEngine::events() {
 
 void VwEngine::PostToBrowser(BrowserTask task) {
   base::AutoLock hold(lock_);
+  if (stopped_) {
+    return;
+  }
   if (!ui_) {
     pending_.push_back(std::move(task));
     return;
@@ -94,16 +97,31 @@ void VwEngine::BrowserStarted(VwBrowser* browser,
     pending.swap(pending_);
   }
   running_.store(true);
+  // Through RunTask: a queued quit ends the browser part way through these.
   for (auto& task : pending) {
-    std::move(task).Run(browser);
+    RunTask(std::move(task));
   }
 }
 
 void VwEngine::BrowserStopping() {
+  stopping_.store(true);
   running_.store(false);
   g_browser = nullptr;
+  std::vector<BrowserTask> dropped;
   base::AutoLock hold(lock_);
+  stopped_ = true;
   ui_ = nullptr;
+  dropped.swap(pending_);
+}
+
+void VwEngine::EngineExited() {
+  stopping_.store(true);
+  running_.store(false);
+  std::vector<BrowserTask> dropped;
+  base::AutoLock hold(lock_);
+  stopped_ = true;
+  ui_ = nullptr;
+  dropped.swap(pending_);
 }
 
 void VwEngine::SetSearchTemplate(std::string url_template) {

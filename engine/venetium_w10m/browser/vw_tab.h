@@ -46,6 +46,9 @@ class VwTab : public content::WebContentsDelegate,
   void GoBack();
   void GoForward();
   void Reload();
+  // Applies the desktop-site switch to the page shown and, with |reload|,
+  // loads it again with the new user agent if that changed it.
+  void SetDesktopMode(bool desktop, bool reload);
   void Stop();
   bool CanGoBack();
 

@@ -79,6 +79,8 @@ struct Events {
                      bool save)>
       fileChooser;
   std::function<void(std::wstring text)> clipboardSet;
+  // venetium_w10m_run returned: the engine has ended, for good.
+  std::function<void(int32_t code)> engineStopped;
 };
 
 struct StartParams {
@@ -110,6 +112,9 @@ class EngineHost {
   // Starts the engine on a thread of its own. Returns at once.
   bool Start(const StartParams& params);
   bool started() const { return started_; }
+
+  // Engine thread: venetium_w10m_run returned |code|.
+  void OnRunReturned(int32_t code);
 
  private:
   EngineHost() = default;

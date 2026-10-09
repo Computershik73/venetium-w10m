@@ -14,6 +14,10 @@ namespace venetium_w10m {
 
 class VwBrowserMainParts;
 
+// The locale the engine runs in, and the Accept-Language list made from it.
+std::string ApplicationLocale();
+std::string AcceptLanguages();
+
 class VwContentBrowserClient : public content::ContentBrowserClient {
  public:
   VwContentBrowserClient();
@@ -65,6 +69,13 @@ class VwContentBrowserClient : public content::ContentBrowserClient {
   bool ShouldSandboxNetworkService() override;
   bool ShouldSandboxAudioService() override;
   bool IsShuttingDown() override;
+  base::OnceClosure SelectClientCertificate(
+      content::BrowserContext* browser_context,
+      int process_id,
+      content::WebContents* web_contents,
+      net::SSLCertRequestInfo* cert_request_info,
+      net::ClientCertIdentityList client_certs,
+      std::unique_ptr<content::ClientCertificateDelegate> delegate) override;
 
  private:
   raw_ptr<VwBrowserMainParts> main_parts_ = nullptr;

@@ -66,6 +66,8 @@ class VwBrowser {
 
   void Resize(const gfx::Size& content_pixels);
   void SetDesktopMode(bool desktop);
+  // The shell's keyboard covers |pixels| at the bottom (0: hidden).
+  void SetKeyboardInset(int32_t pixels);
   void AppStateChanged(bool suspended);
   void MemoryPressure(int32_t level);
 

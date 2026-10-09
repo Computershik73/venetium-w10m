@@ -230,13 +230,13 @@ void MainPage::BuildUi() {
     splashText_.TextAlignment(TextAlignment::Center);
     splashText_.Margin(ThicknessHelper::FromLengths(24, 12, 24, 0));
     stack.Children().Append(splashText_);
-    ProgressRing ring;
-    ring.IsActive(true);
-    ring.Width(32);
-    ring.Height(32);
-    ring.Foreground(Brush(Accent()));
-    ring.Margin(ThicknessHelper::FromLengths(0, 24, 0, 0));
-    stack.Children().Append(ring);
+    splashRing_ = ProgressRing();
+    splashRing_.IsActive(true);
+    splashRing_.Width(32);
+    splashRing_.Height(32);
+    splashRing_.Foreground(Brush(Accent()));
+    splashRing_.Margin(ThicknessHelper::FromLengths(0, 24, 0, 0));
+    stack.Children().Append(splashRing_);
     splash_.Children().Append(stack);
   }
   content_.Children().Append(splash_);
@@ -393,7 +393,6 @@ void MainPage::BuildMenu() {
     const bool desktop = desktopItem_.IsChecked();
     Settings::SetDesktopMode(desktop);
     if (Api().set_desktop_mode) Api().set_desktop_mode(desktop ? 1 : 0);
-    if (Api().tab_reload) Api().tab_reload(selected_);
   });
   menu_.Items().Append(desktopItem_);
 
@@ -427,8 +426,12 @@ void MainPage::BuildMenu() {
     if (!tab || tab->url.empty()) return;
     DataPackage package;
     package.SetText(hstring(tab->url));
-    Clipboard::SetContent(package);
-    ShowNotice(L"Link copied");
+    try {
+      Clipboard::SetContent(package);
+      ShowNotice(L"Link copied");
+    } catch (winrt::hresult_error const& e) {
+      Log::Write(L"clipboard: set failed", std::wstring(e.message()));
+    }
   });
   item(L"Log", [this]() { ShowLog(); });
   item(L"Copy logs to Pictures", [this]() {
@@ -505,8 +508,13 @@ void MainPage::WireEngineEvents() {
   events.clipboardSet = [](std::wstring text) {
     DataPackage package;
     package.SetText(hstring(text));
-    Clipboard::SetContent(package);
+    try {
+      Clipboard::SetContent(package);
+    } catch (winrt::hresult_error const& e) {
+      Log::Write(L"clipboard: set failed", std::wstring(e.message()));
+    }
   };
+  events.engineStopped = [this](int32_t code) { OnEngineStopped(code); };
   EngineHost::Get().SetEvents(std::move(events));
 }
 
@@ -525,22 +533,10 @@ void MainPage::Start(std::wstring initialUrl) {
     Api().set_desktop_mode(Settings::DesktopMode() ? 1 : 0);
   }
 
-  // The whole display in raw pixels, and its density.
+  ReportScreen();
   try {
-    auto info = DisplayInformation::GetForCurrentView();
-    int32_t sw = 0, sh = 0;
-    if (ApiInformation::IsPropertyPresent(
-            L"Windows.Graphics.Display.DisplayInformation",
-            L"ScreenWidthInRawPixels")) {
-      sw = static_cast<int32_t>(info.ScreenWidthInRawPixels());
-      sh = static_cast<int32_t>(info.ScreenHeightInRawPixels());
-    } else {
-      auto bounds = CoreWindow::GetForCurrentThread().Bounds();
-      sw = static_cast<int32_t>(bounds.Width * rawPerView_);
-      sh = static_cast<int32_t>(bounds.Height * rawPerView_);
-    }
-    if (Api().set_screen) Api().set_screen(sw, sh);
-    if (Api().set_dpi) Api().set_dpi(static_cast<int32_t>(info.RawDpiX()));
+    DisplayInformation::GetForCurrentView().OrientationChanged(
+        [this](auto&&, auto&&) { ReportScreen(); });
   } catch (winrt::hresult_error const&) {
   }
 
@@ -567,6 +563,27 @@ void MainPage::Start(std::wstring initialUrl) {
     Log::Write(L"page: first frame on screen");
   });
   engineView_->Start();
+
+  try {
+    MemoryManager::AppMemoryUsageIncreased([](auto&&, auto&&) {
+      if (!Api().memory_pressure) return;
+      const auto level = MemoryManager::AppMemoryUsageLevel();
+      if (level == AppMemoryUsageLevel::OverLimit) {
+        Api().memory_pressure(2);
+      } else if (level == AppMemoryUsageLevel::High) {
+        Api().memory_pressure(1);
+      }
+    });
+    MemoryManager::AppMemoryUsageLimitChanging(
+        [](auto&&, AppMemoryUsageLimitChangingEventArgs const& args) {
+          if (Api().memory_pressure &&
+              MemoryManager::AppMemoryUsage() >= args.NewLimit()) {
+            Api().memory_pressure(2);
+          }
+        });
+  } catch (winrt::hresult_error const& e) {
+    Log::Write(L"memory: no usage events", std::wstring(e.message()));
+  }
 
   // The phone's clipboard, for a paste in a page: an app may read it only
   // while in front, so when it comes there and when it changes meanwhile.
@@ -791,6 +808,41 @@ void MainPage::ShowNotice(std::wstring const& text) {
   notice_.Visibility(Visibility::Visible);
   noticeTimer_.Stop();
   noticeTimer_.Start();
+}
+
+// The whole display in raw pixels, the way it is turned now (the panel's
+// own size is the portrait one), and its density.
+void MainPage::ReportScreen() {
+  try {
+    auto info = DisplayInformation::GetForCurrentView();
+    int32_t sw = 0, sh = 0;
+    if (ApiInformation::IsPropertyPresent(
+            L"Windows.Graphics.Display.DisplayInformation",
+            L"ScreenWidthInRawPixels")) {
+      sw = static_cast<int32_t>(info.ScreenWidthInRawPixels());
+      sh = static_cast<int32_t>(info.ScreenHeightInRawPixels());
+      const auto orientation = info.CurrentOrientation();
+      const bool landscape =
+          orientation == DisplayOrientations::Landscape ||
+          orientation == DisplayOrientations::LandscapeFlipped;
+      if (landscape != (sw > sh)) std::swap(sw, sh);
+    } else {
+      auto bounds = CoreWindow::GetForCurrentThread().Bounds();
+      sw = static_cast<int32_t>(bounds.Width * rawPerView_);
+      sh = static_cast<int32_t>(bounds.Height * rawPerView_);
+    }
+    if (Api().set_screen) Api().set_screen(sw, sh);
+    if (Api().set_dpi) Api().set_dpi(static_cast<int32_t>(info.RawDpiX()));
+  } catch (winrt::hresult_error const&) {
+  }
+}
+
+void MainPage::OnEngineStopped(int32_t code) {
+  engineView_->Stop();
+  splashRing_.IsActive(false);
+  splashText_.Text(L"The engine stopped (code " + std::to_wstring(code) +
+                   L").\nMenu \u2192 Log says why.");
+  splash_.Visibility(Visibility::Visible);
 }
 
 void MainPage::SendPhoneClipboard() {
