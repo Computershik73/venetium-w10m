@@ -38,6 +38,12 @@ struct EngineConfig {
   bool jit = false;
   std::string switches;
   std::string initial_url;
+  // Frames go to the shell's SwapChainPanel through Direct3D 11 (otherwise
+  // through frame_copy), with this many buffers.
+  bool hardware_present = false;
+  int present_buffers = 2;
+  // A file that exists while a hardware run has not shown a frame yet.
+  base::FilePath present_guard;
 };
 
 class VwEngine {
@@ -81,6 +87,10 @@ class VwEngine {
   // Any thread: venetium_w10m_run has returned, whether the browser ever
   // started or not.
   void EngineExited();
+
+  // Viz thread: the first hardware-presented frame is on screen; the crash
+  // guard is cleared.
+  void HardwarePresentWorked();
 
   // Tab ids are handed out here so that venetium_w10m_tab_create can return
   // one at once, before the tab exists. Never reused within a run.

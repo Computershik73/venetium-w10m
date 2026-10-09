@@ -63,6 +63,8 @@ shared_library("venetium_engine") {
     "browser/vw_frame_sink.h",
     "browser/vw_input_method.cc",
     "browser/vw_input_method.h",
+    "browser/vw_panel.cc",
+    "browser/vw_panel.h",
     "browser/vw_permission_manager.cc",
     "browser/vw_permission_manager.h",
     "browser/vw_platform.cc",
@@ -126,6 +128,10 @@ shared_library("venetium_engine") {
 
   # A DLL in a UWP package: the shell loads it with LoadPackagedLibrary.
   ldflags = [ "/APPCONTAINER" ]
+  libs = [
+    "d3d11.lib",
+    "dxgi.lib",
+  ]
 
   # Every system DLL that is not needed to load is delay-loaded: a phone's OS
   # is a subset of the desktop's, and a DLL the loader cannot find stops the

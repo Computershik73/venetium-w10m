@@ -29,6 +29,11 @@ class Settings {
   static bool Jit();
   static void SetJit(bool jit);
 
+  // Frames shown by the GPU (a Direct3D swap chain in a SwapChainPanel)
+  // rather than copied into a bitmap. Read at start.
+  static bool HardwareGraphics();
+  static void SetHardwareGraphics(bool on);
+
   // Extra Chromium switches, for diagnosing on a device.
   static std::wstring EngineSwitches();
 };

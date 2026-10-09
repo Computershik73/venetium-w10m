@@ -9,6 +9,10 @@
 
 #include <windows.h>
 
+#include <d3d11.h>
+#include <dxgi.h>
+#include <wrl/client.h>
+
 #include <string>
 #include <vector>
 
@@ -50,6 +54,110 @@ HINSTANCE ThisModule() {
   return module;
 }
 
+// The GPU, for the log and for choosing how frames reach the screen: its
+// Direct3D 11 feature level (Windows 10 Mobile phones stop at 9_3 or reach
+// 11_x) and its adapter. Returns the level, or 0 without a device.
+unsigned ProbeD3D11() {
+  using Microsoft::WRL::ComPtr;
+  static const D3D_FEATURE_LEVEL kLevels[] = {
+      D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_1,
+      D3D_FEATURE_LEVEL_10_0, D3D_FEATURE_LEVEL_9_3};
+  ComPtr<ID3D11Device> device;
+  D3D_FEATURE_LEVEL level = {};
+  HRESULT hr = ::D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
+                                   D3D11_CREATE_DEVICE_BGRA_SUPPORT, kLevels,
+                                   std::size(kLevels), D3D11_SDK_VERSION,
+                                   &device, &level, nullptr);
+  if (hr == E_INVALIDARG) {
+    hr = ::D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
+                             D3D11_CREATE_DEVICE_BGRA_SUPPORT, kLevels + 1,
+                             std::size(kLevels) - 1, D3D11_SDK_VERSION,
+                             &device, &level, nullptr);
+  }
+  if (FAILED(hr)) {
+    NoteF("gpu: no Direct3D 11 device, 0x%08lx", static_cast<unsigned long>(hr));
+    return 0;
+  }
+  DXGI_ADAPTER_DESC desc = {};
+  ComPtr<IDXGIDevice> dxgi_device;
+  ComPtr<IDXGIAdapter> adapter;
+  if (SUCCEEDED(device.As(&dxgi_device)) &&
+      SUCCEEDED(dxgi_device->GetAdapter(&adapter))) {
+    adapter->GetDesc(&desc);
+  }
+  NoteF("gpu: Direct3D 11 feature level 0x%x, %ls (vendor 0x%04x, device "
+        "0x%04x, %u MB dedicated, %u MB shared)",
+        static_cast<unsigned>(level), desc.Description,
+        static_cast<unsigned>(desc.VendorId),
+        static_cast<unsigned>(desc.DeviceId),
+        static_cast<unsigned>(desc.DedicatedVideoMemory >> 20),
+        static_cast<unsigned>(desc.SharedSystemMemory >> 20));
+  return static_cast<unsigned>(level);
+}
+
+bool HasSwitch(const std::string& switches, const char* name) {
+  return switches.find(name) != std::string::npos;
+}
+
+// How frames reach the screen: through the shell's SwapChainPanel by
+// Direct3D 11 unless the shell asked for the bitmap, there is no GPU, or
+// two runs in a row died before their first such frame (a driver that
+// cannot do it would otherwise end every launch).
+void ChoosePresentation(EngineConfig* config, uint64_t ram_mb) {
+  const unsigned level = ProbeD3D11();
+  config->present_guard = config->profile_dir.Append(L"present-guard");
+  if (HasSwitch(config->switches, "--vw-present=bitmap")) {
+    Note("gpu: frames through the bitmap (the shell asked for it)");
+    return;
+  }
+  if (!level) {
+    Note("gpu: frames through the bitmap (no Direct3D 11)");
+    return;
+  }
+  int deaths = 0;
+  const std::wstring guard = config->present_guard.value();
+  HANDLE file = ::CreateFileW(guard.c_str(), GENERIC_READ, FILE_SHARE_READ,
+                              nullptr, OPEN_EXISTING, 0, nullptr);
+  if (file != INVALID_HANDLE_VALUE) {
+    char count = 0;
+    DWORD got = 0;
+    if (::ReadFile(file, &count, 1, &got, nullptr) && got == 1) {
+      deaths = count - '0';
+    }
+    ::CloseHandle(file);
+  }
+  if (deaths >= 2) {
+    Note("gpu: frames through the bitmap: the last two hardware runs ended "
+         "before their first frame (delete present-guard to try again)");
+    return;
+  }
+  file = ::CreateFileW(guard.c_str(), GENERIC_WRITE, 0, nullptr,
+                       CREATE_ALWAYS, 0, nullptr);
+  if (file != INVALID_HANDLE_VALUE) {
+    const char count = static_cast<char>('0' + deaths + 1);
+    DWORD written = 0;
+    ::WriteFile(file, &count, 1, &written, nullptr);
+    ::CloseHandle(file);
+  }
+  config->hardware_present = true;
+  // A frame that takes a little more than a refresh costs two with two
+  // buffers (gecko-w10m); a third is 14 MB at this size, which phones with
+  // little memory do without.
+  config->present_buffers = ram_mb > 1536 ? 3 : 2;
+  if (HasSwitch(config->switches, "--vw-present-buffers=2")) {
+    config->present_buffers = 2;
+  } else if (HasSwitch(config->switches, "--vw-present-buffers=3")) {
+    config->present_buffers = 3;
+  }
+  NoteF("gpu: frames through Direct3D 11 into the panel when it is there, "
+        "%d buffers", config->present_buffers);
+}
+
+uint64_t PhysicalMemoryMb() {
+  MEMORYSTATUSEX status = {sizeof(status)};
+  return ::GlobalMemoryStatusEx(&status) ? status.ullTotalPhys >> 20 : 0;
+}
+
 void SetUpCommandLine(const EngineConfig& config) {
   // On Windows this reads GetCommandLineW: the shell's exe and nothing else.
   base::CommandLine::Init(0, nullptr);
@@ -72,6 +180,11 @@ void SetUpCommandLine(const EngineConfig& config) {
   // coin between it and timeGetTime's milliseconds, which animations and
   // frame timing feel.
   command_line->AppendSwitchASCII(switches::kForceHighResTimeTicks, "enabled");
+  // Blink gives every desktop at least 512 MB of tiles, software compositing
+  // included: far more than a 32-bit app on a phone has address space for.
+  const uint64_t ram_mb = PhysicalMemoryMb();
+  command_line->AppendSwitchASCII(blink::switches::kForceGpuMemAvailableMb,
+                                  ram_mb && ram_mb <= 1536 ? "64" : "128");
   // RenderWidgetHostViewAura's child HWND for accessibility and legacy
   // input: no HWNDs here.
   command_line->AppendSwitch(switches::kDisableLegacyIntermediateWindow);
@@ -176,6 +289,8 @@ extern "C" VW_EXPORT int32_t venetium_w10m_run(
     engine_config.cache_dir =
         engine_config.profile_dir.Append(FILE_PATH_LITERAL("Cache"));
   }
+
+  ChoosePresentation(&engine_config, PhysicalMemoryMb());
 
   VwEngine* engine = VwEngine::Get();
   engine->Configure(engine_config);

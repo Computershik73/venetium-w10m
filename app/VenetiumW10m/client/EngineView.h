@@ -29,6 +29,10 @@ class EngineView {
   // What goes in the page's content row: the picture and, under it, the
   // keyboard's text sink.
   winrt::Windows::UI::Xaml::FrameworkElement Root() const { return root_; }
+  // Where the engine presents when it can (venetium_w10m_set_panel).
+  winrt::Windows::UI::Xaml::Controls::SwapChainPanel Panel() const {
+    return panel_;
+  }
 
   // Starts copying frames and reporting the room. Call once the engine has
   // been asked to start.
@@ -72,7 +76,12 @@ class EngineView {
   static void PostToUi(std::function<void()> work);
 
   winrt::Windows::UI::Xaml::Controls::Grid root_{nullptr};
+  winrt::Windows::UI::Xaml::Controls::SwapChainPanel panel_{nullptr};
   winrt::Windows::UI::Xaml::Controls::Image image_{nullptr};
+  // Over everything: takes every pointer, whichever picture is shown.
+  winrt::Windows::UI::Xaml::Controls::Border input_{nullptr};
+  // venetium_w10m_presenting's last answer.
+  int32_t presenting_ = 0;
   winrt::Windows::UI::Xaml::Controls::TextBox sink_{nullptr};
   winrt::Windows::UI::Xaml::Media::Imaging::WriteableBitmap bitmap_{nullptr};
   winrt::event_token tick_{};

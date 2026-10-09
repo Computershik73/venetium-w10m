@@ -58,6 +58,9 @@ struct Api {
   decltype(&venetium_w10m_permission_reply) permission_reply = nullptr;
   decltype(&venetium_w10m_file_reply) file_reply = nullptr;
   decltype(&venetium_w10m_clipboard_phone_text) clipboard_phone_text = nullptr;
+  decltype(&venetium_w10m_set_panel) set_panel = nullptr;
+  decltype(&venetium_w10m_presenting) presenting = nullptr;
+  decltype(&venetium_w10m_presented_frames) presented_frames = nullptr;
 };
 
 // What the page wants to hear about. Every handler runs on the XAML thread.

@@ -200,7 +200,7 @@ void MainPage::BuildUi() {
   progress_.MinHeight(2);
   progress_.Foreground(Brush(Accent()));
   progress_.Background(Brush(ChromeBg()));
-  progress_.Visibility(Visibility::Collapsed);
+  progress_.Opacity(0);
   Grid::SetRow(progress_, 1);
   root_.Children().Append(progress_);
 
@@ -437,6 +437,13 @@ void MainPage::BuildMenu() {
       Log::Write(L"clipboard: set failed", std::wstring(e.message()));
     }
   });
+  ToggleMenuFlyoutItem hardware;
+  hardware.Text(L"Hardware graphics (restart)");
+  hardware.IsChecked(Settings::HardwareGraphics());
+  hardware.Click([hardware](auto&&, auto&&) {
+    Settings::SetHardwareGraphics(hardware.IsChecked());
+  });
+  menu_.Items().Append(hardware);
   item(L"Log", [this]() { ShowLog(); });
   item(L"Copy logs to Pictures", [this]() {
     std::thread([]() { Log::Mirror(); }).detach();
@@ -554,6 +561,9 @@ void MainPage::Start(std::wstring initialUrl) {
   params.scale = rawPerView_;
   params.jit = Settings::Jit();
   params.switches = Narrow(Settings::EngineSwitches());
+  if (!Settings::HardwareGraphics()) params.switches += " --vw-present=bitmap";
+  // The panel the engine presents into, before it starts.
+  if (Api().set_panel) Api().set_panel(winrt::get_abi(engineView_->Panel()));
   params.initialUrl =
       Narrow(initialUrl.empty() ? Settings::HomePage() : initialUrl);
   ::CreateDirectoryW(params.profileDir.c_str(), nullptr);
@@ -645,7 +655,7 @@ void MainPage::RefreshChrome() {
   }
   const bool loading = tab && tab->loading;
   reloadIcon_.Glyph(loading ? L"\uE711" : L"\uE72C");  // Cancel : Refresh
-  progress_.Visibility(loading ? Visibility::Visible : Visibility::Collapsed);
+  progress_.Opacity(loading ? 1.0 : 0.0);
   progress_.Value(tab ? tab->progress : 0);
   if (forwardItem_) forwardItem_.IsEnabled(tab && tab->canForward);
 }
@@ -737,7 +747,8 @@ void MainPage::ApplyVisibleBounds() {
 void MainPage::SetFullscreen(bool on) {
   fullscreen_ = on;
   chrome_.Visibility(on ? Visibility::Collapsed : Visibility::Visible);
-  progress_.Visibility(Visibility::Collapsed);
+  progress_.Visibility(on ? Visibility::Collapsed : Visibility::Visible);
+  progress_.Opacity(0);
   auto view = ApplicationView::GetForCurrentView();
   try {
     if (on) {

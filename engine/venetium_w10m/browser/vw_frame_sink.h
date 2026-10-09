@@ -40,6 +40,9 @@ class FrameBuffer {
   // Frames published so far.
   uint64_t serial();
 
+  // Drops the pixels; the next frame is published whole.
+  void Reset();
+
  private:
   friend class base::NoDestructor<FrameBuffer>;
   FrameBuffer() = default;

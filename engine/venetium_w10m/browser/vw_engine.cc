@@ -2,11 +2,14 @@
 
 #include "venetium_w10m/browser/vw_engine.h"
 
+#include <windows.h>
+
 #include <utility>
 
 #include "base/functional/bind.h"
 #include "base/location.h"
 #include "venetium_w10m/browser/vw_browser.h"
+#include "venetium_w10m/common/vw_log.h"
 
 namespace venetium_w10m {
 
@@ -122,6 +125,18 @@ void VwEngine::EngineExited() {
   stopped_ = true;
   ui_ = nullptr;
   dropped.swap(pending_);
+}
+
+void VwEngine::HardwarePresentWorked() {
+  base::FilePath guard;
+  {
+    base::AutoLock hold(lock_);
+    guard = config_.present_guard;
+  }
+  if (!guard.empty()) {
+    ::DeleteFileW(guard.value().c_str());
+  }
+  Note("d3d11: first frame presented; the crash guard is cleared");
 }
 
 void VwEngine::SetSearchTemplate(std::string url_template) {

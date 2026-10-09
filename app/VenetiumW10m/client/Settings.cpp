@@ -87,6 +87,14 @@ void Settings::SetJit(bool jit) {
   WriteInt(L"jit", jit ? 1 : 0);
 }
 
+bool Settings::HardwareGraphics() {
+  return ReadInt(L"hardware_graphics", 1) != 0;
+}
+
+void Settings::SetHardwareGraphics(bool on) {
+  WriteInt(L"hardware_graphics", on ? 1 : 0);
+}
+
 std::wstring Settings::EngineSwitches() {
   return ReadString(L"engine_switches", L"");
 }

@@ -58,46 +58,60 @@ EngineView::EngineView(double rawPerView) : rawPerView_(rawPerView) {
   WireKeyboard();
   root_.Children().Append(sink_);
 
+  // The engine's own swap chain when it presents, the bitmap otherwise.
+  panel_ = SwapChainPanel();
+  panel_.HorizontalAlignment(HorizontalAlignment::Stretch);
+  panel_.VerticalAlignment(VerticalAlignment::Stretch);
+  root_.Children().Append(panel_);
+
   image_ = Image();
   image_.Stretch(Stretch::Fill);
   image_.HorizontalAlignment(HorizontalAlignment::Stretch);
   image_.VerticalAlignment(VerticalAlignment::Stretch);
-  // Every finger goes to the engine; XAML is not to pan or zoom anything.
-  image_.ManipulationMode(ManipulationModes::None);
+  image_.IsHitTestVisible(false);
   root_.Children().Append(image_);
 
-  image_.PointerPressed([this](IInspectable const&,
+  // A transparent background makes it a hit target.
+  input_ = Border();
+  input_.Background(SolidColorBrush(winrt::Windows::UI::Colors::Transparent()));
+  input_.HorizontalAlignment(HorizontalAlignment::Stretch);
+  input_.VerticalAlignment(VerticalAlignment::Stretch);
+  // Every finger goes to the engine; XAML is not to pan or zoom anything.
+  input_.ManipulationMode(ManipulationModes::None);
+  root_.Children().Append(input_);
+
+  input_.PointerPressed([this](IInspectable const&,
                                PointerRoutedEventArgs const& args) {
-    image_.CapturePointer(args.Pointer());
+    input_.CapturePointer(args.Pointer());
     OnPointer(args, 0);
     args.Handled(true);
   });
-  image_.PointerMoved([this](IInspectable const&,
+  input_.PointerMoved([this](IInspectable const&,
                              PointerRoutedEventArgs const& args) {
     OnPointer(args, 1);
     args.Handled(true);
   });
-  image_.PointerReleased([this](IInspectable const&,
+  input_.PointerReleased([this](IInspectable const&,
                                 PointerRoutedEventArgs const& args) {
     OnPointer(args, 2);
-    image_.ReleasePointerCapture(args.Pointer());
+    input_.ReleasePointerCapture(args.Pointer());
     args.Handled(true);
   });
-  image_.PointerCanceled([this](IInspectable const&,
+  input_.PointerCanceled([this](IInspectable const&,
                                 PointerRoutedEventArgs const& args) {
     OnPointer(args, 3);
     args.Handled(true);
   });
   // Also after an ordinary release (ReleasePointerCapture): by then the
   // finger or button is already up and this sends nothing.
-  image_.PointerCaptureLost([this](IInspectable const&,
+  input_.PointerCaptureLost([this](IInspectable const&,
                                    PointerRoutedEventArgs const& args) {
     OnPointer(args, 3);
   });
-  image_.PointerWheelChanged([this](IInspectable const&,
+  input_.PointerWheelChanged([this](IInspectable const&,
                                     PointerRoutedEventArgs const& args) {
     int32_t x = 0, y = 0;
-    auto point = args.GetCurrentPoint(image_);
+    auto point = args.GetCurrentPoint(input_);
     if (Api().input_wheel && ToFrame(point.Position(), &x, &y)) {
       const int32_t delta = point.Properties().MouseWheelDelta();
       const bool horizontal = point.Properties().IsHorizontalMouseWheel();
@@ -185,6 +199,33 @@ void EngineView::Tick() {
     });
   }
 
+  // The engine presenting into the panel itself: nothing to copy, and the
+  // bitmap goes (its memory with it). Back to the bitmap if it stops.
+  const int32_t presenting = Api().presenting ? Api().presenting() : 0;
+  if (presenting != presenting_) {
+    presenting_ = presenting;
+    Log::Write(L"view: presenting " + std::to_wstring(presenting));
+    if (presenting) {
+      image_.Visibility(Visibility::Collapsed);
+      image_.Source(nullptr);
+      bitmap_ = nullptr;
+      width_ = height_ = 0;
+      seen_ = 0;
+    } else {
+      image_.Visibility(Visibility::Visible);
+    }
+  }
+  if (presenting) {
+    if (firstFrame_ && Api().presented_frames &&
+        Api().presented_frames() > 0) {
+      auto handler = std::move(firstFrame_);
+      firstFrame_ = nullptr;
+      Log::Write(L"view: first frame (presented)");
+      handler();
+    }
+    return;
+  }
+
   int32_t width = width_;
   int32_t height = height_;
   uint64_t serial = seen_;
@@ -222,13 +263,13 @@ bool EngineView::ToFrame(Point const& point, int32_t* x, int32_t* y) const {
   // pixels, so a view point is a frame point times the scale. A point a
   // finger slides past the edge to is clamped, not dropped: the gesture is
   // still going on.
-  const int32_t w = width_ > 0 ? width_ : roomWidth_;
-  const int32_t h = height_ > 0 ? height_ : roomHeight_;
+  const int32_t w = roomWidth_ > 0 ? roomWidth_ : width_;
+  const int32_t h = roomHeight_ > 0 ? roomHeight_ : height_;
   if (w <= 0 || h <= 0) return false;
-  const double sx = image_.ActualWidth() > 0 ? w / image_.ActualWidth()
+  const double sx = root_.ActualWidth() > 0 ? w / root_.ActualWidth()
+                                            : rawPerView_;
+  const double sy = root_.ActualHeight() > 0 ? h / root_.ActualHeight()
                                              : rawPerView_;
-  const double sy = image_.ActualHeight() > 0 ? h / image_.ActualHeight()
-                                              : rawPerView_;
   *x = static_cast<int32_t>(std::clamp(point.X * sx, 0.0, double(w - 1)));
   *y = static_cast<int32_t>(std::clamp(point.Y * sy, 0.0, double(h - 1)));
   return true;
@@ -264,7 +305,7 @@ void EngineView::OnMouse(PointerPoint const& point, int32_t state, int32_t x,
 
 void EngineView::OnPointer(PointerRoutedEventArgs const& args, int32_t state) {
   auto pointer = args.Pointer();
-  auto point = args.GetCurrentPoint(image_);
+  auto point = args.GetCurrentPoint(input_);
   int32_t x = 0, y = 0;
   if (!ToFrame(point.Position(), &x, &y)) return;
   const uint32_t id = pointer.PointerId();
@@ -286,7 +327,7 @@ void EngineView::OnPointer(PointerRoutedEventArgs const& args, int32_t state) {
   if (state == 1) {
     // Moves the system coalesced into this one, each with its own time.
     try {
-      auto points = args.GetIntermediatePoints(image_);  // newest first
+      auto points = args.GetIntermediatePoints(input_);  // newest first
       for (uint32_t i = points.Size(); i-- > 0;) {
         auto earlier = points.GetAt(i);
         if (earlier.Timestamp() >= current) continue;

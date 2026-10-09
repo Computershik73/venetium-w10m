@@ -128,6 +128,9 @@ bool EngineHost::Load(winrt::Windows::UI::Core::CoreDispatcher const& dispatcher
   VW_RESOLVE(permission_reply);
   VW_RESOLVE(file_reply);
   VW_RESOLVE(clipboard_phone_text);
+  VW_RESOLVE(set_panel);
+  VW_RESOLVE(presenting);
+  VW_RESOLVE(presented_frames);
 #undef VW_RESOLVE
   if (!api_.run || !api_.frame_copy) {
     Log::Write(L"engine: the DLL has no venetium_w10m_run/frame_copy");

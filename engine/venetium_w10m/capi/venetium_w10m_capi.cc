@@ -7,6 +7,8 @@
 
 #include "venetium_w10m/capi/venetium_w10m_capi.h"
 
+#include <inspectable.h>
+
 #include <string>
 #include <utility>
 
@@ -15,6 +17,7 @@
 #include "venetium_w10m/browser/vw_browser_main_parts.h"
 #include "venetium_w10m/browser/vw_engine.h"
 #include "venetium_w10m/browser/vw_frame_sink.h"
+#include "venetium_w10m/browser/vw_panel.h"
 #include "venetium_w10m/browser/vw_platform.h"
 #include "venetium_w10m/browser/vw_tab.h"
 #include "venetium_w10m/common/vw_log.h"
@@ -116,6 +119,19 @@ VW_EXPORT void venetium_w10m_set_scale(double scale) {
         browser->platform()->SetScale(static_cast<float>(scale));
       },
       scale));
+}
+
+VW_EXPORT void venetium_w10m_set_panel(void* swap_chain_panel) {
+  venetium_w10m::PanelHost::Get()->SetPanel(
+      static_cast<IInspectable*>(swap_chain_panel));
+}
+
+VW_EXPORT int32_t venetium_w10m_presenting(void) {
+  return static_cast<int32_t>(venetium_w10m::PanelHost::Get()->presenting());
+}
+
+VW_EXPORT uint64_t venetium_w10m_presented_frames(void) {
+  return venetium_w10m::PanelHost::Get()->presented_frames();
 }
 
 VW_EXPORT void venetium_w10m_set_keyboard_inset(int32_t pixels) {

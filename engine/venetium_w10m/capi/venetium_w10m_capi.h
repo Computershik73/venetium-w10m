@@ -97,6 +97,17 @@ VW_EXPORT void venetium_w10m_set_screen(int32_t width, int32_t height);
 VW_EXPORT void venetium_w10m_set_dpi(int32_t dpi);
 // Device pixels per DIP changed (rotation to a display with another scale).
 VW_EXPORT void venetium_w10m_set_scale(double scale);
+// The shell's XAML SwapChainPanel (an IInspectable*), from the UI thread
+// before venetium_w10m_run: the engine presents into it when it can. Kept
+// for the whole run.
+VW_EXPORT void venetium_w10m_set_panel(void* swap_chain_panel);
+// How frames reach the screen: 0 through frame_copy (the shell shows them),
+// 1 software frames presented by Direct3D 11 into the panel, 2 ANGLE, 3 the
+// Direct3D 11 compositor. Any thread; may change during the run.
+VW_EXPORT int32_t venetium_w10m_presenting(void);
+// Frames presented into the panel so far.
+VW_EXPORT uint64_t venetium_w10m_presented_frames(void);
+
 // Bottom inset the on-screen keyboard covers, in device pixels (0: hidden).
 // The shell keeps the content area its full size while the keyboard is up;
 // the page is inset by this much and scrolls the focused field into view.
