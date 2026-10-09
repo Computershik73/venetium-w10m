@@ -1,0 +1,162 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Fri, 9 Oct 2026 11:40:36 +0400
+Subject: [PATCH] Windows 10 Mobile: no screen DC, no kernel32 file, no classic
+ STA
+
+What an app container on the phone lacks, and where Chromium would
+otherwise crash at startup or on the first tab:
+- GetDC(NULL) fails: ScopedGetDC no longer dies on it; the system DPI
+  defaults to 96 (the embedder's display::Screen has the real scale);
+  the system fonts are Segoe UI, 12 DIPs, without GDI or
+  SystemParametersInfo.
+- 1607 has neither kernel32.dll nor version.dll: OSInfo's kernel32
+  version falls back to RtlGetVersion.
+- CoInitializeEx(STA) needs a hidden window: COM STA worker threads
+  stay in the MTA instead of hitting NOTREACHED.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../pooled_single_thread_task_runner_manager.cc   | 13 +++++++++++++
+ base/win/scoped_hdc.h                             |  4 ++++
+ base/win/windows_version.cc                       | 15 +++++++++++++++
+ ui/display/win/dpi.cc                             |  7 +++++++
+ ui/gfx/system_fonts_win.cc                        | 15 +++++++++++++++
+ 5 files changed, 54 insertions(+)
+
+diff --git a/base/task/thread_pool/pooled_single_thread_task_runner_manager.cc b/base/task/thread_pool/pooled_single_thread_task_runner_manager.cc
+index 89aa8ca96f06b02823fd111e15548105447a64e5..78eea26c3a8192d3454e06979bf4bb5b455b3c91 100644
+--- a/base/task/thread_pool/pooled_single_thread_task_runner_manager.cc
++++ b/base/task/thread_pool/pooled_single_thread_task_runner_manager.cc
+@@ -14,6 +14,7 @@
+ #include "base/debug/leak_annotations.h"
+ #include "base/functional/bind.h"
+ #include "base/functional/callback.h"
++#include "base/logging.h"
+ #include "base/memory/ptr_util.h"
+ #include "base/memory/raw_ptr.h"
+ #include "base/message_loop/message_pump.h"
+@@ -334,9 +335,21 @@ class WorkerThreadCOMDelegate : public WorkerThreadDelegate {
+       // other failures will leak out. Collect the failure codes in an effort to
+       // understand whether or not these failures are actionable; see
+       // https://crbug.com/40074523.
++#if defined(VENETIUM_W10M)
++      // Windows 10 Mobile: a classic single-threaded apartment needs a
++      // hidden window, which an app container cannot make. The thread stays
++      // in the multithreaded apartment; COM work posted to it (network cost,
++      // session notifications) then fails or runs free-threaded.
++      LOG(ERROR) << "COM STA worker: CoInitializeEx failed, hr=0x" << std::hex
++                 << scoped_com_initializer_->hr() << "; continuing in the MTA";
++      scoped_com_initializer_ = std::make_unique<win::ScopedCOMInitializer>(
++          win::ScopedCOMInitializer::kMTA);
++      return;
++#else
+       SCOPED_CRASH_KEY_NUMBER("WorkerThreadCOMDelegate", "hr",
+                               scoped_com_initializer_->hr());
+       NOTREACHED();
++#endif
+     }
+   }
+ 
+diff --git a/base/win/scoped_hdc.h b/base/win/scoped_hdc.h
+index 60e432133cf22390276932a14d182c03e3a54406..db8ebd4d760becfdbc288497cf178fb5c2674363 100644
+--- a/base/win/scoped_hdc.h
++++ b/base/win/scoped_hdc.h
+@@ -26,9 +26,13 @@ class ScopedGetDC {
+       // If GetDC(NULL) returns NULL, something really bad has happened, like
+       // GDI handle exhaustion.  In this case Chrome is going to behave badly no
+       // matter what, so we may as well just force a crash now.
++#if !defined(VENETIUM_W10M)
++      // (Not on Windows 10 Mobile: an app container there has no screen DC
++      // at all. GDI calls on the null DC fail, and their callers cope.)
+       if (!hdc_) {
+         base::debug::CollectGDIUsageAndDie();
+       }
++#endif
+     }
+   }
+ 
+diff --git a/base/win/windows_version.cc b/base/win/windows_version.cc
+index 5f4858260acbbd872d5724ade4b1a88ff280657f..bdbd9d9b488b4a3523e93b9c01b8358b4dfc33fd 100644
+--- a/base/win/windows_version.cc
++++ b/base/win/windows_version.cc
+@@ -9,6 +9,7 @@
+ #include <memory>
+ #include <tuple>
+ #include <utility>
++#include <vector>
+ 
+ #include "base/check_op.h"
+ #include "base/debug/crash_logging.h"
+@@ -293,6 +294,20 @@ base::Version OSInfo::Kernel32BaseVersion() {
+       file_version_info = FileVersionInfoWin::CreateFileVersionInfoWin(
+           FilePath(FILE_PATH_LITERAL("kernelbase.dll")));
+     }
++#if defined(VENETIUM_W10M)
++    // Windows 10 Mobile 1607 has no kernel32.dll and no version.dll to read
++    // version resources with; the kernel's own version number stands in.
++    if (!file_version_info) {
++      using RtlGetVersionFn = LONG(WINAPI*)(OSVERSIONINFOW*);
++      OSVERSIONINFOW info = {sizeof(info)};
++      auto rtl_get_version = reinterpret_cast<RtlGetVersionFn>(
++          ::GetProcAddress(::GetModuleHandleW(L"ntdll.dll"), "RtlGetVersion"));
++      if (rtl_get_version && rtl_get_version(&info) == 0) {
++        return base::Version(std::vector<uint32_t>{
++            info.dwMajorVersion, info.dwMinorVersion, info.dwBuildNumber, 0});
++      }
++    }
++#endif
+     CHECK(file_version_info);
+     return file_version_info->GetFileVersion();
+   }());
+diff --git a/ui/display/win/dpi.cc b/ui/display/win/dpi.cc
+index c2b61f77d9aa045577efb45dfa99b5d8210fcf88..b860c32e36aef0e501baecba5615d203807b06e2 100644
+--- a/ui/display/win/dpi.cc
++++ b/ui/display/win/dpi.cc
+@@ -55,6 +55,13 @@ int GetDefaultSystemDPI() {
+     // to all screens.
+     dpi_x = ::GetDeviceCaps(screen_dc, LOGPIXELSX);
+     dpi_y = ::GetDeviceCaps(screen_dc, LOGPIXELSY);
++#if defined(VENETIUM_W10M)
++    // No screen DC in an app container on Windows 10 Mobile: the embedder's
++    // display::Screen says the real scale.
++    if (dpi_x <= 0) {
++      dpi_x = dpi_y = static_cast<int>(kDefaultDPI);
++    }
++#endif
+     DCHECK_EQ(dpi_x, dpi_y);
+   }
+   return dpi_x;
+diff --git a/ui/gfx/system_fonts_win.cc b/ui/gfx/system_fonts_win.cc
+index a808da2ec2dea17db7fcdf3c34f1493ad4308f87..0038d600544df3de311d20ef7f88cb50e489193c 100644
+--- a/ui/gfx/system_fonts_win.cc
++++ b/ui/gfx/system_fonts_win.cc
+@@ -144,6 +144,20 @@ class SystemFonts {
+   void Initialize() {
+     TRACE_EVENT0("fonts", "gfx::SystemFonts::Initialize");
+ 
++#if defined(VENETIUM_W10M)
++    // Windows 10 Mobile: an app container has neither the non-client metrics
++    // nor a screen DC to map LOGFONTs with. The phone's UI font is Segoe UI;
++    // Windows' default message font is Segoe UI 9pt, 12 DIPs.
++    for (SystemFont font : {SystemFont::kCaption, SystemFont::kSmallCaption,
++                            SystemFont::kMenu, SystemFont::kMessage,
++                            SystemFont::kStatus}) {
++      system_fonts_.emplace(
++          font, Font(PlatformFont::CreateFromNameAndSize("Segoe UI", 12)));
++    }
++    is_initialized_ = true;
++    return;
++#else
++
+     NONCLIENTMETRICS metrics = {};
+     metrics.cbSize = sizeof(metrics);
+     const bool success = !!SystemParametersInfo(SPI_GETNONCLIENTMETRICS,
+@@ -198,6 +212,7 @@ class SystemFonts {
+     AddFont(SystemFont::kStatus, font_adjustment, &metrics.lfStatusFont);
+ 
+     is_initialized_ = true;
++#endif  // defined(VENETIUM_W10M)
+   }
+ 
+   static bool IsInitialized() { return is_initialized_; }

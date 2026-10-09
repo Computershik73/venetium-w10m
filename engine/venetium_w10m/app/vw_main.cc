@@ -64,6 +64,10 @@ void SetUpCommandLine(const EngineConfig& config) {
   // frames to the shell's bitmap (vw_frame_sink).
   command_line->AppendSwitch(switches::kDisableGpu);
   command_line->AppendSwitch(switches::kDisableGpuCompositing);
+  // Without it --disable-gpu still falls back to WebGL on Direct3D's WARP
+  // rasterizer through ANGLE, which loads libGLESv2 and asks for a screen
+  // DC; with it the GPU thread only composites, and GL stays off.
+  command_line->AppendSwitch(switches::kDisableSoftwareRasterizer);
   // RenderWidgetHostViewAura's child HWND for accessibility and legacy
   // input: no HWNDs here.
   command_line->AppendSwitch(switches::kDisableLegacyIntermediateWindow);

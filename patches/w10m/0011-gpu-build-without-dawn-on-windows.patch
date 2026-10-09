@@ -1,0 +1,68 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Fri, 9 Oct 2026 11:23:11 +0400
+Subject: [PATCH] GPU: build without Dawn on Windows
+
+use_dawn = false: Windows ARM32 phones have Direct3D 11 at feature
+level 9_3 at best, no D3D12, nothing Dawn could run on. Two places in
+the GPU service assumed Skia's Dawn backend is always there on Windows.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../shared_image/d3d_image_backing_factory.cc        |  2 ++
+ gpu/ipc/service/gpu_init.cc                          | 12 +++++++++---
+ 2 files changed, 11 insertions(+), 3 deletions(-)
+
+diff --git a/gpu/command_buffer/service/shared_image/d3d_image_backing_factory.cc b/gpu/command_buffer/service/shared_image/d3d_image_backing_factory.cc
+index 75e9e235135ce148e180be222aa0fd7a016a8917..1c650b088052f3610f83462757d362a18410c558 100644
+--- a/gpu/command_buffer/service/shared_image/d3d_image_backing_factory.cc
++++ b/gpu/command_buffer/service/shared_image/d3d_image_backing_factory.cc
+@@ -467,6 +467,7 @@ bool D3DImageBackingFactory::IsD3DSharedImageSupported(
+ bool D3DImageBackingFactory::IsSwapChainSupported(
+     const GpuPreferences& gpu_preferences,
+     DawnContextProvider* dawn_context_provider /*=nullptr*/) {
++#if BUILDFLAG(SKIA_USE_DAWN)
+   if (gpu_preferences.gr_context_type == GrContextType::kGraphiteDawn) {
+     // This is only supported if graphite and ANGLE share the same D3D11 device.
+     CHECK(dawn_context_provider);
+@@ -476,6 +477,7 @@ bool D3DImageBackingFactory::IsSwapChainSupported(
+       return false;
+     }
+   }
++#endif
+ 
+   return gl::DirectCompositionSupported() &&
+          gl::DXGISwapChainTearingSupported();
+diff --git a/gpu/ipc/service/gpu_init.cc b/gpu/ipc/service/gpu_init.cc
+index 801118b399f5b9d3afe3423351d2ece470c36a2f..a556afa8571333e07d8357fabdecd588cc8fa4e1 100644
+--- a/gpu/ipc/service/gpu_init.cc
++++ b/gpu/ipc/service/gpu_init.cc
+@@ -698,8 +698,11 @@ bool GpuInit::InitializeAndStartSandbox(base::CommandLine* command_line,
+       //   SwiftShader via --skia-graphite-dawn-backend=swiftshader.
+       if (features::IsSwiftShaderAllowed(command_line) ||
+           gpu_preferences_.use_webgpu_adapter ==
+-              WebGPUAdapterName::kSwiftShader ||
+-          DawnContextProvider::DefaultForceFallbackAdapter()) {
++              WebGPUAdapterName::kSwiftShader
++#if BUILDFLAG(SKIA_USE_DAWN)
++          || DawnContextProvider::DefaultForceFallbackAdapter()
++#endif
++      ) {
+         TRACE_EVENT("gpu,startup", "Load vk_swiftshader.dll");
+         base::LoadNativeLibrary(module_path.Append(L"vk_swiftshader.dll"),
+                                 nullptr);
+@@ -970,10 +973,13 @@ bool GpuInit::InitializeAndStartSandbox(base::CommandLine* command_line,
+   {
+     Microsoft::WRL::ComPtr<ID3D11Device> d3d11_device;
+     Microsoft::WRL::ComPtr<ID3D12CommandQueue> d3d12_command_queue;
++#if BUILDFLAG(SKIA_USE_DAWN)
+     if (dawn_context_provider_) {
+       d3d11_device = dawn_context_provider_->GetD3D11Device();
+       d3d12_command_queue = dawn_context_provider_->GetD3D12CommandQueue();
+-    } else {
++    } else
++#endif
++    {
+       d3d11_device = gl::QueryD3D11DeviceObjectFromANGLE();
+     }
+     gl::InitializeDirectComposition(std::move(d3d11_device),

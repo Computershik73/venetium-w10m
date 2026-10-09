@@ -10,8 +10,13 @@
 //
 // This hook turns that call into a failing call instead: the DLL and function
 // are written to the log (once each), and the caller gets a stub that returns
-// a failure value -- 0 (FALSE, NULL, no handle) for the Win32 family,
-// E_NOTIMPL for the COM-style libraries whose functions return an HRESULT.
+// that function's failure value. Which value depends on what the function
+// returns, decided by its name and then by its DLL's family:
+//   E_NOTIMPL                   COM-style functions (an HRESULT)
+//   ERROR_CALL_NOT_IMPLEMENTED  functions returning a Win32 error code, where
+//                               0 would mean success -- the registry, ETW,
+//                               iphlpapi, DNS, configuration manager, SSPI
+//   0                           the rest: FALSE, NULL, no handle, no count
 // Most such calls are on paths a phone never needs (the event log, printing,
 // smart cards); the log says which ones were not.
 
@@ -39,17 +44,134 @@ HRESULT WINAPI ReturnNotImplemented() {
   return E_NOTIMPL;
 }
 
-bool ReturnsHresult(const char* dll) {
-  static const char* const kHresultDlls[] = {
-      "d3d", "dxgi", "dcomp", "dxva2", "mf", "dwrite", "propsys",
-      "uiautomationcore", "ole32", "oleaut32", "combase", "shcore",
-  };
-  for (const char* prefix : kHresultDlls) {
-    if (_strnicmp(dll, prefix, strlen(prefix)) == 0) {
-      return true;
+LONG WINAPI ReturnCallNotImplemented() {
+  return ERROR_CALL_NOT_IMPLEMENTED;
+}
+
+enum class Failure { kZero, kHresult, kErrorCode };
+
+bool HasPrefix(const char* text, const char* prefix) {
+  return _strnicmp(text, prefix, strlen(prefix)) == 0;
+}
+
+// By function name, first match wins. Prefixes, so the A/W and Ex variants
+// are covered too.
+struct Rule {
+  const char* prefix;
+  Failure failure;
+};
+constexpr Rule kNameRules[] = {
+    // In the COM libraries, but not returning an HRESULT.
+    {"CoTaskMem", Failure::kZero},
+    {"CoGetCurrentProcess", Failure::kZero},
+    {"CoUninitialize", Failure::kZero},
+    {"OleUninitialize", Failure::kZero},
+    {"StringFromGUID2", Failure::kZero},
+    {"Sys", Failure::kZero},  // SysAllocString, SysStringLen, ...
+    {"VariantInit", Failure::kZero},
+    {"SafeArrayGetDim", Failure::kZero},
+    {"SafeArrayGetElemsize", Failure::kZero},
+    {"OpenThemeData", Failure::kZero},
+    {"GetWindowTheme", Failure::kZero},
+    {"IsThemeActive", Failure::kZero},
+    {"IsAppThemed", Failure::kZero},
+    {"IsThemePartDefined", Failure::kZero},
+    {"GetThemeSysColor", Failure::kZero},
+    {"GetThemeSysSize", Failure::kZero},
+    // In shell32 and shlwapi, returning an HRESULT.
+    {"SHGetKnownFolder", Failure::kHresult},
+    {"SHGetFolderPath", Failure::kHresult},
+    {"SHCreateItem", Failure::kHresult},
+    {"SHCreateShellItemArray", Failure::kHresult},
+    {"SHCreateStreamOnFile", Failure::kHresult},
+    {"SHGetPropertyStoreForWindow", Failure::kHresult},
+    {"SHOpenFolderAndSelectItems", Failure::kHresult},
+    {"SHParseDisplayName", Failure::kHresult},
+    {"SHGetDesktopFolder", Failure::kHresult},
+    {"SHGetIDListFromObject", Failure::kHresult},
+    {"SHGetStockIconInfo", Failure::kHresult},
+    {"SHQueryUserNotificationState", Failure::kHresult},
+    {"SHLoadIndirectString", Failure::kHresult},
+    {"SHStrDup", Failure::kHresult},
+    {"SHAutoComplete", Failure::kHresult},
+    {"SetCurrentProcessExplicitAppUserModelID", Failure::kHresult},
+    {"GetCurrentProcessExplicitAppUserModelID", Failure::kHresult},
+    {"UrlCreateFromPath", Failure::kHresult},
+    {"PathCreateFromUrl", Failure::kHresult},
+    {"UrlEscape", Failure::kHresult},
+    {"UrlUnescape", Failure::kHresult},
+    {"UrlCanonicalize", Failure::kHresult},
+    {"UrlCombine", Failure::kHresult},
+    {"AssocQueryString", Failure::kHresult},
+    {"HashData", Failure::kHresult},
+    {"IUnknown_", Failure::kHresult},
+    // The registry and ETW (advapi32, shlwapi): there 0 is ERROR_SUCCESS.
+    {"RegisterEventSource", Failure::kZero},  // a HANDLE; before "Reg"
+    {"RegisterServiceCtrlHandler", Failure::kZero},
+    {"RegisterTraceGuids", Failure::kErrorCode},
+    {"Reg", Failure::kErrorCode},
+    {"SHReg", Failure::kErrorCode},
+    {"SHGetValue", Failure::kErrorCode},
+    {"SHSetValue", Failure::kErrorCode},
+    {"SHDeleteKey", Failure::kErrorCode},
+    {"SHDeleteValue", Failure::kErrorCode},
+    {"SHQueryValue", Failure::kErrorCode},
+    {"SHQueryInfoKey", Failure::kErrorCode},
+    {"SHEnumKey", Failure::kErrorCode},
+    {"SHEnumValue", Failure::kErrorCode},
+    {"SHCopyKey", Failure::kErrorCode},
+    {"Event", Failure::kErrorCode},  // EventRegister, EventWrite, ...
+    {"StartTrace", Failure::kErrorCode},
+    {"ControlTrace", Failure::kErrorCode},
+    {"EnableTrace", Failure::kErrorCode},
+    {"EnumerateTraceGuids", Failure::kErrorCode},
+    {"GetNamedSecurityInfo", Failure::kErrorCode},
+    {"SetNamedSecurityInfo", Failure::kErrorCode},
+    {"GetSecurityInfo", Failure::kErrorCode},
+    {"SetSecurityInfo", Failure::kErrorCode},
+    {"SetEntriesInAcl", Failure::kErrorCode},
+    {"WNet", Failure::kErrorCode},
+    // In the error-code libraries, but not returning one.
+    {"if_nametoindex", Failure::kZero},
+    {"if_indextoname", Failure::kZero},
+    {"FreeMibTable", Failure::kZero},
+    {"DnsFree", Failure::kZero},
+    {"DnsRecordListFree", Failure::kZero},
+};
+
+// By DLL, for the names no rule above matches.
+constexpr Rule kDllRules[] = {
+    {"d3d", Failure::kHresult},          {"dxgi", Failure::kHresult},
+    {"dcomp", Failure::kHresult},        {"dxva2", Failure::kHresult},
+    {"dwmapi", Failure::kHresult},       {"mf", Failure::kHresult},
+    {"dwrite", Failure::kHresult},       {"propsys", Failure::kHresult},
+    {"uiautomationcore", Failure::kHresult},
+    {"ole32", Failure::kHresult},        {"oleaut32", Failure::kHresult},
+    {"oleacc", Failure::kHresult},       {"combase", Failure::kHresult},
+    {"shcore", Failure::kHresult},       {"uxtheme", Failure::kHresult},
+    {"urlmon", Failure::kHresult},       {"wer", Failure::kHresult},
+    {"iphlpapi", Failure::kErrorCode},   {"dnsapi", Failure::kErrorCode},
+    {"cfgmgr32", Failure::kErrorCode},   {"pdh", Failure::kErrorCode},
+    {"secur32", Failure::kErrorCode},    {"ncrypt", Failure::kErrorCode},
+    {"powrprof", Failure::kErrorCode},   {"dhcpcsvc", Failure::kErrorCode},
+    {"msi", Failure::kErrorCode},        {"rpcrt4", Failure::kErrorCode},
+    {"netapi32", Failure::kErrorCode},   {"rstrtmgr", Failure::kErrorCode},
+};
+
+Failure FailureFor(const char* dll, const char* name) {
+  if (name) {
+    for (const Rule& rule : kNameRules) {
+      if (HasPrefix(name, rule.prefix)) {
+        return rule.failure;
+      }
     }
   }
-  return false;
+  for (const Rule& rule : kDllRules) {
+    if (HasPrefix(dll, rule.prefix)) {
+      return rule.failure;
+    }
+  }
+  return Failure::kZero;
 }
 
 FARPROC WINAPI OnDelayLoadFailure(unsigned reason, PDelayLoadInfo info) {
@@ -69,8 +191,15 @@ FARPROC WINAPI OnDelayLoadFailure(unsigned reason, PDelayLoadInfo info) {
       venetium_w10m::NoteF("delay-load: %s!#%u is not on this phone, stubbed",
                            dll, static_cast<unsigned>(info->dlp.dwOrdinal));
     }
-    return ReturnsHresult(dll) ? reinterpret_cast<FARPROC>(&ReturnNotImplemented)
-                               : reinterpret_cast<FARPROC>(&ReturnZero);
+    switch (FailureFor(dll, info->dlp.fImportByName ? info->dlp.szProcName
+                                                    : nullptr)) {
+      case Failure::kHresult:
+        return reinterpret_cast<FARPROC>(&ReturnNotImplemented);
+      case Failure::kErrorCode:
+        return reinterpret_cast<FARPROC>(&ReturnCallNotImplemented);
+      case Failure::kZero:
+        return reinterpret_cast<FARPROC>(&ReturnZero);
+    }
   }
   return nullptr;
 }
