@@ -1,0 +1,34 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Fri, 9 Oct 2026 23:28:52 +0400
+Subject: [PATCH] Windows 10 Mobile: SyncSocket pipes in the LOCAL namespace
+
+A UWP app may create named pipes only under the LOCAL folder of the pipe
+namespace; base::SyncSocket::CreatePair hit CHECK(handle_a.is_valid())
+when a page started audio (opening a video).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ base/sync_socket_win.cc | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/base/sync_socket_win.cc b/base/sync_socket_win.cc
+index 77bc8e15b180532b4d20cd33275155bd9d41a7d9..93d78531907937bd84f2f6d69dd8185038e6b69c 100644
+--- a/base/sync_socket_win.cc
++++ b/base/sync_socket_win.cc
+@@ -26,7 +26,15 @@ namespace {
+ // IMPORTANT: do not change how this name is generated because it will break
+ // in sandboxed scenarios as we might have by-name policies that allow pipe
+ // creation. Also keep the secure random number generation.
++#if defined(VENETIUM_W10M)
++// Windows 10 Mobile: a UWP app may create pipes only in the pipe namespace's
++// LOCAL folder (CreateNamedPipe fails otherwise), and this pair never leaves
++// the process.
++const wchar_t kPipeNameFormat[] =
++    L"\\\\.\\pipe\\LOCAL\\chrome.sync.%u.%u.%lu";
++#else
+ const wchar_t kPipeNameFormat[] = L"\\\\.\\pipe\\chrome.sync.%u.%u.%lu";
++#endif
+ const size_t kPipePathMax = std::size(kPipeNameFormat) + (3 * 10) + 1;
+ 
+ // To avoid users sending negative message lengths to Send/Receive
