@@ -1,0 +1,6 @@
+# Build output of tools/build-appx.sh
+app/VenetiumW10m/AppPackages/
+# Signing keys stay off the repository (tools/build-appx.sh: VW_PFX)
+*.pfx
+__pycache__/
+*.pyc

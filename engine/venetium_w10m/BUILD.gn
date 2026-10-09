@@ -1,0 +1,170 @@
+# Copyright 2026 The Venetium-W10M Authors. GPL-3.0 (see LICENSE).
+#
+# The Venetium engine for Windows 10 Mobile: Chromium's content layer as one
+# DLL with a flat C interface (capi/venetium_w10m_capi.h), loaded by the UWP
+# shell. Single process, no HWND; see docs/PORTING-W10M.md.
+#
+# This directory is venetium-w10m/engine/venetium_w10m, linked (or copied)
+# into the Chromium tree as //venetium_w10m. tools/gen.sh roots the build
+# here (--root-target), so only the engine and what it needs is in the graph.
+
+import("//build/config/win/w10m.gni")
+import("//tools/grit/repack.gni")
+import("//tools/v8_context_snapshot/v8_context_snapshot.gni")
+
+assert(is_win && current_cpu == "arm" && is_w10m,
+       "//venetium_w10m is the Windows 10 Mobile engine: target_cpu = \"arm\"" +
+           " and is_w10m = true (args/w10m.gn)")
+
+# Everything the package needs from this build.
+group("venetium_w10m") {
+  deps = [
+    ":venetium_engine",
+    ":venetium_engine_pak",
+  ]
+}
+
+# A toolchain check: base, V8 and the content layer, nothing of ours.
+group("probe") {
+  deps = [
+    "//base",
+    "//content/public/browser",
+    "//v8",
+  ]
+}
+
+shared_library("venetium_engine") {
+  output_name = "venetium_engine"
+  defines = [ "VENETIUM_W10M_ENGINE_IMPLEMENTATION" ]
+
+  sources = [
+    "app/vw_content_client.cc",
+    "app/vw_content_client.h",
+    "app/vw_main.cc",
+    "app/vw_main_delegate.cc",
+    "app/vw_main_delegate.h",
+    "browser/vw_browser.cc",
+    "browser/vw_browser.h",
+    "browser/vw_browser_client.cc",
+    "browser/vw_browser_client.h",
+    "browser/vw_browser_context.cc",
+    "browser/vw_browser_context.h",
+    "browser/vw_browser_main_parts.cc",
+    "browser/vw_browser_main_parts.h",
+    "browser/vw_dialogs.cc",
+    "browser/vw_dialogs.h",
+    "browser/vw_download_delegate.cc",
+    "browser/vw_download_delegate.h",
+    "browser/vw_engine.cc",
+    "browser/vw_engine.h",
+    "browser/vw_frame_sink.cc",
+    "browser/vw_frame_sink.h",
+    "browser/vw_input_method.cc",
+    "browser/vw_input_method.h",
+    "browser/vw_permission_manager.cc",
+    "browser/vw_permission_manager.h",
+    "browser/vw_platform.cc",
+    "browser/vw_platform.h",
+    "browser/vw_tab.cc",
+    "browser/vw_tab.h",
+    "capi/venetium_w10m_capi.cc",
+    "capi/venetium_w10m_capi.h",
+    "common/vw_log.cc",
+    "common/vw_log.h",
+    "common/vw_user_agent.cc",
+    "common/vw_user_agent.h",
+    "renderer/vw_renderer_client.cc",
+    "renderer/vw_renderer_client.h",
+  ]
+
+  deps = [
+    "//base",
+    "//components/download/public/common:public",
+    "//components/embedder_support:user_agent",
+    "//components/keyed_service/content",
+    "//components/url_formatter",
+    "//components/version_info",
+    "//components/viz/service",
+    "//content/public/app",
+    "//content/public/browser",
+    "//content/public/child",
+    "//content/public/common",
+    "//content/public/gpu",
+    "//content/public/renderer",
+    "//content/public/utility",
+    "//net",
+    "//services/network:network_service",
+    "//services/network/public/cpp",
+    "//skia",
+    "//third_party/blink/public/common",
+    "//ui/aura",
+    "//ui/base",
+    "//ui/base/ime",
+    "//ui/display",
+    "//ui/events",
+    "//ui/gfx",
+    "//ui/wm",
+    "//url",
+  ]
+
+  data_deps = [
+    ":venetium_engine_pak",
+    "//third_party/icu:icudata",
+  ]
+  if (use_v8_context_snapshot) {
+    data_deps += [ "//tools/v8_context_snapshot" ]
+  }
+
+  # A DLL in a UWP package: the shell loads it with LoadPackagedLibrary.
+  ldflags = [ "/APPCONTAINER" ]
+
+  # Every system DLL that is not needed to load is delay-loaded: a phone's OS
+  # is a subset of the desktop's, and a DLL the loader cannot find stops the
+  # whole engine from loading, while a delay-loaded one only fails the call
+  # that needs it -- usually one a phone never makes. Chromium's own list
+  # (chrome.dll's), plus what the content layer imports beyond it.
+  configs += [ "//build/config/win:delayloads" ]
+  ldflags += [
+    "/DELAYLOAD:cfgmgr32.dll",
+    "/DELAYLOAD:crypt32.dll",
+    "/DELAYLOAD:dnsapi.dll",
+    "/DELAYLOAD:dwrite.dll",
+    "/DELAYLOAD:mf.dll",
+    "/DELAYLOAD:mfplat.dll",
+    "/DELAYLOAD:mfreadwrite.dll",
+    "/DELAYLOAD:powrprof.dll",
+    "/DELAYLOAD:version.dll",
+    "/DELAYLOAD:winmm.dll",
+    "/DELAYLOAD:ws2_32.dll",
+  ]
+}
+
+# The engine's resources: what content_shell.pak carries, without the test
+# and internals pages, plus the 200% scale set phones need.
+repack("venetium_engine_pak") {
+  sources = [
+    "$root_gen_dir/content/content_resources.pak",
+    "$root_gen_dir/net/net_resources.pak",
+    "$root_gen_dir/third_party/blink/public/resources/blink_resources.pak",
+    "$root_gen_dir/third_party/blink/public/resources/blink_scaled_resources_100_percent.pak",
+    "$root_gen_dir/third_party/blink/public/strings/blink_strings_en-US.pak",
+    "$root_gen_dir/third_party/blink/public/strings/permission_element_generated_strings.pak",
+    "$root_gen_dir/third_party/blink/public/strings/permission_element_strings_en-US.pak",
+    "$root_gen_dir/ui/resources/ui_resources_100_percent.pak",
+    "$root_gen_dir/ui/strings/app_locale_settings_en-US.pak",
+    "$root_gen_dir/ui/strings/ax_strings_en-US.pak",
+    "$root_gen_dir/ui/strings/ui_strings_en-US.pak",
+  ]
+  deps = [
+    "//content:content_resources",
+    "//net:net_resources",
+    "//third_party/blink/public:resources",
+    "//third_party/blink/public:scaled_resources_100_percent",
+    "//third_party/blink/public/strings",
+    "//third_party/blink/public/strings:permission_element_generated_strings",
+    "//third_party/blink/public/strings:permission_element_strings",
+    "//ui/resources",
+    "//ui/strings",
+  ]
+  output = "$root_out_dir/venetium_engine.pak"
+}

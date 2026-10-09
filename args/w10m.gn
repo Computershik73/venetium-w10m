@@ -1,0 +1,82 @@
+# Venetium for Windows 10 Mobile: the engine build (out/w10m).
+#
+# tools/gen.sh writes this file, with the paths of this machine filled in for
+# @VW_...@, as out/w10m/args.gn and runs gn gen. Built from Venetium's
+# args/out-arm-rt21.gn; the differences are commented.
+
+target_cpu = "arm"
+is_w10m = true                    # build/config/win/w10m.gni (patches/w10m)
+is_debug = false
+dcheck_always_on = false
+is_component_build = false
+is_official_build = false
+
+# Disk and link time: a phone build is debugged from its own log, as
+# gecko-w10m's is. symbol_level 1 (Venetium) needs ~15 GB more and lld-link
+# cannot write CodeView for every ARM32 NEON register pair anyway.
+symbol_level = 0
+blink_symbol_level = 0
+v8_symbol_level = 0
+
+# --- toolchain: rt2 (LLVM 23.1.1 + six ARM32 Windows patches) ---------------
+clang_base_path = "@VW_LLVM@"
+clang_version = "23"
+clang_use_chrome_plugins = false
+treat_warnings_as_errors = false  # a newer clang than Chromium 150's warns more
+use_thin_lto = false
+chrome_pgo_phase = 0
+use_siso = false
+enable_precompiled_headers = false
+# rt2 is not rt2.1: lld-link's ARM32 Control Flow Guard tables are wrong
+# (Venetium 0031, gecko-w10m strip-cfg.py), so no CFG, compile or link.
+win_enable_cfg_guards = false
+
+# --- Rust: Chromium 150's nightly with a thumbv7a-uwp-windows-msvchf std ----
+rust_sysroot_absolute = "@VW_RUST_SYSROOT@"
+rustc_version = "@VW_RUSTC_VERSION@"
+added_rust_stdlib_libs = [
+  "windows_link",
+  "rustc_literal_escaper",
+]
+removed_rust_stdlib_libs = []
+rust_bindgen_root = "@VW_BINDGEN@"
+
+# --- graphics: no Direct3D 9 on a phone; Direct3D 11 at feature level 9_3 --
+angle_enable_d3d9 = false
+angle_enable_d3d11 = true
+angle_enable_gl = false
+angle_enable_vulkan = false
+angle_enable_wgpu = false
+enable_vulkan = false
+enable_swiftshader = false
+use_dawn = false
+skia_use_dawn = false
+dawn_use_swiftshader = false
+dawn_use_built_dxc = false
+
+# --- what a single-process phone embedder does not have ---------------------
+enable_nacl = false
+enable_pdf = false
+enable_printing = false
+enable_widevine = false
+enable_media_foundation_widevine_cdm = false
+enable_vr = false
+enable_openxr = false
+enable_hangout_services_extension = false
+use_on_device_model_service = false
+enable_reporting = false
+enable_jxl_decoder = false
+disable_fieldtrial_testing_config = true
+
+# --- media: Venetium's choice, video and audio on ----------------------------
+proprietary_codecs = true
+ffmpeg_branding = "Chrome"
+
+# V8's own snapshot only (snapshot_blob.bin, made by mksnapshot). The context
+# snapshot would build all of Blink, cc and WebRTC a second time for the x86
+# toolchain V8's ARM snapshot runs in -- 25,000 more steps -- to save some
+# milliseconds per new frame.
+use_v8_context_snapshot = false
+
+# The lite tarball's build/util/LASTCHANGE is 150.0.7871.222's own.
+use_dummy_lastchange = false

@@ -1,0 +1,124 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Venetium (Chromium 150) for Windows 10 Mobile.
+
+  Version: 150.<Chromium build>.<Chromium patch>.<package build>
+  The last field is a counter tools/build-appx.sh raises on every build and
+  never resets, so installing over an older package always works and a log's
+  first line names exactly one package.
+
+  Publisher matches gecko-w10m's, so a phone that trusts that certificate
+  installs this package without another one.
+
+  rescap:codeGeneration is what lets V8's JIT have executable memory
+  (VirtualAllocFromApp / VirtualProtectFromApp); an interop-unlocked phone
+  honours it for a sideloaded package. Without it the engine runs V8 jitless.
+-->
+<Package
+    xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+    xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+    xmlns:uap3="http://schemas.microsoft.com/appx/manifest/uap/windows10/3"
+    xmlns:mp="http://schemas.microsoft.com/appx/2014/phone/manifest"
+    xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+    IgnorableNamespaces="uap uap3 mp rescap">
+
+  <Identity
+      Name="Venetium"
+      Publisher="CN=Computershik"
+      Version="150.7871.222.3"
+      ProcessorArchitecture="arm" />
+
+  <mp:PhoneIdentity
+      PhoneProductId="5b1c2e7a-4f0d-4d2b-9a61-3e8c7d0f2a15"
+      PhonePublisherId="00000000-0000-0000-0000-000000000000" />
+
+  <Properties>
+    <DisplayName>Venetium</DisplayName>
+    <PublisherDisplayName>Computershik</PublisherDisplayName>
+    <Logo>Assets\StoreLogo.png</Logo>
+  </Properties>
+
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Mobile"
+                        MinVersion="10.0.14393.0"
+                        MaxVersionTested="10.0.15254.0" />
+    <TargetDeviceFamily Name="Windows.Universal"
+                        MinVersion="10.0.14393.0"
+                        MaxVersionTested="10.0.15254.0" />
+  </Dependencies>
+
+  <Resources>
+    <Resource Language="en-US" />
+    <Resource Language="ru-RU" />
+  </Resources>
+
+  <Applications>
+    <Application Id="App"
+                 Executable="Venetium.exe"
+                 EntryPoint="Venetium.App">
+      <uap:VisualElements
+          DisplayName="Venetium"
+          Description="Venetium: Chromium for Windows 10 Mobile"
+          BackgroundColor="#1C1B22"
+          Square150x150Logo="Assets\Square150x150Logo.png"
+          Square44x44Logo="Assets\Square44x44Logo.png">
+        <uap:DefaultTile
+            ShortName="Venetium"
+            Square71x71Logo="Assets\Square71x71Logo.png"
+            Square310x310Logo="Assets\Square310x310Logo.png"
+            Wide310x150Logo="Assets\Wide310x150Logo.png">
+          <uap:ShowNameOnTiles>
+            <uap:ShowOn Tile="square150x150Logo" />
+            <uap:ShowOn Tile="wide310x150Logo" />
+          </uap:ShowNameOnTiles>
+        </uap:DefaultTile>
+        <uap:SplashScreen Image="Assets\SplashScreen.png" BackgroundColor="#1C1B22" />
+      </uap:VisualElements>
+
+      <Extensions>
+        <!-- Settings > System > Default apps > Web browser offers an app
+             registered for both http and https. -->
+        <uap:Extension Category="windows.protocol">
+          <uap:Protocol Name="http">
+            <uap:Logo>Assets\Square44x44Logo.png</uap:Logo>
+            <uap:DisplayName>Venetium</uap:DisplayName>
+          </uap:Protocol>
+        </uap:Extension>
+        <uap:Extension Category="windows.protocol">
+          <uap:Protocol Name="https">
+            <uap:Logo>Assets\Square44x44Logo.png</uap:Logo>
+            <uap:DisplayName>Venetium</uap:DisplayName>
+          </uap:Protocol>
+        </uap:Extension>
+        <uap:Extension Category="windows.protocol">
+          <uap:Protocol Name="venetium">
+            <uap:Logo>Assets\Square44x44Logo.png</uap:Logo>
+            <uap:DisplayName>Venetium</uap:DisplayName>
+          </uap:Protocol>
+        </uap:Extension>
+        <uap:Extension Category="windows.fileTypeAssociation">
+          <uap:FileTypeAssociation Name="venetiumweb">
+            <uap:Logo>Assets\Square44x44Logo.png</uap:Logo>
+            <uap:DisplayName>Web page</uap:DisplayName>
+            <uap:SupportedFileTypes>
+              <uap:FileType>.html</uap:FileType>
+              <uap:FileType>.htm</uap:FileType>
+              <uap:FileType>.svg</uap:FileType>
+            </uap:SupportedFileTypes>
+          </uap:FileTypeAssociation>
+        </uap:Extension>
+      </Extensions>
+    </Application>
+  </Applications>
+
+  <Capabilities>
+    <Capability Name="internetClient" />
+    <Capability Name="internetClientServer" />
+    <Capability Name="privateNetworkClientServer" />
+    <!-- Logs copied to Pictures\Venetium logs, which a phone shows over USB. -->
+    <uap:Capability Name="picturesLibrary" />
+    <uap:Capability Name="removableStorage" />
+    <uap3:Capability Name="backgroundMediaPlayback" />
+    <rescap:Capability Name="codeGeneration" />
+  </Capabilities>
+</Package>
