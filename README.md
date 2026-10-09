@@ -5,8 +5,8 @@
 browser for Lumia-era phones, built the way [gecko-w10m](../gecko-w10m) brings
 Gecko there.
 
-> **Status: work in progress.** The engine, the shell and the build are written;
-> the first full engine build is running. Nothing has run on a phone yet. See
+> **Status: work in progress.** The engine builds and links, and the appx
+> packs with it; nothing has run on a phone yet. See
 > [docs/BUILD-STATUS.md](docs/BUILD-STATUS.md) for exactly what is done.
 
 ## Why it is not just Venetium in an appx
