@@ -1,0 +1,81 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Fri, 9 Oct 2026 15:08:07 +0400
+Subject: [PATCH] Toolchain: no _AddressOfReturnAddress on 32-bit ARM (public
+ rt2)
+
+clang-cl leaves it an external nothing defines for thumbv7; the frame
+address stands in, as in Venetium's 0018/0022 before rt2.1.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ third_party/blink/renderer/platform/wtf/stack_util.cc | 5 ++++-
+ v8/src/base/platform/platform-win32.cc                | 5 ++++-
+ v8/src/base/platform/platform.h                       | 5 ++++-
+ v8/src/utils/utils.cc                                 | 5 ++++-
+ 4 files changed, 16 insertions(+), 4 deletions(-)
+
+diff --git a/third_party/blink/renderer/platform/wtf/stack_util.cc b/third_party/blink/renderer/platform/wtf/stack_util.cc
+index 54f52e1f57832a0fc2552a8d84d3008ba3f39f85..5c2dceab2e8bc9b2a96e8b250adb144fe14eecfd 100644
+--- a/third_party/blink/renderer/platform/wtf/stack_util.cc
++++ b/third_party/blink/renderer/platform/wtf/stack_util.cc
+@@ -193,7 +193,10 @@ bool IsOnStack(void* address) {
+ }
+ 
+ uintptr_t GetCurrentStackPosition() {
+-#if defined(COMPILER_MSVC)
++  // On 32-bit ARM, clang-cl leaves _AddressOfReturnAddress() an external
++  // nothing defines (rt2.1 expands it; the public rt2 does not), so the
++  // frame address is used there.
++#if defined(COMPILER_MSVC) && !defined(ARCH_CPU_ARMEL)
+   return reinterpret_cast<uintptr_t>(_AddressOfReturnAddress());
+ #else
+   return reinterpret_cast<uintptr_t>(__builtin_frame_address(0));
+diff --git a/v8/src/base/platform/platform-win32.cc b/v8/src/base/platform/platform-win32.cc
+index be3281cb14d494cb2296613c1772a25afe20c893..23e729365e338da0a38c986a0ef1bd27c2342382 100644
+--- a/v8/src/base/platform/platform-win32.cc
++++ b/v8/src/base/platform/platform-win32.cc
+@@ -2147,7 +2147,10 @@ void Stack::SetCurrentThreadStackBounds(uintptr_t limit, uintptr_t base) {
+ 
+ // static
+ Stack::StackSlot Stack::GetCurrentStackPosition() {
+-#if V8_CC_MSVC
++  // On 32-bit ARM, clang-cl leaves _AddressOfReturnAddress() an external
++  // nothing defines (rt2.1 expands it; the public rt2 does not), so the
++  // frame address is used there.
++#if V8_CC_MSVC && !V8_HOST_ARCH_ARM
+   return _AddressOfReturnAddress();
+ #else
+   return __builtin_frame_address(0);
+diff --git a/v8/src/base/platform/platform.h b/v8/src/base/platform/platform.h
+index f2cf576648e3c3f075fd5cbcbc700b6a0113ec34..51e6a077e8d4382055586d6c5418e0cf56c99e36 100644
+--- a/v8/src/base/platform/platform.h
++++ b/v8/src/base/platform/platform.h
+@@ -703,7 +703,10 @@ class V8_BASE_EXPORT Stack {
+   // return an address significantly above the actual current stack position.
+   static V8_NOINLINE StackSlot GetCurrentStackPosition();
+ 
+-#if V8_CC_MSVC
++  // On 32-bit ARM, clang-cl leaves _AddressOfReturnAddress() an external
++  // nothing defines (rt2.1 expands it; the public rt2 does not), so the
++  // frame address is used there.
++#if V8_CC_MSVC && !V8_HOST_ARCH_ARM
+ #define DEFAULT_CURRENT_FRAME_ADDRESS _AddressOfReturnAddress()
+ #else
+ #define DEFAULT_CURRENT_FRAME_ADDRESS __builtin_frame_address(0)
+diff --git a/v8/src/utils/utils.cc b/v8/src/utils/utils.cc
+index e59717a5c52f3f19fc0fd9e9eff356d8b63c72ac..e57b9c903356dce9ae11d713289e76b06854c11d 100644
+--- a/v8/src/utils/utils.cc
++++ b/v8/src/utils/utils.cc
+@@ -214,7 +214,10 @@ bool DoubleToBoolean(double d) {
+ }
+ 
+ uintptr_t GetCurrentStackPosition() {
+-#if V8_CC_MSVC
++  // On 32-bit ARM, clang-cl leaves _AddressOfReturnAddress() an external
++  // nothing defines (rt2.1 expands it; the public rt2 does not), so the
++  // frame address is used there.
++#if V8_CC_MSVC && !V8_HOST_ARCH_ARM
+   return reinterpret_cast<uintptr_t>(_AddressOfReturnAddress());
+ #else
+   return reinterpret_cast<uintptr_t>(__builtin_frame_address(0));

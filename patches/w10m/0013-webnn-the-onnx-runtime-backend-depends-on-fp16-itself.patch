@@ -1,0 +1,26 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Fri, 9 Oct 2026 14:14:45 +0400
+Subject: [PATCH] WebNN: the ONNX Runtime backend depends on fp16 itself
+
+On Windows it got fp16's include path only through the TFLite backend,
+which is off here (webnn_use_tflite = false).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ services/webnn/BUILD.gn | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/services/webnn/BUILD.gn b/services/webnn/BUILD.gn
+index d7ccc44b4ecec5034cc5a0027a2a71cbf02c61db..11a814b762fdb1394e935494af9d295e2ba184b5 100644
+--- a/services/webnn/BUILD.gn
++++ b/services/webnn/BUILD.gn
+@@ -243,6 +243,8 @@ component("webnn_service") {
+     ]
+     deps += [
+       "//services/webnn/public/cpp:win",
++      # Also there through TFLite, unless TFLite is off.
++      "//third_party/fp16",
+       "//third_party/windows_app_sdk_headers",
+     ]
+ 

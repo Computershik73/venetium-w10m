@@ -53,6 +53,9 @@ use_dawn = false
 skia_use_dawn = false
 dawn_use_swiftshader = false
 dawn_use_built_dxc = false
+# Without Dawn its OpenGL ES backend is meaningless, and Windows' shared
+# images would otherwise hand Dawn EGL images (DawnEGLImageRepresentation).
+dawn_enable_opengles = false
 
 # --- what a single-process phone embedder does not have ---------------------
 enable_nacl = false
