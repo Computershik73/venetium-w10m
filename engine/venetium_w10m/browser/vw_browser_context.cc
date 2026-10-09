@@ -2,8 +2,6 @@
 
 #include "venetium_w10m/browser/vw_browser_context.h"
 
-#include "base/files/file_util.h"
-#include "base/threading/thread_restrictions.h"
 #include "components/keyed_service/content/browser_context_dependency_manager.h"
 #include "content/public/browser/browser_thread.h"
 #include "content/public/browser/render_process_host.h"
@@ -20,10 +18,6 @@ VwBrowserContext::VwBrowserContext(const base::FilePath& path,
       permissions_(std::make_unique<VwPermissionManager>()),
       downloads_(std::make_unique<VwDownloadDelegate>(
           path.DirName().Append(FILE_PATH_LITERAL("Downloads")))) {
-  {
-    base::ScopedAllowBlocking allow_blocking;
-    base::CreateDirectory(path_);
-  }
   BrowserContextDependencyManager::GetInstance()->MarkBrowserContextLive(this);
 }
 

@@ -15,7 +15,7 @@ namespace {
 
 // Plain, readable on a small screen, and in the two languages the shell
 // speaks; the error's own name says what went wrong to anyone who asks.
-constexpr char kErrorPage[] = R"(<!doctype html>
+constexpr char kErrorPage[] = R"page(<!doctype html>
 <html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>%TITLE%</title>
@@ -34,7 +34,7 @@ button { margin-top: 20px; font-size: 16px; padding: 10px 24px;
 <p>%URL%</p>
 <p><code>%ERROR%</code></p>
 <button onclick="location.reload()">Обновить · Reload</button>
-</body></html>)";
+</body></html>)page";
 
 void Replace(std::string* text, std::string_view key, std::string_view value) {
   for (size_t at = text->find(key); at != std::string::npos;

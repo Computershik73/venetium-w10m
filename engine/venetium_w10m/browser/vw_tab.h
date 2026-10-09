@@ -102,6 +102,8 @@ class VwTab : public content::WebContentsDelegate,
                          bool* proceed_to_fire_unload) override;
 
   // content::WebContentsObserver:
+  // (Its BeforeUnloadFired, unlike the delegate's above, is not needed.)
+  using content::WebContentsObserver::BeforeUnloadFired;
   void LoadProgressChanged(double progress) override;
   void TitleWasSet(content::NavigationEntry* entry) override;
   void DidFinishNavigation(

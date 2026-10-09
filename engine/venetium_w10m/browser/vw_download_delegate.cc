@@ -135,7 +135,7 @@ void VwDownloadDelegate::OnPathChosen(download::DownloadItem* item,
 
 bool VwDownloadDelegate::ShouldOpenDownload(
     download::DownloadItem* item,
-    DownloadOpenDelayedCallback callback) {
+    content::DownloadOpenDelayedCallback callback) {
   return true;
 }
 

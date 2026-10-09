@@ -1,0 +1,29 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Fri, 9 Oct 2026 10:38:02 +0400
+Subject: [PATCH] Toolchain: fxdiv without _MulUnsignedHigh on clang (public
+ rt2)
+
+Venetium dropped this hunk of its 0025 when rt2.1 taught clang the
+intrinsic; the public rt2 does not have it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ third_party/fxdiv/src/include/fxdiv.h | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/third_party/fxdiv/src/include/fxdiv.h b/third_party/fxdiv/src/include/fxdiv.h
+index 2c35038d97c55c524bb97caba2e3560cab9da504..1c2698b8e5c732843f8177da55c3cc8a041d1583 100644
+--- a/third_party/fxdiv/src/include/fxdiv.h
++++ b/third_party/fxdiv/src/include/fxdiv.h
+@@ -38,7 +38,9 @@ static inline uint32_t fxdiv_mulhi_uint32_t(uint32_t a, uint32_t b) {
+ 	return (uint32_t) __umulhi((unsigned int) a, (unsigned int) b);
+ #elif defined(_MSC_VER) && defined(_M_IX86)
+ 	return (uint32_t) (__emulu((unsigned int) a, (unsigned int) b) >> 32);
+-#elif defined(_MSC_VER) && defined(_M_ARM)
++#elif defined(_MSC_VER) && defined(_M_ARM) && !defined(__clang__)
++	/* clang has no _MulUnsignedHigh (rt2.1 adds it; the public rt2 does not):
++	 * the portable branch below compiles to the same single umull. */
+ 	return (uint32_t) _MulUnsignedHigh((unsigned long) a, (unsigned long) b);
+ #else
+ 	return (uint32_t) (((uint64_t) a * (uint64_t) b) >> 32);

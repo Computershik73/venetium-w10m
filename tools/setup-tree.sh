@@ -66,7 +66,37 @@ if [ ! -f "$esbuild_dir/esbuild.exe" ]; then
     "$esbuild_dir/esbuild.zip" "$esbuild_dir"
   rm -f "$esbuild_dir/esbuild.zip"
 fi
+# The tarball carries Linux's esbuild (an ELF file named "esbuild"); the
+# DevTools scripts run ".../esbuild", which on Windows must find the .exe.
+# (Not rm: MSYS takes "esbuild" for esbuild.exe once the ELF file is gone.)
+python - "$esbuild_dir/esbuild" <<'PY'
+import os, sys
+p = sys.argv[1]
+if os.path.isfile(p) and open(p, "rb").read(4) == b"ELF":
+    os.remove(p)
+PY
 echo "esbuild.exe  $("$esbuild_dir/esbuild.exe" --version)"
+
+# --- rollup's native module for Windows ---------------------------------------
+# DevTools' node_modules (the inspector overlay is bundled with rollup) carry
+# rollup's Linux binary only; npm on Windows would have installed this one.
+# The npm registry's sha512 is checked.
+rollup_dir="third_party/devtools-frontend/src/node_modules"
+rollup_version="$(python -c "import json; print(json.load(open('$rollup_dir/rollup/package.json'))['version'])")"
+rollup_win="$rollup_dir/@rollup/rollup-win32-x64-msvc"
+if [ ! -f "$rollup_win/package.json" ]; then
+  meta="https://registry.npmjs.org/@rollup/rollup-win32-x64-msvc/$rollup_version"
+  curl -sfL -o out/vw-rollup.json "$meta"
+  tgz_url="$(python -c "import json; print(json.load(open('out/vw-rollup.json'))['dist']['tarball'])")"
+  integrity="$(python -c "import json; print(json.load(open('out/vw-rollup.json'))['dist']['integrity'])")"
+  curl -sfL -o out/vw-rollup.tgz "$tgz_url"
+  have="sha512-$(openssl dgst -sha512 -binary out/vw-rollup.tgz | base64 -w0)"
+  [ "$have" = "$integrity" ] || { echo "rollup-win32-x64-msvc: $have, expected $integrity" >&2; exit 1; }
+  mkdir -p "$rollup_win"
+  tar -xzf out/vw-rollup.tgz -C "$rollup_win" --strip-components=1
+  rm -f out/vw-rollup.tgz out/vw-rollup.json
+fi
+echo "rollup       $rollup_version (+ win32-x64-msvc)"
 
 # --- Windows-only git dependencies ---------------------------------------------
 python - <<'PY' | tr -d '\r' > /tmp/vw-win-deps.txt

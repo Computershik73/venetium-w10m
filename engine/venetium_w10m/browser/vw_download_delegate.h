@@ -31,7 +31,7 @@ class VwDownloadDelegate : public content::DownloadManagerDelegate {
       download::DownloadItem* download,
       download::DownloadTargetCallback* callback) override;
   bool ShouldOpenDownload(download::DownloadItem* item,
-                          DownloadOpenDelayedCallback callback) override;
+                          content::DownloadOpenDelayedCallback callback) override;
   void GetNextId(content::DownloadIdCallback callback) override;
 
  private:

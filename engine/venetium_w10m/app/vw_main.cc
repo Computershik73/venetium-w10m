@@ -12,8 +12,10 @@
 #include <string>
 #include <vector>
 
+#include "base/base_switches.h"
 #include "base/command_line.h"
 #include "base/files/file_path.h"
+#include "base/files/file_util.h"
 #include "base/path_service.h"
 #include "base/strings/string_split.h"
 #include "base/strings/string_util.h"
@@ -127,6 +129,10 @@ void SetUpPaths(const EngineConfig& config) {
   if (!config.install_dir.empty()) {
     base::PathService::Override(base::DIR_ASSETS, config.install_dir);
   }
+  // Before the browser starts: its UI thread may not touch the disk.
+  base::CreateDirectory(config.profile_dir);
+  base::CreateDirectory(config.cache_dir);
+  base::CreateDirectory(temp);
 }
 
 }  // namespace
