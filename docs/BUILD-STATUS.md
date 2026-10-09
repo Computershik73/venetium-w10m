@@ -31,14 +31,22 @@ rt2 is running. Problems met and fixed on the way, each now part of the build:
 * ANGLE's `d3dcompiler_47.dll` copy is skipped: the phone's OS has it (0004).
 * `use_v8_context_snapshot = false`: the context snapshot would build Blink, cc
   and WebRTC a second time for the x86 snapshot toolchain.
-* WebNN's TFLite/LiteRT off: XNNPACK's pthreadpool calls an MSVC intrinsic
-  clang lacks (`_MulUnsignedHigh`).
+* WebNN's TFLite/LiteRT off; pthreadpool is still built (other users), and
+  its `fxdiv.h` calls an MSVC intrinsic the public rt2's clang lacks
+  (`_MulUnsignedHigh`): patch 0009 takes the portable branch, as Venetium's
+  0025 did before rt2.1.
+* MIDL's checked-in outputs exist for x86, x64 and arm64 only; the arm ones
+  are generated the way `midl.py` asks and carried as patch 0010.
+* `use_dawn = false` (no D3D12 on a phone): two places in the GPU service
+  assumed Skia's Dawn backend on Windows (0011).
+* Generator scripts on a Windows host: a `python3.bat` shim for `.bat`
+  launchers (`tools/ninja.sh`), rollup's native Windows module and the
+  removal of Linux's `esbuild` ELF from DevTools' tree (`tools/setup-tree.sh`).
 
 ## Engine (`engine/venetium_w10m`) — written, untested
 
-Each source is compiled on its own as soon as the headers it needs exist
-(the build above generates them): 12 of the 21 compile cleanly so far; the
-other 9 wait for generated mojom and buildflag headers. What it does:
+All 21 sources compile (**built**, objects only; the DLL links once the
+dependencies above are done). What it does:
 single-process content embedder; Aura host without an HWND; software output
 device → frame buffer → `venetium_w10m_frame_copy`; touch/mouse/wheel/key/text
 input into Aura; tabs with window.open/close, fullscreen, back button; mobile
@@ -57,6 +65,16 @@ read-execute, a vectored exception handler flipping the page that is written
 to read-write and back when it runs, through `VirtualAllocFromApp` and
 `VirtualProtectFromApp`; in PartitionAlloc, where Chromium's V8 gets its
 pages, and in V8's own platform code). 0008 compiles for ARM.
+
+From a review of the startup path for what an app container on the phone
+lacks (0012, written, untested): no screen DC (`GetDC(NULL)` no longer
+fatal; system fonts are Segoe UI 12 DIPs without GDI; system DPI 96), no
+kernel32.dll or version.dll on 1607 (the kernel32 version from
+`RtlGetVersion`), no classic COM STA without a hidden window (STA worker
+threads stay in the MTA). `--disable-software-rasterizer` keeps GL off
+(otherwise `--disable-gpu` falls back to WebGL on WARP through ANGLE).
+Delay-load failures return each function's own failure value (`E_NOTIMPL`,
+`ERROR_CALL_NOT_IMPLEMENTED` where 0 means success, else 0).
 
 ## Shell (`app/VenetiumW10m`) — built, untested
 
