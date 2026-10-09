@@ -9,8 +9,6 @@
 #include "base/task/single_thread_task_runner.h"
 #include "content/public/browser/browser_thread.h"
 #include "content/public/common/result_codes.h"
-#include "ui/base/clipboard/clipboard.h"
-#include "ui/base/clipboard/clipboard_non_backed.h"
 #include "venetium_w10m/browser/vw_browser.h"
 #include "venetium_w10m/browser/vw_browser_context.h"
 #include "venetium_w10m/browser/vw_engine.h"
@@ -38,11 +36,6 @@ int VwBrowserMainParts::PreEarlyInitialization() {
 
 int VwBrowserMainParts::PreMainMessageLoopRun() {
   NoteF("browser: main loop starting");
-  // The desktop clipboard is a window's (OpenClipboard needs an HWND);
-  // this one lives in memory and the shell mirrors the phone's into it.
-  ui::Clipboard::SetClipboardForCurrentThread(
-      std::make_unique<ui::ClipboardNonBacked>());
-
   VwEngine* engine = VwEngine::Get();
   const EngineConfig config = engine->config();
   browser_context_ =

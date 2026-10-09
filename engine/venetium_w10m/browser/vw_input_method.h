@@ -33,6 +33,13 @@ class VwInputMethod : public ui::InputMethodMinimal {
   // ui::InputMethod:
   void OnTextInputTypeChanged(ui::TextInputClient* client) override;
   void SetVirtualKeyboardVisibilityIfEnabled(bool should_show) override;
+  // No IMM32 or TSF here: there are no IME messages and no input locale to
+  // follow; the shell's keyboard does all of that.
+  bool OnUntranslatedIMEMessage(const CHROME_MSG event,
+                                NativeEventResult* result) override;
+  void OnInputLocaleChanged() override;
+  bool IsInputLocaleCJK() const override;
+  void OnUrlChanged() override;
 
  protected:
   // ui::InputMethodBase:

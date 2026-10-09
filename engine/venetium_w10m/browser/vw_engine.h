@@ -82,10 +82,6 @@ class VwEngine {
   std::string search_template();
   std::atomic<bool> desktop_mode{false};
 
-  // The phone's clipboard as the shell last saw it (for a paste).
-  void SetPhoneClipboard(std::string text);
-  std::string phone_clipboard();
-
   // Read synchronously by the shell; written on the UI thread.
   std::atomic<int32_t> text_input_wanted{0};
   std::atomic<uint32_t> text_input_state{0};
@@ -105,7 +101,6 @@ class VwEngine {
   std::vector<BrowserTask> pending_;
   scoped_refptr<base::SingleThreadTaskRunner> ui_;
   std::string search_template_ = "https://www.google.com/search?q=%s";
-  std::string phone_clipboard_;
   std::atomic<bool> running_{false};
   std::atomic<int32_t> next_tab_id_{1};
 };

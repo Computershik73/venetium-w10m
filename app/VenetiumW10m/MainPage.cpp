@@ -567,6 +567,18 @@ void MainPage::Start(std::wstring initialUrl) {
     Log::Write(L"page: first frame on screen");
   });
   engineView_->Start();
+
+  // The phone's clipboard, for a paste in a page: an app may read it only
+  // while in front, so when it comes there and when it changes meanwhile.
+  Clipboard::ContentChanged([this](auto&&, auto&&) { SendPhoneClipboard(); });
+  CoreWindow::GetForCurrentThread().Activated(
+      [this](auto&&, WindowActivatedEventArgs const& args) {
+        if (args.WindowActivationState() !=
+            CoreWindowActivationState::Deactivated) {
+          SendPhoneClipboard();
+        }
+      });
+  SendPhoneClipboard();
 }
 
 void MainPage::OpenExternalUrl(std::wstring const& url) {
@@ -779,6 +791,20 @@ void MainPage::ShowNotice(std::wstring const& text) {
   notice_.Visibility(Visibility::Visible);
   noticeTimer_.Stop();
   noticeTimer_.Start();
+}
+
+void MainPage::SendPhoneClipboard() {
+  if (!Api().clipboard_phone_text) return;
+  []() -> winrt::fire_and_forget {
+    try {
+      DataPackageView content = Clipboard::GetContent();
+      if (!content.Contains(StandardDataFormats::Text())) co_return;
+      hstring text = co_await content.GetTextAsync();
+      Api().clipboard_phone_text(Narrow(std::wstring(text)).c_str());
+    } catch (winrt::hresult_error const&) {
+      // Not in front after all, or the clipboard is busy: next time.
+    }
+  }();
 }
 
 void MainPage::ShowLog() {

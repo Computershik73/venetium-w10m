@@ -116,14 +116,5 @@ std::string VwEngine::search_template() {
   return search_template_;
 }
 
-void VwEngine::SetPhoneClipboard(std::string text) {
-  base::AutoLock hold(lock_);
-  phone_clipboard_ = std::move(text);
-}
-
-std::string VwEngine::phone_clipboard() {
-  base::AutoLock hold(lock_);
-  return phone_clipboard_;
-}
 
 }  // namespace venetium_w10m

@@ -60,6 +60,7 @@ class MainPage {
                    bool save);
   void ShowNotice(std::wstring const& text);
   void ShowLog();
+  void SendPhoneClipboard();
 
   TabInfo* Selected();
 

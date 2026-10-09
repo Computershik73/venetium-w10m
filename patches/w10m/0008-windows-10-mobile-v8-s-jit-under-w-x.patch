@@ -1,0 +1,528 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Fri, 9 Oct 2026 10:25:15 +0400
+Subject: [PATCH] Windows 10 Mobile: V8's JIT under W^X
+
+A UWP app gets executable memory only through VirtualAllocFromApp and
+VirtualProtectFromApp, never writable and executable at once. Pages V8
+asks to be read-write-execute are made read-execute and recorded; a
+vectored exception handler flips the faulting page to read-write on a
+write and back to read-execute (flushing the instruction cache) when it
+runs. Both in PartitionAlloc (V8's pages in Chromium, through gin) and
+in V8's own platform code.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../page_allocator_internals_win.h            | 216 ++++++++++++++++++
+ v8/src/base/platform/platform-win32.cc        | 201 ++++++++++++++++
+ 2 files changed, 417 insertions(+)
+
+diff --git a/base/allocator/partition_allocator/src/partition_alloc/page_allocator_internals_win.h b/base/allocator/partition_allocator/src/partition_alloc/page_allocator_internals_win.h
+index d51b047cfc6655fa7ff4c62833a8cadd7b8b7d15..23cf60398125c180e88eab93d188ff41b56d4d55 100644
+--- a/base/allocator/partition_allocator/src/partition_alloc/page_allocator_internals_win.h
++++ b/base/allocator/partition_allocator/src/partition_alloc/page_allocator_internals_win.h
+@@ -16,6 +16,176 @@
+ 
+ namespace partition_alloc::internal {
+ 
++#if defined(VENETIUM_W10M)
++// JIT memory on Windows 10 Mobile.
++//
++// A UWP app gets executable memory only through VirtualAllocFromApp and
++// VirtualProtectFromApp, with the codeGeneration capability, and only W^X:
++// no page is ever writable and executable at once, and none is executable
++// when committed. V8 maps its code pages read-write-execute and writes code
++// whenever it likes (W^X it enforces only with PKU or Apple's JIT
++// protection). So on this platform a page V8 wants RWX is made read-execute,
++// and recorded: a write to it faults, and the handler below makes that page
++// read-write and lets the write go on; executing it faults in turn, and the
++// handler makes it read-execute again, flushing the instruction cache. Code
++// is written in bursts and then run, so each page flips a few times. With
++// --jitless (no codeGeneration capability) none of this is ever reached.
++// V8's own platform code (v8/src/base/platform/platform-win32.cc) has the
++// same layer, for when V8 allocates without the embedder's page allocator.
++namespace w10m_jit {
++
++using VirtualAllocFromAppFn = PVOID(WINAPI*)(PVOID, SIZE_T, ULONG, ULONG);
++using VirtualProtectFromAppFn = BOOL(WINAPI*)(PVOID, SIZE_T, ULONG, PULONG);
++
++VirtualAllocFromAppFn g_alloc = nullptr;
++VirtualProtectFromAppFn g_protect = nullptr;
++
++void ResolveOnce() {
++  static std::atomic<bool> resolved{false};
++  if (resolved.load(std::memory_order_acquire)) return;
++  HMODULE kernelbase = GetModuleHandleW(L"kernelbase.dll");
++  if (kernelbase) {
++    g_alloc = reinterpret_cast<VirtualAllocFromAppFn>(
++        GetProcAddress(kernelbase, "VirtualAllocFromApp"));
++    g_protect = reinterpret_cast<VirtualProtectFromAppFn>(
++        GetProcAddress(kernelbase, "VirtualProtectFromApp"));
++  }
++  resolved.store(true, std::memory_order_release);
++}
++
++void* Alloc(void* address, size_t size, DWORD flags, DWORD protect) {
++  ResolveOnce();
++  return g_alloc ? g_alloc(address, size, flags, protect)
++                 : VirtualAlloc(address, size, flags, protect);
++}
++
++bool Protect(void* address, size_t size, DWORD protect) {
++  ResolveOnce();
++  if (g_protect) {
++    ULONG old = 0;
++    return g_protect(address, size, protect, &old) != 0;
++  }
++  DWORD old = 0;
++  return VirtualProtect(address, size, protect, &old) != 0;
++}
++
++// The ranges V8 asked to be RWX. Read by the fault handler, which must not
++// take a lock (the faulting thread may hold it), so a fixed table of atomics:
++// slots are claimed with a compare-and-swap and freed by zeroing them.
++constexpr int kMaxRanges = 4096;
++std::atomic<uintptr_t> g_starts[kMaxRanges];
++std::atomic<uintptr_t> g_ends[kMaxRanges];
++std::atomic<int> g_used{0};
++
++// Forgets every range that begins inside [start, start + size).
++void RemoveRange(uintptr_t start, size_t size) {
++  const uintptr_t end = start + size;
++  const int n = g_used.load(std::memory_order_acquire);
++  for (int i = 0; i < n; ++i) {
++    const uintptr_t s = g_starts[i].load(std::memory_order_acquire);
++    if (s && s >= start && s < end) {
++      g_ends[i].store(0, std::memory_order_release);
++      g_starts[i].store(0, std::memory_order_release);
++    }
++  }
++}
++
++void AddRange(uintptr_t start, size_t size) {
++  RemoveRange(start, size);
++  for (int i = 0; i < kMaxRanges; ++i) {
++    uintptr_t expected = 0;
++    if (g_starts[i].compare_exchange_strong(expected, start)) {
++      g_ends[i].store(start + size, std::memory_order_release);
++      int used = g_used.load(std::memory_order_relaxed);
++      while (used < i + 1 && !g_used.compare_exchange_weak(used, i + 1)) {
++      }
++      return;
++    }
++  }
++  // The table is full: such pages simply stay read-execute, and a write to
++  // one crashes as it would without this layer.
++}
++
++bool IsJit(uintptr_t address) {
++  const int n = g_used.load(std::memory_order_acquire);
++  for (int i = 0; i < n; ++i) {
++    const uintptr_t s = g_starts[i].load(std::memory_order_acquire);
++    if (s && address >= s &&
++        address < g_ends[i].load(std::memory_order_acquire)) {
++      return true;
++    }
++  }
++  return false;
++}
++
++constexpr uintptr_t kPageMask = ~uintptr_t{4095};
++
++LONG CALLBACK OnFault(EXCEPTION_POINTERS* info) {
++  const EXCEPTION_RECORD* record = info->ExceptionRecord;
++  if (record->ExceptionCode != EXCEPTION_ACCESS_VIOLATION ||
++      record->NumberParameters < 2) {
++    return EXCEPTION_CONTINUE_SEARCH;
++  }
++  const ULONG_PTR kind = record->ExceptionInformation[0];
++  const uintptr_t address = record->ExceptionInformation[1];
++  if (!IsJit(address)) return EXCEPTION_CONTINUE_SEARCH;
++  void* page = reinterpret_cast<void*>(address & kPageMask);
++#if defined(_M_ARM)
++  // Thumb: the low bit of the program counter is the mode, not an address.
++  const uintptr_t pc = info->ContextRecord->Pc & ~uintptr_t{1};
++#elif defined(_M_ARM64)
++  const uintptr_t pc = info->ContextRecord->Pc;
++#elif defined(_M_X64)
++  const uintptr_t pc = info->ContextRecord->Rip;
++#else
++  const uintptr_t pc = info->ContextRecord->Eip;
++#endif
++  // An execute fault is reported as kind 8 with DEP, and as a read (0) at
++  // the program counter on cores that do not tell them apart.
++  const bool execute =
++      kind == 8 || (kind == 0 && (pc & kPageMask) == (address & kPageMask));
++  if (kind == 1) {
++    // A write to code: the page becomes writable, and not executable.
++    if (Protect(page, 4096, PAGE_READWRITE)) {
++      return EXCEPTION_CONTINUE_EXECUTION;
++    }
++  } else if (execute) {
++    // Running the page again: executable, and not writable, with the
++    // instruction cache made to see what was written.
++    if (Protect(page, 4096, PAGE_EXECUTE_READ)) {
++      FlushInstructionCache(GetCurrentProcess(), page, 4096);
++      return EXCEPTION_CONTINUE_EXECUTION;
++    }
++  }
++  return EXCEPTION_CONTINUE_SEARCH;
++}
++
++// Commits [address, address + size) read-write: an app may not commit
++// executable memory.
++bool Commit(void* address, size_t size) {
++  return Alloc(address, size, MEM_COMMIT, PAGE_READWRITE) != nullptr;
++}
++
++// Committed (or not yet), then made read-execute.
++bool MakeExecutable(void* address, size_t size) {
++  return Commit(address, size) && Protect(address, size, PAGE_EXECUTE_READ);
++}
++
++// Code V8 will also write: read-execute, and recorded for the handler.
++bool MakeJit(void* address, size_t size) {
++  static std::atomic<bool> handler{false};
++  bool expected = false;
++  if (handler.compare_exchange_strong(expected, true)) {
++    AddVectoredExceptionHandler(1, &OnFault);
++  }
++  if (!MakeExecutable(address, size)) return false;
++  AddRange(reinterpret_cast<uintptr_t>(address), size);
++  return true;
++}
++
++}  // namespace w10m_jit
++#endif  // defined(VENETIUM_W10M)
++
+ // |VirtualAlloc| will fail if allocation at the hint address is blocked.
+ constexpr bool kHintIsAdvisory = false;
+ std::atomic<int32_t> s_allocPageErrorCode{ERROR_SUCCESS};
+@@ -114,6 +284,25 @@ uintptr_t SystemAllocPagesInternal(
+     PageTag page_tag,
+     [[maybe_unused]] int file_descriptor_for_shared_alloc) {
+   const DWORD access_flag = GetAccessFlags(accessibility);
++#if defined(VENETIUM_W10M)
++  if (access_flag == PAGE_EXECUTE_READWRITE ||
++      access_flag == PAGE_EXECUTE_READ) {
++    // Reserved, then committed as code (w10m_jit above).
++    void* base = VirtualAllocWithRetry(reinterpret_cast<void*>(hint), length,
++                                       MEM_RESERVE, PAGE_NOACCESS);
++    if (base && !(access_flag == PAGE_EXECUTE_READWRITE
++                      ? w10m_jit::MakeJit(base, length)
++                      : w10m_jit::MakeExecutable(base, length))) {
++      s_allocPageErrorCode = GetLastError();
++      VirtualFree(base, 0, MEM_RELEASE);
++      return 0;
++    }
++    if (!base) {
++      s_allocPageErrorCode = GetLastError();
++    }
++    return reinterpret_cast<uintptr_t>(base);
++  }
++#endif
+   const DWORD type_flags =
+       (access_flag == PAGE_NOACCESS) ? MEM_RESERVE : (MEM_RESERVE | MEM_COMMIT);
+   void* ret = VirtualAllocWithRetry(reinterpret_cast<void*>(hint), length,
+@@ -146,6 +335,15 @@ bool TrySetSystemPagesAccessInternal(
+     size_t length,
+     PageAccessibilityConfiguration accessibility) {
+   void* ptr = reinterpret_cast<void*>(address);
++#if defined(VENETIUM_W10M)
++  w10m_jit::RemoveRange(address, length);
++  if (GetAccessFlags(accessibility) == PAGE_EXECUTE_READWRITE) {
++    return w10m_jit::MakeJit(ptr, length);
++  }
++  if (GetAccessFlags(accessibility) == PAGE_EXECUTE_READ) {
++    return w10m_jit::MakeExecutable(ptr, length);
++  }
++#endif
+   if (GetAccessFlags(accessibility) == PAGE_NOACCESS) {
+     return VirtualFree(ptr, length, MEM_DECOMMIT) != 0;
+   }
+@@ -162,6 +360,18 @@ void SetSystemPagesAccessInternal(
+     PageAccessibilityConfiguration accessibility) {
+   void* ptr = reinterpret_cast<void*>(address);
+   const DWORD access_flag = GetAccessFlags(accessibility);
++#if defined(VENETIUM_W10M)
++  w10m_jit::RemoveRange(address, length);
++  if (access_flag == PAGE_EXECUTE_READWRITE ||
++      access_flag == PAGE_EXECUTE_READ) {
++    if (!(access_flag == PAGE_EXECUTE_READWRITE
++              ? w10m_jit::MakeJit(ptr, length)
++              : w10m_jit::MakeExecutable(ptr, length))) {
++      OOM_CRASH(length);
++    }
++    return;
++  }
++#endif
+   if (access_flag == PAGE_NOACCESS) {
+     if (!VirtualFree(ptr, length, MEM_DECOMMIT)) {
+       // We check `GetLastError` for `ERROR_SUCCESS` here so that in a crash
+@@ -183,6 +393,9 @@ void SetSystemPagesAccessInternal(
+ }
+ 
+ void FreePagesInternal(uintptr_t address, size_t length) {
++#if defined(VENETIUM_W10M)
++  w10m_jit::RemoveRange(address, length);
++#endif
+   PA_CHECK(VirtualFree(reinterpret_cast<void*>(address), 0, MEM_RELEASE));
+ }
+ 
+@@ -208,6 +421,9 @@ bool DecommitAndZeroSystemPagesInternal(uintptr_t address,
+   // https://docs.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtualalloc
+   // for MEM_COMMIT: "The function also guarantees that when the caller later
+   // initially accesses the memory, the contents will be zero."
++#if defined(VENETIUM_W10M)
++  w10m_jit::RemoveRange(address, length);
++#endif
+   PA_CHECK(VirtualFree(reinterpret_cast<void*>(address), length, MEM_DECOMMIT));
+   return true;
+ }
+diff --git a/v8/src/base/platform/platform-win32.cc b/v8/src/base/platform/platform-win32.cc
+index 7d98650e2f0af83260d2b844e9c8897366bf79c8..be3281cb14d494cb2296613c1772a25afe20c893 100644
+--- a/v8/src/base/platform/platform-win32.cc
++++ b/v8/src/base/platform/platform-win32.cc
+@@ -28,6 +28,7 @@
+ #include <psapi.h>              // For GetProcessMemoryInfo().
+ #include <tlhelp32.h>           // For Module32First and al.
+ 
++#include <atomic>
+ #include <limits>
+ #include <optional>
+ 
+@@ -882,6 +883,174 @@ void* OS::GetRandomMmapAddr() {
+   return reinterpret_cast<void*>(address);
+ }
+ 
++#if defined(VENETIUM_W10M)
++// JIT memory on Windows 10 Mobile.
++//
++// A UWP app gets executable memory only through VirtualAllocFromApp and
++// VirtualProtectFromApp, with the codeGeneration capability, and only W^X:
++// no page is ever writable and executable at once, and none is executable
++// when committed. V8 maps its code pages read-write-execute and writes code
++// whenever it likes (W^X it enforces only with PKU or Apple's JIT
++// protection). So on this platform a page V8 wants RWX is made read-execute,
++// and recorded: a write to it faults, and the handler below makes that page
++// read-write and lets the write go on; executing it faults in turn, and the
++// handler makes it read-execute again, flushing the instruction cache. Code
++// is written in bursts and then run, so each page flips a few times. With
++// --jitless (no codeGeneration capability) none of this is ever reached.
++namespace w10m_jit {
++
++using VirtualAllocFromAppFn = PVOID(WINAPI*)(PVOID, SIZE_T, ULONG, ULONG);
++using VirtualProtectFromAppFn = BOOL(WINAPI*)(PVOID, SIZE_T, ULONG, PULONG);
++
++VirtualAllocFromAppFn g_alloc = nullptr;
++VirtualProtectFromAppFn g_protect = nullptr;
++
++void ResolveOnce() {
++  static std::atomic<bool> resolved{false};
++  if (resolved.load(std::memory_order_acquire)) return;
++  HMODULE kernelbase = GetModuleHandleW(L"kernelbase.dll");
++  if (kernelbase) {
++    g_alloc = reinterpret_cast<VirtualAllocFromAppFn>(
++        GetProcAddress(kernelbase, "VirtualAllocFromApp"));
++    g_protect = reinterpret_cast<VirtualProtectFromAppFn>(
++        GetProcAddress(kernelbase, "VirtualProtectFromApp"));
++  }
++  resolved.store(true, std::memory_order_release);
++}
++
++void* Alloc(void* address, size_t size, DWORD flags, DWORD protect) {
++  ResolveOnce();
++  return g_alloc ? g_alloc(address, size, flags, protect)
++                 : VirtualAlloc(address, size, flags, protect);
++}
++
++bool Protect(void* address, size_t size, DWORD protect) {
++  ResolveOnce();
++  if (g_protect) {
++    ULONG old = 0;
++    return g_protect(address, size, protect, &old) != 0;
++  }
++  DWORD old = 0;
++  return VirtualProtect(address, size, protect, &old) != 0;
++}
++
++// The ranges V8 asked to be RWX. Read by the fault handler, which must not
++// take a lock (the faulting thread may hold it), so a fixed table of atomics:
++// slots are claimed with a compare-and-swap and freed by zeroing them.
++constexpr int kMaxRanges = 4096;
++std::atomic<uintptr_t> g_starts[kMaxRanges];
++std::atomic<uintptr_t> g_ends[kMaxRanges];
++std::atomic<int> g_used{0};
++
++// Forgets every range that begins inside [start, start + size).
++void RemoveRange(uintptr_t start, size_t size) {
++  const uintptr_t end = start + size;
++  const int n = g_used.load(std::memory_order_acquire);
++  for (int i = 0; i < n; ++i) {
++    const uintptr_t s = g_starts[i].load(std::memory_order_acquire);
++    if (s && s >= start && s < end) {
++      g_ends[i].store(0, std::memory_order_release);
++      g_starts[i].store(0, std::memory_order_release);
++    }
++  }
++}
++
++void AddRange(uintptr_t start, size_t size) {
++  RemoveRange(start, size);
++  for (int i = 0; i < kMaxRanges; ++i) {
++    uintptr_t expected = 0;
++    if (g_starts[i].compare_exchange_strong(expected, start)) {
++      g_ends[i].store(start + size, std::memory_order_release);
++      int used = g_used.load(std::memory_order_relaxed);
++      while (used < i + 1 && !g_used.compare_exchange_weak(used, i + 1)) {
++      }
++      return;
++    }
++  }
++  // The table is full: such pages simply stay read-execute, and a write to
++  // one crashes as it would without this layer.
++}
++
++bool IsJit(uintptr_t address) {
++  const int n = g_used.load(std::memory_order_acquire);
++  for (int i = 0; i < n; ++i) {
++    const uintptr_t s = g_starts[i].load(std::memory_order_acquire);
++    if (s && address >= s &&
++        address < g_ends[i].load(std::memory_order_acquire)) {
++      return true;
++    }
++  }
++  return false;
++}
++
++constexpr uintptr_t kPageMask = ~uintptr_t{4095};
++
++LONG CALLBACK OnFault(EXCEPTION_POINTERS* info) {
++  const EXCEPTION_RECORD* record = info->ExceptionRecord;
++  if (record->ExceptionCode != EXCEPTION_ACCESS_VIOLATION ||
++      record->NumberParameters < 2) {
++    return EXCEPTION_CONTINUE_SEARCH;
++  }
++  const ULONG_PTR kind = record->ExceptionInformation[0];
++  const uintptr_t address = record->ExceptionInformation[1];
++  if (!IsJit(address)) return EXCEPTION_CONTINUE_SEARCH;
++  void* page = reinterpret_cast<void*>(address & kPageMask);
++#if defined(_M_ARM)
++  // Thumb: the low bit of the program counter is the mode, not an address.
++  const uintptr_t pc = info->ContextRecord->Pc & ~uintptr_t{1};
++#elif defined(_M_ARM64)
++  const uintptr_t pc = info->ContextRecord->Pc;
++#elif defined(_M_X64)
++  const uintptr_t pc = info->ContextRecord->Rip;
++#else
++  const uintptr_t pc = info->ContextRecord->Eip;
++#endif
++  // An execute fault is reported as kind 8 with DEP, and as a read (0) at
++  // the program counter on cores that do not tell them apart.
++  const bool execute =
++      kind == 8 || (kind == 0 && (pc & kPageMask) == (address & kPageMask));
++  if (kind == 1) {
++    // A write to code: the page becomes writable, and not executable.
++    if (Protect(page, 4096, PAGE_READWRITE)) {
++      return EXCEPTION_CONTINUE_EXECUTION;
++    }
++  } else if (execute) {
++    // Running the page again: executable, and not writable, with the
++    // instruction cache made to see what was written.
++    if (Protect(page, 4096, PAGE_EXECUTE_READ)) {
++      FlushInstructionCache(GetCurrentProcess(), page, 4096);
++      return EXCEPTION_CONTINUE_EXECUTION;
++    }
++  }
++  return EXCEPTION_CONTINUE_SEARCH;
++}
++
++// Commits [address, address + size) read-write: an app may not commit
++// executable memory.
++bool Commit(void* address, size_t size) {
++  return Alloc(address, size, MEM_COMMIT, PAGE_READWRITE) != nullptr;
++}
++
++// Committed (or not yet), then made read-execute.
++bool MakeExecutable(void* address, size_t size) {
++  return Commit(address, size) && Protect(address, size, PAGE_EXECUTE_READ);
++}
++
++// Code V8 will also write: read-execute, and recorded for the handler.
++bool MakeJit(void* address, size_t size) {
++  static std::atomic<bool> handler{false};
++  bool expected = false;
++  if (handler.compare_exchange_strong(expected, true)) {
++    AddVectoredExceptionHandler(1, &OnFault);
++  }
++  if (!MakeExecutable(address, size)) return false;
++  AddRange(reinterpret_cast<uintptr_t>(address), size);
++  return true;
++}
++
++}  // namespace w10m_jit
++#endif  // defined(VENETIUM_W10M)
++
+ namespace {
+ 
+ DWORD GetProtectionFromMemoryPermission(OS::MemoryPermission access) {
+@@ -1006,6 +1175,23 @@ void* OS::Allocate(void* hint, size_t size, size_t alignment,
+   DCHECK_LE(page_size, alignment);
+   hint = AlignedAddress(hint, alignment);
+ 
++#if defined(VENETIUM_W10M)
++  if (access == OS::MemoryPermission::kReadWriteExecute ||
++      access == OS::MemoryPermission::kReadExecute) {
++    // Reserved, then committed as code (w10m_jit above).
++    void* base = AllocateInternal(hint, size, alignment, page_size,
++                                  MEM_RESERVE, PAGE_NOACCESS);
++    if (!base) return nullptr;
++    const bool ok = access == OS::MemoryPermission::kReadWriteExecute
++                        ? w10m_jit::MakeJit(base, size)
++                        : w10m_jit::MakeExecutable(base, size);
++    if (!ok) {
++      VirtualFree(base, 0, MEM_RELEASE);
++      return nullptr;
++    }
++    return base;
++  }
++#endif
+   DWORD flags = (access == OS::MemoryPermission::kNoAccess)
+                     ? MEM_RESERVE
+                     : MEM_RESERVE | MEM_COMMIT;
+@@ -1019,6 +1205,9 @@ void OS::Free(void* address, size_t size) {
+   DCHECK_EQ(0, reinterpret_cast<uintptr_t>(address) % AllocatePageSize());
+   DCHECK_EQ(0, size % AllocatePageSize());
+   USE(size);
++#if defined(VENETIUM_W10M)
++  w10m_jit::RemoveRange(reinterpret_cast<uintptr_t>(address), size);
++#endif
+   CHECK_NE(0, VirtualFree(address, 0, MEM_RELEASE));
+ }
+ 
+@@ -1054,6 +1243,9 @@ void OS::FreeShared(void* address, size_t size) {
+ void OS::Release(void* address, size_t size) {
+   DCHECK_EQ(0, reinterpret_cast<uintptr_t>(address) % CommitPageSize());
+   DCHECK_EQ(0, size % CommitPageSize());
++#if defined(VENETIUM_W10M)
++  w10m_jit::RemoveRange(reinterpret_cast<uintptr_t>(address), size);
++#endif
+   CHECK_NE(0, VirtualFree(address, size, MEM_DECOMMIT));
+ }
+ 
+@@ -1061,6 +1253,15 @@ void OS::Release(void* address, size_t size) {
+ bool OS::SetPermissions(void* address, size_t size, MemoryPermission access) {
+   DCHECK_EQ(0, reinterpret_cast<uintptr_t>(address) % CommitPageSize());
+   DCHECK_EQ(0, size % CommitPageSize());
++#if defined(VENETIUM_W10M)
++  w10m_jit::RemoveRange(reinterpret_cast<uintptr_t>(address), size);
++  if (access == MemoryPermission::kReadWriteExecute) {
++    return w10m_jit::MakeJit(address, size);
++  }
++  if (access == MemoryPermission::kReadExecute) {
++    return w10m_jit::MakeExecutable(address, size);
++  }
++#endif
+   if (access == MemoryPermission::kNoAccess) {
+     return VirtualFree(address, size, MEM_DECOMMIT) != 0;
+   }

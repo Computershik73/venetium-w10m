@@ -88,6 +88,19 @@ void VwInputMethod::SetVirtualKeyboardVisibilityIfEnabled(bool should_show) {
   }
 }
 
+bool VwInputMethod::OnUntranslatedIMEMessage(const CHROME_MSG event,
+                                             NativeEventResult* result) {
+  return false;
+}
+
+void VwInputMethod::OnInputLocaleChanged() {}
+
+bool VwInputMethod::IsInputLocaleCJK() const {
+  return false;
+}
+
+void VwInputMethod::OnUrlChanged() {}
+
 void VwInputMethod::OnDidChangeFocusedClient(
     ui::TextInputClient* focused_before,
     ui::TextInputClient* focused) {

@@ -17,6 +17,7 @@
 #include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #include "url/gurl.h"
+#include "venetium_w10m/browser/vw_clipboard.h"
 #include "venetium_w10m/browser/vw_dialogs.h"
 #include "venetium_w10m/browser/vw_engine.h"
 
@@ -39,6 +40,7 @@ class VwBrowser {
 
   VwPlatform* platform() { return platform_.get(); }
   VwDialogs* dialogs() { return &dialogs_; }
+  VwClipboard* clipboard() { return &clipboard_; }
   VwBrowserContext* context() { return context_; }
 
   // A new tab under |id| (from VwEngine::NextTabId), showing |url| unless it
@@ -75,6 +77,8 @@ class VwBrowser {
   VwTab* AddTab(std::unique_ptr<VwTab> tab, bool select);
   void PublishSelection();
 
+  // First: the clipboard is the thread's before a page can touch it.
+  VwClipboard clipboard_;
   raw_ptr<VwBrowserContext> context_;
   std::unique_ptr<VwPlatform> platform_;
   VwDialogs dialogs_;

@@ -322,7 +322,11 @@ VW_EXPORT void venetium_w10m_file_reply(int32_t id, const char* paths) {
 }
 
 VW_EXPORT void venetium_w10m_clipboard_phone_text(const char* text) {
-  VwEngine::Get()->SetPhoneClipboard(Text(text));
+  Post(base::BindOnce(
+      [](std::string text, VwBrowser* browser) {
+        browser->clipboard()->SetPhoneText(text);
+      },
+      Text(text)));
 }
 
 }  // extern "C"

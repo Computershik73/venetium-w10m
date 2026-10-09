@@ -14,6 +14,7 @@
 
 #include <vector>
 
+#include "base/no_destructor.h"
 #include "base/synchronization/lock.h"
 #include "ui/gfx/geometry/rect.h"
 
@@ -40,6 +41,7 @@ class FrameBuffer {
   uint64_t serial();
 
  private:
+  friend class base::NoDestructor<FrameBuffer>;
   FrameBuffer() = default;
 
   base::Lock lock_;

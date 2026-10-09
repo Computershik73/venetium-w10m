@@ -51,6 +51,8 @@ shared_library("venetium_engine") {
     "browser/vw_browser_context.h",
     "browser/vw_browser_main_parts.cc",
     "browser/vw_browser_main_parts.h",
+    "browser/vw_clipboard.cc",
+    "browser/vw_clipboard.h",
     "browser/vw_dialogs.cc",
     "browser/vw_dialogs.h",
     "browser/vw_download_delegate.cc",
@@ -81,6 +83,7 @@ shared_library("venetium_engine") {
   deps = [
     "//base",
     "//components/download/public/common:public",
+    "//components/headless/clipboard",
     "//components/embedder_support:user_agent",
     "//components/keyed_service/content",
     "//components/url_formatter",
