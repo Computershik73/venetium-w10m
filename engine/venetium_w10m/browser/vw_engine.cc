@@ -8,6 +8,8 @@
 
 #include "base/functional/bind.h"
 #include "base/location.h"
+#include "base/task/single_thread_task_runner.h"
+#include "base/time/time.h"
 #include "venetium_w10m/browser/vw_browser.h"
 #include "venetium_w10m/browser/vw_present_guard.h"
 #include "venetium_w10m/common/vw_log.h"
@@ -129,11 +131,43 @@ void VwEngine::EngineExited() {
 }
 
 void VwEngine::HardwarePresentWorked(PresentKind kind) {
-  if (PresentGuard::Get()->Worked(kind)) {
-    NoteF("gpu: first frame on screen through %s",
-          kind == PresentKind::kAngle ? "GPU compositing (ANGLE)"
-                                      : "Direct3D 11");
+  if (!PresentGuard::Get()->Worked(kind)) {
+    return;
   }
+  NoteF("gpu: first frame on screen through %s",
+        kind == PresentKind::kAngle        ? "GPU compositing (ANGLE)"
+        : kind == PresentKind::kCompositor ? "the Direct3D 11 compositor"
+                                           : "Direct3D 11");
+  if (kind != PresentKind::kCompositor) {
+    return;
+  }
+  // One frame is a start, not proof (as with ANGLE, vw_platform.cc): the run
+  // has to go on for a little before it stops counting against the
+  // compositor. Timed on the browser's thread; this one is viz's.
+  PostToBrowser(base::BindOnce([](VwBrowser*) {
+    base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
+        FROM_HERE, base::BindOnce([]() {
+          if (!VwEngine::Get()->compositor_failed()) {
+            PresentGuard::Get()->Proven(PresentKind::kCompositor);
+            Note("gpu: the Direct3D 11 compositor has run for five seconds");
+          }
+        }),
+        base::Seconds(5));
+  }));
+}
+
+void VwEngine::CompositorFailed(const char* reason, bool for_good) {
+  if (for_good) {
+    PresentGuard::Get()->GaveUp(PresentKind::kCompositor);
+  } else {
+    PresentGuard::Get()->Survived(PresentKind::kCompositor);
+  }
+  if (compositor_failed_.exchange(true)) {
+    return;
+  }
+  NoteF("gpu: the Direct3D 11 compositor given up, the CPU draws every frame "
+        "from here: %s",
+        reason ? reason : "no reason given");
 }
 
 void VwEngine::GpuCompositingFailed(const char* reason, bool for_good) {

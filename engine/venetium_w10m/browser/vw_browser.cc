@@ -19,6 +19,7 @@
 #include "services/network/public/mojom/cookie_manager.mojom.h"
 #include "ui/aura/window.h"
 #include "venetium_w10m/browser/vw_browser_context.h"
+#include "venetium_w10m/browser/vw_frame_sink.h"
 #include "venetium_w10m/browser/vw_platform.h"
 #include "venetium_w10m/browser/vw_tab.h"
 #include "venetium_w10m/common/vw_log.h"
@@ -277,6 +278,10 @@ void VwBrowser::AppStateChanged(bool suspended) {
     memory_.OnAppState(false);
     return;
   }
+  // A suspended app is ended by its size, and is to give the graphics
+  // driver's memory back: the compositor's textures go, and the device is
+  // trimmed. As soon as viz's thread gets to it.
+  ReleaseGraphicsMemory(/*trim=*/true);
   // The phone usually ends a suspended app without another word: cookies and
   // local storage are written out now.
   NoteF("app suspending: flushing storage");
@@ -289,6 +294,11 @@ void VwBrowser::AppStateChanged(bool suspended) {
 }
 
 void VwBrowser::MemoryPressure(int32_t level) {
+  if (level >= 2) {
+    // The phone's own word that the app is at its limit: the compositor's
+    // textures go at once, whatever the arbiter makes of the rest.
+    ReleaseGraphicsMemory(/*trim=*/false);
+  }
   memory_.OnPhoneLevel(level);
 }
 

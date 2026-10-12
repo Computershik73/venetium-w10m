@@ -107,8 +107,9 @@ uint32_t BuildStamp() {
 }
 
 const char* Name(PresentKind kind) {
-  return kind == PresentKind::kAngle ? "GPU compositing"
-                                     : "presenting through Direct3D 11";
+  return kind == PresentKind::kAngle        ? "GPU compositing"
+         : kind == PresentKind::kCompositor ? "the Direct3D 11 compositor"
+                                            : "presenting through Direct3D 11";
 }
 
 }  // namespace
@@ -131,8 +132,9 @@ void PresentGuard::Load(const base::FilePath& file,
     stamp_ = (stamp_ ^ static_cast<uint8_t>(c)) * 16777619u;
   }
   video_ = ReadVideoCount(file, stamp_, forget);
-  angle_ = 0;
-  d3d11_ = 0;
+  angle_ = Way();
+  d3d11_ = Way();
+  compositor_ = Way();
   if (forget) {
     ::DeleteFileW(file.value().c_str());
     Note("gpu: what earlier runs could not do is forgotten (asked to retry)");
@@ -151,8 +153,12 @@ void PresentGuard::Load(const base::FilePath& file,
   unsigned stamp = 0;
   int angle = 0;
   int d3d11 = 0;
+  int compositor = 0;
   // An older engine's file (a bare count) does not parse, and is dropped.
-  if (sscanf_s(text, "VWG1 %x %d %d", &stamp, &angle, &d3d11) != 3) {
+  // One written before the compositor's count was kept has three numbers:
+  // the fourth is 0 then.
+  if (sscanf_s(text, "VWG1 %x %d %d %d", &stamp, &angle, &d3d11,
+               &compositor) < 3) {
     return;
   }
   if (stamp != stamp_) {
@@ -160,12 +166,15 @@ void PresentGuard::Load(const base::FilePath& file,
          "could not do is forgotten");
     return;
   }
-  angle_ = angle;
-  d3d11_ = d3d11;
+  angle_.count = angle;
+  d3d11_.count = d3d11;
+  compositor_.count = compositor;
 }
 
-int* PresentGuard::Count(PresentKind kind) {
-  return kind == PresentKind::kAngle ? &angle_ : &d3d11_;
+PresentGuard::Way* PresentGuard::WayOf(PresentKind kind) {
+  return kind == PresentKind::kAngle        ? &angle_
+         : kind == PresentKind::kCompositor ? &compositor_
+                                            : &d3d11_;
 }
 
 bool PresentGuard::Allowed(PresentKind kind) {
@@ -174,26 +183,82 @@ bool PresentGuard::Allowed(PresentKind kind) {
 
 int PresentGuard::Failures(PresentKind kind) {
   base::AutoLock hold(lock_);
-  return *Count(kind);
+  return WayOf(kind)->count;
 }
 
 void PresentGuard::Trying(PresentKind kind) {
   base::AutoLock hold(lock_);
-  ++*Count(kind);
+  Way* way = WayOf(kind);
+  if (way->counted || way->count == kGivenUp) {
+    return;
+  }
+  ++way->count;
+  way->counted = true;
+  Write();
+}
+
+void PresentGuard::Entered(PresentKind kind) {
+  base::AutoLock hold(lock_);
+  Way* way = WayOf(kind);
+  way->entered = true;
+  if (!way->untried) {
+    return;
+  }
+  // Suspended before it had done anything, and doing it now: the run counts
+  // again.
+  way->untried = false;
+  if (way->worked || way->count == kGivenUp) {
+    return;
+  }
+  ++way->count;
+  way->counted = true;
+  Write();
+}
+
+void PresentGuard::Left(PresentKind kind) {
+  base::AutoLock hold(lock_);
+  WayOf(kind)->entered = false;
+}
+
+void PresentGuard::Untried(PresentKind kind) {
+  base::AutoLock hold(lock_);
+  Way* way = WayOf(kind);
+  if (!way->counted || way->entered || way->worked || way->count <= 0 ||
+      way->count == kGivenUp) {
+    return;
+  }
+  --way->count;
+  way->counted = false;
+  way->untried = true;
+  Write();
+}
+
+void PresentGuard::Survived(PresentKind kind) {
+  base::AutoLock hold(lock_);
+  Way* way = WayOf(kind);
+  // Nothing follows this in the run: no Entered() counts it again.
+  way->untried = false;
+  if (!way->counted || way->count <= 0 || way->count == kGivenUp) {
+    return;
+  }
+  --way->count;
+  way->counted = false;
   Write();
 }
 
 bool PresentGuard::Worked(PresentKind kind) {
   base::AutoLock hold(lock_);
-  bool& worked =
-      kind == PresentKind::kAngle ? angle_worked_ : d3d11_worked_;
-  if (worked) {
+  Way* way = WayOf(kind);
+  if (way->worked) {
     return false;
   }
-  worked = true;
-  if (kind != PresentKind::kAngle && *Count(kind) != 0 &&
-      *Count(kind) != kGivenUp) {
-    *Count(kind) = 0;
+  way->worked = true;
+  // Frames through plain Direct3D 11 are proof at once; the two that
+  // composite on the GPU wait for Proven().
+  if (kind == PresentKind::kD3D11 && way->count != 0 &&
+      way->count != kGivenUp) {
+    way->count = 0;
+    way->counted = false;
     Write();
   }
   return true;
@@ -201,27 +266,26 @@ bool PresentGuard::Worked(PresentKind kind) {
 
 void PresentGuard::Proven(PresentKind kind) {
   base::AutoLock hold(lock_);
-  const bool worked =
-      kind == PresentKind::kAngle ? angle_worked_ : d3d11_worked_;
-  if (!worked || *Count(kind) == 0 || *Count(kind) == kGivenUp) {
+  Way* way = WayOf(kind);
+  if (!way->worked || way->count == 0 || way->count == kGivenUp) {
     return;
   }
-  *Count(kind) = 0;
+  way->count = 0;
+  way->counted = false;
   Write();
 }
 
 void PresentGuard::GaveUp(PresentKind kind) {
   base::AutoLock hold(lock_);
-  const bool worked =
-      kind == PresentKind::kAngle ? angle_worked_ : d3d11_worked_;
-  if (worked) {
+  Way* way = WayOf(kind);
+  if (way->worked) {
     // It did work on this phone, and broke later: the next run tries again.
     return;
   }
-  if (*Count(kind) == kGivenUp) {
+  if (way->count == kGivenUp) {
     return;
   }
-  *Count(kind) = kGivenUp;
+  way->count = kGivenUp;
   Write();
   NoteF("gpu: %s is left alone from now on (a new build, other engine "
         "switches, or Hardware graphics off and on, tries again)",
@@ -309,14 +373,16 @@ void PresentGuard::Write() {
   if (file_.empty()) {
     return;
   }
-  if (!angle_ && !d3d11_) {
+  if (!angle_.count && !d3d11_.count && !compositor_.count) {
     ::DeleteFileW(file_.value().c_str());
     return;
   }
+  // The compositor's count last: an engine from before it reads the first
+  // three fields and is not confused by a fourth.
   char text[64];
-  const int length = sprintf_s(text, "VWG1 %08x %d %d\n",
-                               static_cast<unsigned>(stamp_), angle_,
-                               d3d11_);
+  const int length = sprintf_s(text, "VWG1 %08x %d %d %d\n",
+                               static_cast<unsigned>(stamp_), angle_.count,
+                               d3d11_.count, compositor_.count);
   HANDLE handle = ::CreateFileW(file_.value().c_str(), GENERIC_WRITE, 0,
                                 nullptr, CREATE_ALWAYS, 0, nullptr);
   if (handle == INVALID_HANDLE_VALUE || length <= 0) {

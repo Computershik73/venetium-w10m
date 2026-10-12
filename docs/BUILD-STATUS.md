@@ -25,20 +25,32 @@ The device the port is brought up on: HP Elite x3 class, Windows 10 Mobile
 | Memory pressure, arranged as gecko-w10m has it: the shell measures the address space (largest free piece, all that is free) and the app's memory against the phone's limit every 2 s; one arbiter in the engine (`browser/vw_memory`) trims at level 1, unloads background tabs least recently seen first at level 2 (all of them at 3) and collects the JavaScript heaps in full; an unloaded tab keeps its place, title and history and loads again when selected | built (222.21), untested. gecko-w10m itself does not unload tabs: that half is new |
 | Before an allocation fails for good: PartitionAlloc's 96 MB reserve as a canary, V8's near-heap-limit callback (the limit is raised only while there is a tab to unload), Chromium's own RAM-based pressure watcher put to sleep, discardable memory capped at 64 MB | built (222.21), untested |
 | H.264 on the GPU's decoder (Chromium's `D3D11VideoDecoder` on ANGLE's device, so only with GPU compositing, feature level 11): one video at a time has it and the others decode in software; the driver is asked whether it takes short slices before any H.264 is offered; frames are copied out by the video processor (gecko-w10m's way at 9_3) and drawn by GL; failures before a frame fall back to ffmpeg, later ones restart the player in software; runs that end while a decoder is unproven are counted in `present-guard-video` | built (222.22), untested. gecko-w10m drives the same driver through Media Foundation's decoder, not through DXVA calls of its own: whether the Adreno driver takes Chromium's is what the first run says |
-| Feature level 9_3 phones: frames through Direct3D 11 (the row above); a Direct3D 11 compositor of our own for them | the first is built and is what such a phone gets today; the second is designed, not written |
+| Feature level 9_3 phones: a Direct3D 11 compositor of our own inside viz (the CPU rasters tiles as before; viz keeps them as textures on the presenting device and draws the frames it can -- solid colours, tiles and textures under scale and translation, clips, opacity -- with level 9_3 shaders into the swap chain's back buffer; a frame it cannot draw is drawn by Skia and presented as in the row above). The default where the best level is below 10_0; `--vw-gpu=d3d11` forces it on any phone with the device held to 9_3; `--vw-gpu=off` leaves frames through Direct3D 11 alone | built (222.23), untested: nothing of it has run on a driver. The first log is to be read for `compositor: 6 shaders ... made in N ms`, the `compositor: over 10 s of animation ...` line (frames the GPU drew, why the CPU drew the rest) and the `frames:` line against `--vw-gpu=off` |
 
 What the log says about graphics, in order: `gpu: Direct3D 11 feature
 level`, `gpu: GPU compositing (ANGLE on Direct3D 11)` or `software
 compositing`, `panel: chain N shows ...`, `gpu: first frame on screen
 through ...`, then every ten seconds of animation `vsync: N ticks ...` and
 (software compositing) `frames: N in runs ...`. `gpu: GPU compositing given
-up ...: <reason>` is the fallback. What a run could not do is remembered in
+up ...: <reason>` is the fallback. With the Direct3D 11 compositor the mode
+line is `gpu: the Direct3D 11 compositor (...)`, the device has a number
+(`d3d11: device N at feature level 0x9300`), `panel: chain N shows the
+Direct3D 11 compositor` and `gpu: first frame on screen through the Direct3D
+11 compositor` come with the first frame it drew, and every ten seconds of
+animation `compositor: over 10 s of animation ...` says how many frames the
+GPU drew and why the CPU drew the others; `gpu: the Direct3D 11 compositor
+given up ...: <reason>` is its fallback, to software frames on the same swap
+chain. What a run could not do is remembered in
 `present-guard` (two runs that end before GPU compositing has run for five
 seconds, or one failure that proves it, and that way of presenting is left
 alone until the package is a new build, the engine switches change, or
 Hardware graphics is switched off and on). Menu → Engine switches takes
 Chromium's and the engine's own switches for the next start:
-`--vw-gpu=off`, `--vw-vsync=timer` (frames from a timer, as before),
+`--vw-gpu=off`, `--vw-gpu=d3d11` (the Direct3D 11 compositor on a device
+held to feature level 9_3; with `--vw-compositor-flip=2` every other frame
+it could draw is left to the CPU, so that any difference between the two
+pictures flickers, and `--vw-compositor-fail=N` fails every Nth of its
+frames before drawing), `--vw-vsync=timer` (frames from a timer, as before),
 `--vw-vsync=eager` (a frame made up at once when an animation starts),
 `--disable_post_sub_buffers_for_onscreen_surfaces` (whole-frame presents),
 `--vw-codecs=all` (VP9 and AV1 offered to pages and calls again),
@@ -159,8 +171,11 @@ notice, keyboard sink, back button.
 1. GPU compositing on the phone: read the first 222.19 log (does ANGLE
    start, does the first frame come, does a resize stay in place, what the
    `vsync:` and `memory:` lines say).
-2. Feature level 9_3: a Direct3D 11 compositor in viz for phones ANGLE's
-   Direct3D 11 backend does not take (it starts at 10_0).
+2. Feature level 9_3: run the Direct3D 11 compositor (`--vw-gpu=d3d11` on
+   the Elite x3, then a Lumia 650 as it is): does the driver give a device
+   at 9_3 alone, how long the shaders take, what uploads cost, which reasons
+   keep frames on the CPU (child render passes, rounded corners), and
+   whether `--vw-compositor-flip=2` flickers.
 3. Memory: read the first log with `memory: pressure` lines -- do the
    marks fit, does free address space come back after `tab N: unloaded`
    (PartitionAlloc never unreserves its super pages on 32-bit), how long a

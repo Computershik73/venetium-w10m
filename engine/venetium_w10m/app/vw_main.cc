@@ -133,6 +133,10 @@ bool HasSwitch(const std::string& switches, const char* name) {
 // How frames reach the screen, best first:
 //   GPU compositing  ANGLE on Direct3D 11 draws the page's layers into the
 //                    shell's SwapChainPanel (feature level 11_0 and up);
+//   the Direct3D 11  the CPU rasters, and viz draws the layers itself with
+//   compositor       Direct3D 11 into the swap chain below, frame by frame
+//                    where it can (a GPU that stops below 10_0, where ANGLE
+//                    cannot run; or --vw-gpu=d3d11, on a device held to 9_3);
 //   D3D11 present    the software compositor's frames, shown by the GPU
 //                    through the panel (any feature level from 9_3);
 //   the bitmap       frames copied out to the shell.
@@ -180,9 +184,13 @@ void ChoosePresentation(EngineConfig* config, uint64_t ram_mb) {
           guard->Failures(PresentKind::kD3D11));
     return;
   }
-  const bool angle_capable =
-      level >= 0xb000 && PanelHost::Get()->has_panel() &&
-      !HasSwitch(config->switches, "--vw-gpu=off");
+  const bool off = HasSwitch(config->switches, "--vw-gpu=off");
+  // The Direct3D 11 compositor asked for by name: on any phone, and with the
+  // device a 9_3 phone has, so that it is tested within the same limits.
+  const bool d3d11_asked = HasSwitch(config->switches, "--vw-gpu=d3d11");
+  const bool angle_capable = level >= 0xb000 &&
+                             PanelHost::Get()->has_panel() && !off &&
+                             !d3d11_asked;
   config->gpu_compositing =
       angle_capable && guard->Allowed(PresentKind::kAngle);
   if (angle_capable && !config->gpu_compositing) {
@@ -216,10 +224,22 @@ void ChoosePresentation(EngineConfig* config, uint64_t ram_mb) {
          "(--vw-video=software among the engine switches keeps it on the "
          "CPU)");
   }
-  // GPU compositing falls back to presenting through Direct3D 11 within the
-  // run, so a run counts against the one it starts with.
-  guard->Trying(config->gpu_compositing ? PresentKind::kAngle
-                                        : PresentKind::kD3D11);
+  const bool compositor_capable = (level < 0xa000 || d3d11_asked) &&
+                                  PanelHost::Get()->has_panel() && !off;
+  config->d3d_compositing =
+      compositor_capable && guard->Allowed(PresentKind::kCompositor);
+  config->d3d_level_9_3 = d3d11_asked;
+  if (compositor_capable && !config->d3d_compositing) {
+    NoteF("gpu: no Direct3D 11 compositor: earlier runs with it did not last "
+          "(count %d; a new build, other engine switches, or Hardware "
+          "graphics off and on, tries again)",
+          guard->Failures(PresentKind::kCompositor));
+  }
+  // Both fall back to presenting software frames through Direct3D 11 within
+  // the run, so a run counts against the one it starts with.
+  guard->Trying(config->gpu_compositing   ? PresentKind::kAngle
+                : config->d3d_compositing ? PresentKind::kCompositor
+                                          : PresentKind::kD3D11);
   config->hardware_present = true;
   // A frame that takes a little more than a refresh costs two with two
   // buffers (gecko-w10m); a third is 14 MB at this size, which phones with
@@ -231,10 +251,14 @@ void ChoosePresentation(EngineConfig* config, uint64_t ram_mb) {
     config->present_buffers = 3;
   }
   NoteF("gpu: %s; software frames through Direct3D 11 into the panel when "
-        "it is there, %d buffers",
-        config->gpu_compositing ? "GPU compositing (ANGLE on Direct3D 11)"
-                                : "software compositing",
-        config->present_buffers);
+        "it is there, %d buffers%s",
+        config->gpu_compositing   ? "GPU compositing (ANGLE on Direct3D 11)"
+        : config->d3d_compositing ? "the Direct3D 11 compositor (the CPU "
+                                    "rasters, Direct3D 11 draws the frames "
+                                    "it can)"
+                                  : "software compositing",
+        config->present_buffers,
+        config->d3d_level_9_3 ? ", the device held to feature level 9_3" : "");
 }
 
 // Runs on the thread that could not get memory, just before Chromium raises
@@ -302,7 +326,9 @@ void SetUpCommandLine(const EngineConfig& config) {
     command_line->AppendSwitch(switches::kDisableAccelerated2dCanvas);
   } else {
     // Software raster and compositing; the frames go to the panel through
-    // Direct3D 11, or to the shell's bitmap (vw_frame_sink).
+    // Direct3D 11, or to the shell's bitmap (vw_frame_sink). The Direct3D 11
+    // compositor is this too, as far as Chromium knows: it is viz's software
+    // renderer that draws the frames it can with Direct3D 11.
     command_line->AppendSwitch(switches::kDisableGpu);
     command_line->AppendSwitch(switches::kDisableGpuCompositing);
   }

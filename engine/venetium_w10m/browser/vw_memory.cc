@@ -13,6 +13,7 @@
 #include "third_party/abseil-cpp/absl/strings/str_format.h"
 #include "venetium_w10m/browser/vw_browser.h"
 #include "venetium_w10m/browser/vw_engine.h"
+#include "venetium_w10m/browser/vw_frame_sink.h"
 #include "venetium_w10m/common/vw_log.h"
 #include "venetium_w10m/renderer/vw_renderer_client.h"
 
@@ -411,6 +412,10 @@ void VwMemory::TrimHard(int step) {
   if (step != step_ || !stepping_) {
     return;
   }
+  // The Direct3D 11 compositor's textures are copies of tiles viz holds
+  // anyway: they go at every hard trim, and are made again from the tiles
+  // when next drawn.
+  ReleaseGraphicsMemory(/*trim=*/false);
   Tell(base::MEMORY_PRESSURE_LEVEL_CRITICAL);
   // Chromium's own answer to critical pressure, for a renderer with a page
   // on screen, is only the start of an incremental collection

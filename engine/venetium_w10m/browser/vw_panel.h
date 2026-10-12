@@ -65,6 +65,11 @@ class PanelHost {
   // The chain that was to replace one taken out could not be made.
   void NotReplaced();
 
+  // The chain of |generation| shows |kind| from now on (the same chain takes
+  // software frames and the Direct3D 11 compositor's). Nothing if another
+  // chain is in the panel by now. Logged when it changes.
+  void SetKind(uint32_t generation, PresentKind kind);
+
   // A frame of |generation| reached the screen.
   void Presented(uint32_t generation);
 

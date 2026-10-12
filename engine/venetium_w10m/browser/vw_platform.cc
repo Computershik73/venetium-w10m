@@ -363,6 +363,15 @@ void VwPlatform::SetActive(bool active) {
     // die of it, however short it was.
     PresentGuard::Get()->Proven(PresentKind::kAngle);
   }
+  if (!active) {
+    // The same for the Direct3D 11 compositor. And a run suspended before
+    // the compositor drew, or tried to draw, a single frame did nothing the
+    // driver could have died of: it is not counted against it.
+    PresentGuard::Get()->Untried(PresentKind::kCompositor);
+    if (!VwEngine::Get()->compositor_failed()) {
+      PresentGuard::Get()->Proven(PresentKind::kCompositor);
+    }
+  }
   if (vsync_) {
     vsync_->SetActive(active);
   }

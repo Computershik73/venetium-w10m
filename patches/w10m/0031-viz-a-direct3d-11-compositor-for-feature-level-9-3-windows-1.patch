@@ -1,0 +1,2907 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Mon, 12 Oct 2026 15:53:46 +0400
+Subject: [PATCH] viz: a Direct3D 11 compositor for feature level 9_3 (Windows
+ 10 Mobile)
+
+"The CPU draws, the GPU composites", as gecko-w10m does on the phones
+whose GPU stops at Direct3D feature level 9_3, where ANGLE's Direct3D 11
+backend cannot run. W10mD3D11Renderer is a SoftwareRenderer that draws
+the frames it can with Direct3D 11, straight into the embedder's swap
+chain: cc's CPU-rastered tiles and the other software resources become
+BGRA textures once (cached by resource, evicted when viz lets the
+resource go, within a budget of a few screens), and a frame is a clear
+and one draw per quad with six level_9_3 shaders compiled offline with
+fxc (w10m_d3d11_shaders.py regenerates the header).
+
+In this version a GPU frame is one render pass of solid colour, tile and
+texture quads, scaled and translated, clipped on the CPU, with opacity
+and source-over blending; edges are placed where Skia would place them.
+Any other frame -- more passes, filters, masks, rounded corners,
+rotation, a copy request -- is drawn whole by the unmodified
+SoftwareRenderer in the same DrawFrame, so nothing is ever missing from
+the picture. Every ten seconds of animation the log says how many frames
+went which way and why.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ components/viz/service/BUILD.gn               |    6 +
+ components/viz/service/display/display.cc     |   24 +
+ .../viz/service/display/w10m_d3d11_painter.cc |  582 +++++++++
+ .../viz/service/display/w10m_d3d11_painter.h  |  207 ++++
+ .../service/display/w10m_d3d11_renderer.cc    | 1039 +++++++++++++++++
+ .../viz/service/display/w10m_d3d11_renderer.h |  244 ++++
+ .../viz/service/display/w10m_d3d11_shaders.h  |  470 ++++++++
+ .../service/display/w10m_d3d11_shaders.hlsl   |   83 ++
+ .../viz/service/display/w10m_d3d11_shaders.py |  133 +++
+ 9 files changed, 2788 insertions(+)
+ create mode 100644 components/viz/service/display/w10m_d3d11_painter.cc
+ create mode 100644 components/viz/service/display/w10m_d3d11_painter.h
+ create mode 100644 components/viz/service/display/w10m_d3d11_renderer.cc
+ create mode 100644 components/viz/service/display/w10m_d3d11_renderer.h
+ create mode 100644 components/viz/service/display/w10m_d3d11_shaders.h
+ create mode 100644 components/viz/service/display/w10m_d3d11_shaders.hlsl
+ create mode 100644 components/viz/service/display/w10m_d3d11_shaders.py
+
+diff --git a/components/viz/service/BUILD.gn b/components/viz/service/BUILD.gn
+index d95e3895e699c2d19bc5309e74218685fd8b44e2..449331f3de40ba161fd4835b3dfc039380e33a06 100644
+--- a/components/viz/service/BUILD.gn
++++ b/components/viz/service/BUILD.gn
+@@ -500,6 +500,12 @@ viz_component("service") {
+       "display_embedder/software_output_device_win_base.h",
+       "display_embedder/software_output_device_win_swapchain.cc",
+       "display_embedder/software_output_device_win_swapchain.h",
++      "display/w10m_d3d11_painter.cc",
++      "display/w10m_d3d11_painter.h",
++      "display/w10m_d3d11_renderer.cc",
++      "display/w10m_d3d11_renderer.h",
++      "display/w10m_d3d11_shaders.h",
++      "display/w10m_d3d11_target.h",
+       "frame_sinks/external_begin_frame_source_w10m.cc",
+       "frame_sinks/external_begin_frame_source_w10m.h",
+       "frame_sinks/external_begin_frame_source_win.cc",
+diff --git a/components/viz/service/display/display.cc b/components/viz/service/display/display.cc
+index ecd530cd32994bda83d754e7fa297a4f44fb53af..e821ccea45839b6b20fcf8e04992370b275790f8 100644
+--- a/components/viz/service/display/display.cc
++++ b/components/viz/service/display/display.cc
+@@ -68,6 +68,10 @@
+ #include "components/viz/service/display/skia_output_surface.h"
+ #include "components/viz/service/display/skia_renderer.h"
+ #include "components/viz/service/display/software_renderer.h"
++#if defined(VENETIUM_W10M)
++#include "components/viz/service/display/software_output_device.h"
++#include "components/viz/service/display/w10m_d3d11_renderer.h"
++#endif
+ #include "components/viz/service/display/surface_aggregator.h"
+ #include "components/viz/service/surfaces/surface.h"
+ #include "components/viz/service/surfaces/surface_manager.h"
+@@ -553,9 +557,29 @@ void Display::InitializeRenderer() {
+     auto resource_provider = std::make_unique<DisplayResourceProviderSoftware>(
+         shared_image_manager_, gpu_scheduler_);
+     DCHECK(!overlay_processor_->IsOverlaySupported());
++#if defined(VENETIUM_W10M)
++    // An output device that presents through a Direct3D 11 swap chain may
++    // let the renderer draw into it: the software renderer then, with the
++    // GPU compositing the frames it can.
++    W10mD3D11Target* d3d11_target =
++        output_surface_->software_device()
++            ? output_surface_->software_device()->GetW10mD3D11Target()
++            : nullptr;
++    std::unique_ptr<SoftwareRenderer> renderer;
++    if (d3d11_target) {
++      renderer = std::make_unique<W10mD3D11Renderer>(
++          &settings_, debug_settings_, output_surface_.get(),
++          resource_provider.get(), overlay_processor_.get(), d3d11_target);
++    } else {
++      renderer = std::make_unique<SoftwareRenderer>(
++          &settings_, debug_settings_, output_surface_.get(),
++          resource_provider.get(), overlay_processor_.get());
++    }
++#else
+     auto renderer = std::make_unique<SoftwareRenderer>(
+         &settings_, debug_settings_, output_surface_.get(),
+         resource_provider.get(), overlay_processor_.get());
++#endif
+     software_renderer_ = renderer.get();
+     renderer_ = std::move(renderer);
+     resource_provider_ = std::move(resource_provider);
+diff --git a/components/viz/service/display/w10m_d3d11_painter.cc b/components/viz/service/display/w10m_d3d11_painter.cc
+new file mode 100644
+index 0000000000000000000000000000000000000000..a9b4595ba4f276a18758f885049f6854c3507d34
+--- /dev/null
++++ b/components/viz/service/display/w10m_d3d11_painter.cc
+@@ -0,0 +1,582 @@
++// Copyright 2026 The Venetium-W10M Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "components/viz/service/display/w10m_d3d11_painter.h"
++
++#include <string.h>
++
++#include <algorithm>
++#include <iterator>
++#include <string>
++#include <utility>
++#include <vector>
++
++#include "base/logging.h"
++#include "base/strings/stringprintf.h"
++#include "base/timer/elapsed_timer.h"
++#include "components/viz/service/display/w10m_d3d11_shaders.h"
++#include "components/viz/service/display/w10m_d3d11_target.h"
++#include "third_party/skia/include/core/SkPixmap.h"
++
++namespace viz {
++
++namespace {
++
++using Microsoft::WRL::ComPtr;
++
++static_assert(sizeof(W10mD3D11Vertex) == 48, "the input layout below");
++
++// W10mD3D11Vertex, as w10m_d3d11_shaders.hlsl's VertexIn names its parts.
++const D3D11_INPUT_ELEMENT_DESC kLayout[] = {
++    {"POSITION", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA,
++     0},
++    {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 8, D3D11_INPUT_PER_VERTEX_DATA,
++     0},
++    {"TEXCOORD", 1, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 16,
++     D3D11_INPUT_PER_VERTEX_DATA, 0},
++    {"TEXCOORD", 2, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 32,
++     D3D11_INPUT_PER_VERTEX_DATA, 0},
++};
++
++// The pixel shaders, in the order of W10mD3D11Draw::Shader.
++struct PixelShader {
++  const char* name;
++  const uint8_t* code;
++  size_t size;
++};
++const PixelShader kPixelShaders[] = {
++    {"colour", kW10mD3D11ColorPS, sizeof(kW10mD3D11ColorPS)},
++    {"texture", kW10mD3D11TexturePS, sizeof(kW10mD3D11TexturePS)},
++    {"opaque texture", kW10mD3D11TextureOpaquePS,
++     sizeof(kW10mD3D11TextureOpaquePS)},
++    {"clamped texture", kW10mD3D11TextureClampPS,
++     sizeof(kW10mD3D11TextureClampPS)},
++    {"clamped opaque texture", kW10mD3D11TextureOpaqueClampPS,
++     sizeof(kW10mD3D11TextureOpaqueClampPS)},
++};
++static_assert(std::size(kPixelShaders) ==
++              static_cast<size_t>(W10mD3D11Draw::Shader::kCount));
++
++constexpr UINT kMaxVertices = W10mD3D11Painter::kMaxQuads * 4;
++
++}  // namespace
++
++W10mD3D11Painter::Texture::Texture() = default;
++W10mD3D11Painter::Texture::Texture(Texture&&) = default;
++W10mD3D11Painter::Texture& W10mD3D11Painter::Texture::operator=(Texture&&) =
++    default;
++W10mD3D11Painter::Texture::~Texture() = default;
++
++W10mD3D11Painter::W10mD3D11Painter() = default;
++
++W10mD3D11Painter::~W10mD3D11Painter() {
++  DropDevice();
++}
++
++W10mD3D11Painter::DeviceResult W10mD3D11Painter::EnsureDevice(
++    W10mD3D11Target* target) {
++  const uint32_t generation = target->GetD3D11DeviceGeneration();
++  if (generation_ && generation_ != generation) {
++    DropDevice();
++  }
++  if (generation_) {
++    return DeviceResult::kReady;
++  }
++  ID3D11Device* device = target->GetD3D11Device();
++  ID3D11DeviceContext* context = target->GetD3D11Context();
++  if (!generation || !device || !context) {
++    return DeviceResult::kFailed;
++  }
++
++  // Said before the driver is asked, not only once it has answered: a log
++  // that ends with this line names the step the process died in.
++  LOG(WARNING) << base::StringPrintf(
++      "compositor: making 6 shaders, a vertex buffer and states on device "
++      "%u",
++      generation);
++  const base::ElapsedTimer timer;
++  std::string what = "CreateVertexShader";
++  HRESULT hr = device->CreateVertexShader(
++      kW10mD3D11QuadVS, sizeof(kW10mD3D11QuadVS), nullptr, &vertex_shader_);
++  if (SUCCEEDED(hr)) {
++    what = "CreateInputLayout";
++    hr = device->CreateInputLayout(kLayout, std::size(kLayout),
++                                   kW10mD3D11QuadVS, sizeof(kW10mD3D11QuadVS),
++                                   &layout_);
++  }
++  for (int i = 0; SUCCEEDED(hr) && i < kShaders; ++i) {
++    what = base::StringPrintf("CreatePixelShader (%s)", kPixelShaders[i].name);
++    hr = device->CreatePixelShader(kPixelShaders[i].code,
++                                   kPixelShaders[i].size, nullptr,
++                                   &pixel_shaders_[i]);
++  }
++  if (SUCCEEDED(hr)) {
++    what = "CreateBuffer";
++    D3D11_BUFFER_DESC desc = {};
++    desc.ByteWidth = kMaxVertices * sizeof(W10mD3D11Vertex);
++    desc.Usage = D3D11_USAGE_DYNAMIC;
++    desc.BindFlags = D3D11_BIND_VERTEX_BUFFER;
++    desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
++    hr = device->CreateBuffer(&desc, nullptr, &vertices_);
++  }
++  if (SUCCEEDED(hr)) {
++    // Premultiplied source over, and no blending at all.
++    what = "CreateBlendState";
++    D3D11_BLEND_DESC desc = {};
++    D3D11_RENDER_TARGET_BLEND_DESC& target0 = desc.RenderTarget[0];
++    target0.BlendEnable = FALSE;
++    target0.SrcBlend = target0.SrcBlendAlpha = D3D11_BLEND_ONE;
++    target0.DestBlend = target0.DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA;
++    target0.BlendOp = target0.BlendOpAlpha = D3D11_BLEND_OP_ADD;
++    target0.RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
++    hr = device->CreateBlendState(&desc, &blend_[0]);
++    if (SUCCEEDED(hr)) {
++      target0.BlendEnable = TRUE;
++      hr = device->CreateBlendState(&desc, &blend_[1]);
++    }
++  }
++  if (SUCCEEDED(hr)) {
++    what = "CreateRasterizerState";
++    D3D11_RASTERIZER_DESC desc = {};
++    desc.FillMode = D3D11_FILL_SOLID;
++    desc.CullMode = D3D11_CULL_NONE;
++    // Cannot be off below 10_0; z is always 0, which is inside.
++    desc.DepthClipEnable = TRUE;
++    desc.ScissorEnable = TRUE;
++    hr = device->CreateRasterizerState(&desc, &rasterizer_);
++  }
++  if (SUCCEEDED(hr)) {
++    what = "CreateDepthStencilState";
++    D3D11_DEPTH_STENCIL_DESC desc = {};
++    desc.DepthEnable = FALSE;
++    desc.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
++    desc.DepthFunc = D3D11_COMPARISON_ALWAYS;
++    hr = device->CreateDepthStencilState(&desc, &no_depth_);
++  }
++  if (SUCCEEDED(hr)) {
++    what = "CreateSamplerState";
++    D3D11_SAMPLER_DESC desc = {};
++    desc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
++    desc.AddressU = desc.AddressV = desc.AddressW =
++        D3D11_TEXTURE_ADDRESS_CLAMP;
++    desc.MaxAnisotropy = 1;
++    desc.ComparisonFunc = D3D11_COMPARISON_NEVER;
++    // Anything else is refused below 10_0.
++    desc.MaxLOD = D3D11_FLOAT32_MAX;
++    hr = device->CreateSamplerState(&desc, &samplers_[0]);
++    if (SUCCEEDED(hr)) {
++      desc.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT;
++      hr = device->CreateSamplerState(&desc, &samplers_[1]);
++    }
++  }
++  if (FAILED(hr)) {
++    const HRESULT removed = device->GetDeviceRemovedReason();
++    LOG(WARNING) << base::StringPrintf(
++        "compositor: %s failed, 0x%08lx (device 0x%08lx)", what.c_str(),
++        static_cast<unsigned long>(hr), static_cast<unsigned long>(removed));
++    // Nothing of it was bound, and |context_| is not set yet.
++    DropDevice();
++    return hr == E_OUTOFMEMORY || FAILED(removed)
++               ? DeviceResult::kFailed
++               : DeviceResult::kFailedForGood;
++  }
++  // Tells whether the GPU had finished a frame when the next began. Done
++  // without if the device has none.
++  const D3D11_QUERY_DESC query = {D3D11_QUERY_EVENT, 0};
++  if (FAILED(device->CreateQuery(&query, &frame_done_))) {
++    frame_done_.Reset();
++  }
++
++  device_ = device;
++  context_ = context;
++  generation_ = generation;
++  const D3D_FEATURE_LEVEL level = device->GetFeatureLevel();
++  if (level >= D3D_FEATURE_LEVEL_11_0) {
++    max_texture_size_ = D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION;
++  } else if (level >= D3D_FEATURE_LEVEL_10_0) {
++    max_texture_size_ = D3D10_REQ_TEXTURE2D_U_OR_V_DIMENSION;
++  } else if (level >= D3D_FEATURE_LEVEL_9_3) {
++    max_texture_size_ = D3D_FL9_3_REQ_TEXTURE2D_U_OR_V_DIMENSION;
++  } else {
++    max_texture_size_ = D3D_FL9_1_REQ_TEXTURE2D_U_OR_V_DIMENSION;
++  }
++  // Below 10_0 a device may take textures that are not powers of two only on
++  // conditions; one is that the shader does not work out where it reads.
++  full_npot_ = true;
++  if (level < D3D_FEATURE_LEVEL_10_0) {
++    D3D11_FEATURE_DATA_D3D9_OPTIONS options = {};
++    full_npot_ = SUCCEEDED(device->CheckFeatureSupport(
++                     D3D11_FEATURE_D3D9_OPTIONS, &options, sizeof(options))) &&
++                 options.FullNonPow2TextureSupport;
++  }
++  LOG(WARNING) << base::StringPrintf(
++      "compositor: 6 shaders, a vertex buffer and states made in %d ms on "
++      "device %u (feature level 0x%x; textures up to %d, those that are not "
++      "powers of two %s; %s)",
++      static_cast<int>(timer.Elapsed().InMilliseconds()), generation,
++      static_cast<unsigned>(level), max_texture_size_,
++      full_npot_ ? "in full" : "only read where the coordinate falls",
++      frame_done_ ? "the GPU's frames are timed" : "no event query");
++  return DeviceResult::kReady;
++}
++
++void W10mD3D11Painter::DropDevice() {
++  DropTextures();
++  if (context_) {
++    // The context keeps what was bound to it, and Direct3D what was released
++    // until a flush: the shaders, the vertex buffer and the states would
++    // live on.
++    context_->ClearState();
++    context_->Flush();
++  }
++  next_vertex_ = first_vertex_ = 0;
++  frame_done_.Reset();
++  frame_done_asked_ = false;
++  vertex_shader_.Reset();
++  for (auto& shader : pixel_shaders_) {
++    shader.Reset();
++  }
++  layout_.Reset();
++  vertices_.Reset();
++  for (auto& state : blend_) {
++    state.Reset();
++  }
++  rasterizer_.Reset();
++  no_depth_.Reset();
++  for (auto& sampler : samplers_) {
++    sampler.Reset();
++  }
++  context_.Reset();
++  device_.Reset();
++  released_ = false;
++  generation_ = 0;
++  max_texture_size_ = D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION;
++  full_npot_ = true;
++}
++
++bool W10mD3D11Painter::DeviceRemoved() const {
++  return device_ && FAILED(device_->GetDeviceRemovedReason());
++}
++
++W10mD3D11Painter::Texture* W10mD3D11Painter::Find(ResourceId id) {
++  auto it = textures_.find(id);
++  return it == textures_.end() ? nullptr : &it->second;
++}
++
++W10mD3D11Painter::Texture* W10mD3D11Painter::Insert(ResourceId id,
++                                                    Texture texture) {
++  Remove(id);
++  texture_bytes_ += texture.bytes();
++  texture_count_ += texture.texture ? 1 : 0;
++  return &textures_.insert_or_assign(id, std::move(texture)).first->second;
++}
++
++void W10mD3D11Painter::Remove(ResourceId id) {
++  auto it = textures_.find(id);
++  if (it == textures_.end()) {
++    return;
++  }
++  if (it->second.texture) {
++    texture_bytes_ -= it->second.bytes();
++    --texture_count_;
++    released_ = true;
++  }
++  textures_.erase(it);
++}
++
++void W10mD3D11Painter::DropTextures() {
++  if (context_ && texture_count_) {
++    // None may stay bound, or it outlives this.
++    ID3D11ShaderResourceView* none = nullptr;
++    context_->PSSetShaderResources(0, 1, &none);
++  }
++  base::EraseIf(textures_,
++                [](const auto& entry) { return !entry.second.unusable; });
++  released_ = released_ || texture_count_ > 0;
++  texture_bytes_ = 0;
++  texture_count_ = 0;
++}
++
++void W10mD3D11Painter::Flush() {
++  if (context_) {
++    // Direct3D puts off destroying what was released until a flush.
++    context_->Flush();
++  }
++  released_ = false;
++}
++
++void W10mD3D11Painter::FlushReleased() {
++  if (released_) {
++    Flush();
++  }
++}
++
++HRESULT W10mD3D11Painter::Upload(Texture* texture,
++                                 const SkPixmap& pixels,
++                                 base::TimeDelta* making) {
++  *making = base::TimeDelta();
++  if (texture->texture) {
++    return S_OK;
++  }
++  if (!device_ || !context_) {
++    return E_FAIL;
++  }
++  const int width = texture->size.width();
++  const int height = texture->size.height();
++  if (width <= 0 || height <= 0 || !pixels.addr() ||
++      pixels.width() != width || pixels.height() != height ||
++      pixels.info().bytesPerPixel() != 4) {
++    return E_INVALIDARG;
++  }
++  D3D11_TEXTURE2D_DESC desc = {};
++  desc.Width = width;
++  desc.Height = height;
++  // One level: all a texture that is not a power of two may have below 10_0
++  // (and 0 would ask for the whole chain).
++  desc.MipLevels = 1;
++  desc.ArraySize = 1;
++  desc.Format = texture->rgba ? DXGI_FORMAT_R8G8B8A8_UNORM
++                              : DXGI_FORMAT_B8G8R8A8_UNORM;
++  desc.SampleDesc.Count = 1;
++  desc.Usage = D3D11_USAGE_DEFAULT;
++  desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
++  ComPtr<ID3D11Texture2D> made;
++  ComPtr<ID3D11ShaderResourceView> view;
++  base::ElapsedTimer timer;
++  HRESULT hr = device_->CreateTexture2D(&desc, nullptr, &made);
++  *making = timer.Elapsed();
++  if (SUCCEEDED(hr)) {
++    // Straight from the resource's shared memory.
++    context_->UpdateSubresource(
++        made.Get(), 0, nullptr, pixels.addr(),
++        static_cast<UINT>(pixels.rowBytes()),
++        static_cast<UINT>(pixels.rowBytes() * height));
++    timer = base::ElapsedTimer();
++    hr = device_->CreateShaderResourceView(made.Get(), nullptr, &view);
++    *making += timer.Elapsed();
++  }
++  if (FAILED(hr)) {
++    LOG(WARNING) << base::StringPrintf(
++        "compositor: a %dx%d texture could not be made, 0x%08lx (device "
++        "0x%08lx; %d textures, %.1f MB held)",
++        width, height, static_cast<unsigned long>(hr),
++        static_cast<unsigned long>(device_->GetDeviceRemovedReason()),
++        texture_count_, texture_bytes_ / 1048576.0);
++    return hr;
++  }
++  texture->texture = std::move(made);
++  texture->view = std::move(view);
++  texture_bytes_ += texture->bytes();
++  ++texture_count_;
++  return S_OK;
++}
++
++bool W10mD3D11Painter::HasTextures(base::span<const W10mD3D11Draw> draws) {
++  for (const W10mD3D11Draw& draw : draws) {
++    if (draw.shader == W10mD3D11Draw::Shader::kColor) {
++      continue;
++    }
++    const Texture* texture = Find(draw.resource);
++    if (!texture || !texture->view) {
++      return false;
++    }
++  }
++  return true;
++}
++
++void W10mD3D11Painter::EvictTo(size_t budget, uint64_t frame) {
++  if (texture_bytes_ <= budget) {
++    return;
++  }
++  std::vector<std::pair<uint64_t, ResourceId>> idle;
++  for (const auto& [id, texture] : textures_) {
++    if (texture.texture && texture.last_used_frame != frame) {
++      idle.emplace_back(texture.last_used_frame, id);
++    }
++  }
++  std::sort(idle.begin(), idle.end());
++  for (const auto& [used, id] : idle) {
++    if (texture_bytes_ <= budget) {
++      break;
++    }
++    // The resource is still viz's: it is a texture again when it is drawn.
++    Remove(id);
++  }
++}
++
++HRESULT W10mD3D11Painter::SetVertices(
++    base::span<const W10mD3D11Vertex> vertices) {
++  const UINT count = static_cast<UINT>(vertices.size());
++  if (!context_ || !vertices_ || count > kMaxVertices) {
++    return E_FAIL;
++  }
++  // A ring, as gecko-w10m's on the Lumia 650: a frame's vertices go after
++  // the last frame's, which the GPU may not have read yet, and the buffer is
++  // given up for a fresh one only when it is full.
++  const bool fresh = next_vertex_ == 0 || next_vertex_ + count > kMaxVertices;
++  if (fresh) {
++    next_vertex_ = 0;
++  }
++  D3D11_MAPPED_SUBRESOURCE mapped = {};
++  const HRESULT hr = context_->Map(
++      vertices_.Get(), 0,
++      fresh ? D3D11_MAP_WRITE_DISCARD : D3D11_MAP_WRITE_NO_OVERWRITE, 0,
++      &mapped);
++  if (FAILED(hr) || !mapped.pData) {
++    LOG(WARNING) << base::StringPrintf(
++        "compositor: the vertex buffer could not be mapped, 0x%08lx (device "
++        "0x%08lx)",
++        static_cast<unsigned long>(hr),
++        static_cast<unsigned long>(device_->GetDeviceRemovedReason()));
++    if (SUCCEEDED(hr)) {
++      context_->Unmap(vertices_.Get(), 0);
++      return E_FAIL;
++    }
++    return hr;
++  }
++  if (count) {
++    memcpy(static_cast<uint8_t*>(mapped.pData) +
++               next_vertex_ * sizeof(W10mD3D11Vertex),
++           vertices.data(), vertices.size_bytes());
++  }
++  context_->Unmap(vertices_.Get(), 0);
++  first_vertex_ = next_vertex_;
++  next_vertex_ += count;
++  return S_OK;
++}
++
++void W10mD3D11Painter::Draw(ID3D11RenderTargetView* view,
++                            const gfx::Size& size,
++                            base::span<const W10mD3D11Draw> draws) {
++  if (!context_ || !view) {
++    return;
++  }
++  // The whole state, every frame: a present unbinds the target, and either
++  // side may have cleared the rest.
++  context_->OMSetRenderTargets(1, &view, nullptr);
++  D3D11_VIEWPORT viewport = {};
++  viewport.Width = static_cast<float>(size.width());
++  viewport.Height = static_cast<float>(size.height());
++  viewport.MaxDepth = 1.0f;
++  context_->RSSetViewports(1, &viewport);
++  const D3D11_RECT all = {0, 0, size.width(), size.height()};
++  context_->RSSetScissorRects(1, &all);
++  context_->RSSetState(rasterizer_.Get());
++  context_->OMSetDepthStencilState(no_depth_.Get(), 0);
++  // The frame is drawn whole. Saying so first also spares a tile-based GPU
++  // loading the buffer's old pixels.
++  const float clear[4] = {0.0f, 0.0f, 0.0f, 0.0f};
++  context_->ClearRenderTargetView(view, clear);
++
++  context_->IASetInputLayout(layout_.Get());
++  context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
++  ID3D11Buffer* buffer = vertices_.Get();
++  const UINT stride = sizeof(W10mD3D11Vertex);
++  const UINT offset = 0;
++  context_->IASetVertexBuffers(0, 1, &buffer, &stride, &offset);
++  context_->VSSetShader(vertex_shader_.Get(), nullptr, 0);
++
++  int shader = -1;
++  int blend = -1;
++  int sampler = -1;
++  ID3D11ShaderResourceView* bound = nullptr;
++  UINT first = first_vertex_;
++  for (const W10mD3D11Draw& draw : draws) {
++    const UINT start = first;
++    first += 4;
++    if (draw.shader != W10mD3D11Draw::Shader::kColor) {
++      const Texture* texture = Find(draw.resource);
++      ID3D11ShaderResourceView* resource =
++          texture ? texture->view.Get() : nullptr;
++      if (!resource) {
++        // Never a textured quad with nothing to read from (HasTextures() is
++        // asked before a frame is drawn; this is the net under it).
++        continue;
++      }
++      if (sampler != (draw.point_sampling ? 1 : 0)) {
++        sampler = draw.point_sampling ? 1 : 0;
++        ID3D11SamplerState* state = samplers_[sampler].Get();
++        context_->PSSetSamplers(0, 1, &state);
++      }
++      if (resource != bound) {
++        bound = resource;
++        context_->PSSetShaderResources(0, 1, &resource);
++      }
++    }
++    if (shader != static_cast<int>(draw.shader)) {
++      shader = static_cast<int>(draw.shader);
++      context_->PSSetShader(pixel_shaders_[shader].Get(), nullptr, 0);
++    }
++    if (blend != (draw.blend ? 1 : 0)) {
++      blend = draw.blend ? 1 : 0;
++      context_->OMSetBlendState(blend_[blend].Get(), nullptr, 0xffffffff);
++    }
++    context_->Draw(4, start);
++  }
++  if (bound) {
++    // So that a texture that goes before the next frame goes at once.
++    ID3D11ShaderResourceView* none = nullptr;
++    context_->PSSetShaderResources(0, 1, &none);
++  }
++  if (frame_done_) {
++    context_->End(frame_done_.Get());
++    frame_done_asked_ = true;
++  }
++}
++
++bool W10mD3D11Painter::TakeStillDrawing() {
++  if (!frame_done_asked_ || !frame_done_ || !context_) {
++    return false;
++  }
++  frame_done_asked_ = false;
++  BOOL done = FALSE;
++  const HRESULT hr = context_->GetData(frame_done_.Get(), &done, sizeof(done),
++                                       D3D11_ASYNC_GETDATA_DONOTFLUSH);
++  return hr == S_FALSE || (hr == S_OK && !done);
++}
++
++bool W10mD3D11Painter::ReadBack(ID3D11RenderTargetView* view,
++                                const gfx::Size& size,
++                                std::vector<uint8_t>* pixels) {
++  pixels->clear();
++  if (!device_ || !context_ || !view || size.IsEmpty()) {
++    return false;
++  }
++  ComPtr<ID3D11Resource> drawn;
++  view->GetResource(&drawn);
++  D3D11_TEXTURE2D_DESC desc = {};
++  desc.Width = size.width();
++  desc.Height = size.height();
++  desc.MipLevels = 1;
++  desc.ArraySize = 1;
++  desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
++  desc.SampleDesc.Count = 1;
++  desc.Usage = D3D11_USAGE_STAGING;
++  desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
++  ComPtr<ID3D11Texture2D> staging;
++  D3D11_MAPPED_SUBRESOURCE mapped = {};
++  HRESULT hr = drawn ? device_->CreateTexture2D(&desc, nullptr, &staging)
++                     : E_FAIL;
++  if (SUCCEEDED(hr)) {
++    context_->CopyResource(staging.Get(), drawn.Get());
++    hr = context_->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped);
++  }
++  if (FAILED(hr)) {
++    LOG(WARNING) << base::StringPrintf(
++        "compositor: check: the frame could not be read back, 0x%08lx",
++        static_cast<unsigned long>(hr));
++    return false;
++  }
++  const size_t row = static_cast<size_t>(size.width()) * 4;
++  pixels->resize(row * size.height());
++  for (int y = 0; y < size.height(); ++y) {
++    memcpy(pixels->data() + y * row,
++           static_cast<const uint8_t*>(mapped.pData) + y * mapped.RowPitch,
++           row);
++  }
++  context_->Unmap(staging.Get(), 0);
++  return true;
++}
++
++}  // namespace viz
+diff --git a/components/viz/service/display/w10m_d3d11_painter.h b/components/viz/service/display/w10m_d3d11_painter.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..554434d55d45ddc4ef52e4356840d615c0fea94f
+--- /dev/null
++++ b/components/viz/service/display/w10m_d3d11_painter.h
+@@ -0,0 +1,207 @@
++// Copyright 2026 The Venetium-W10M Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef COMPONENTS_VIZ_SERVICE_DISPLAY_W10M_D3D11_PAINTER_H_
++#define COMPONENTS_VIZ_SERVICE_DISPLAY_W10M_D3D11_PAINTER_H_
++
++#include <windows.h>
++
++#include <d3d11.h>
++#include <stddef.h>
++#include <stdint.h>
++#include <wrl/client.h>
++
++#include <vector>
++
++#include "base/containers/flat_map.h"
++#include "base/containers/span.h"
++#include "base/time/time.h"
++#include "components/viz/common/resources/resource_id.h"
++#include "ui/gfx/geometry/size.h"
++
++class SkPixmap;
++
++namespace viz {
++
++class W10mD3D11Target;
++
++// One corner of a quad, finished on the CPU: 48 bytes, the layout
++// w10m_d3d11_shaders.hlsl's VertexIn reads.
++struct W10mD3D11Vertex {
++  float x, y;          // clip space
++  float u, v;          // 0..1 over the texture
++  float uv_bounds[4];  // min u, min v, max u, max v
++  float color[4];      // premultiplied r, g, b, a
++};
++
++// One quad of a frame: four vertices (a triangle strip) and how they are
++// drawn. Quads are drawn in the order given, back to front.
++struct W10mD3D11Draw {
++  // In the order of W10mD3D11Painter's pixel shaders.
++  enum class Shader : uint8_t {
++    kColor,
++    // The texture read where the coordinate falls...
++    kTexture,
++    kTextureOpaque,
++    // ...or no further than the vertices' uv_bounds.
++    kTextureClamp,
++    kTextureOpaqueClamp,
++    kCount
++  };
++
++  ResourceId resource = kInvalidResourceId;  // none for kColor
++  Shader shader = Shader::kColor;
++  bool blend = false;           // premultiplied source over; else replace
++  bool point_sampling = false;  // else linear
++};
++
++// The Direct3D 11 half of W10mD3D11Renderer: what is made once per device
++// (six shaders, a vertex buffer, the state objects), the textures software
++// resources are kept in, and the drawing of a planned frame. Feature level
++// 9_3 is all it needs. Knows nothing of quads or of DirectRenderer.
++//
++// One thread, the one the device's immediate context is used on.
++class W10mD3D11Painter {
++ public:
++  // More quads than this in one frame and the CPU draws it.
++  static constexpr int kMaxQuads = 1024;
++
++  // What a resource is known to be, and its texture once it has one.
++  struct Texture {
++    Texture();
++    Texture(Texture&&);
++    Texture& operator=(Texture&&);
++    ~Texture();
++
++    gfx::Size size;
++    bool rgba = false;         // R8G8B8A8, else B8G8R8A8
++    bool opaque = false;       // the alpha bytes mean nothing
++    bool bottom_left = false;  // the resource's first row is its last
++    // These pixels cannot be a texture (their format): frames that show the
++    // resource are the CPU's.
++    bool unusable = false;
++    uint64_t last_used_frame = 0;
++    Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
++    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> view;
++
++    // What the texture takes on the device; nothing while there is none.
++    size_t bytes() const {
++      return texture ? static_cast<size_t>(size.width()) * size.height() * 4
++                     : 0;
++    }
++  };
++
++  enum class DeviceResult {
++    kReady,
++    // Could not be made this time (memory, or the device went away).
++    kFailed,
++    // A device in working order refused a shader or a state object.
++    kFailedForGood,
++  };
++
++  W10mD3D11Painter();
++  W10mD3D11Painter(const W10mD3D11Painter&) = delete;
++  W10mD3D11Painter& operator=(const W10mD3D11Painter&) = delete;
++  ~W10mD3D11Painter();
++
++  // Inside a frame begun on |target|: everything made on another device is
++  // dropped, and what drawing needs is made on this one if it is not there.
++  DeviceResult EnsureDevice(W10mD3D11Target* target);
++  // The device is another, or gone, or not to be used again: nothing made
++  // on it is kept, in the context either.
++  void DropDevice();
++  // 0 while nothing is made.
++  uint32_t device_generation() const { return generation_; }
++  // What the device takes. Until one has said, anything: a frame is never
++  // drawn on a device it was not planned on.
++  int max_texture_size() const { return max_texture_size_; }
++  // Textures whose sides are not powers of two may be read at coordinates
++  // the shader worked out (below 10_0 that is the driver's to say).
++  bool full_npot() const { return full_npot_; }
++  // The device has been removed: what failed on it says nothing.
++  bool DeviceRemoved() const;
++
++  // The textures, by resource. Pointers are good until the next Insert,
++  // Remove, EvictTo, DropTextures or DropDevice.
++  Texture* Find(ResourceId id);
++  Texture* Insert(ResourceId id, Texture texture);
++  void Remove(ResourceId id);
++  // Every texture, and what is known of the resources they were made from;
++  // only the unusable ones stay noted, which costs nothing. Flush() after it
++  // has Direct3D let the memory go now, not at the next present.
++  void DropTextures();
++  void Flush();
++  // Flush() if a texture was released since the last one. Direct3D keeps a
++  // released texture's memory until a flush: one is due before more are
++  // made, or what is held is the budget and what was released on top of it.
++  void FlushReleased();
++  // Makes |texture|'s texture from |pixels| (its size, 32 bits a pixel).
++  // S_OK, or what the device answered: |texture| is as it was. |making| is
++  // the time the texture and its view took, without the copy.
++  HRESULT Upload(Texture* texture,
++                 const SkPixmap& pixels,
++                 base::TimeDelta* making);
++  // Every textured quad of |draws| has its texture.
++  bool HasTextures(base::span<const W10mD3D11Draw> draws);
++  // Releases the textures used least recently, none used in |frame|, until
++  // |budget| bytes or fewer are held.
++  void EvictTo(size_t budget, uint64_t frame);
++  size_t texture_bytes() const { return texture_bytes_; }
++  int texture_count() const { return texture_count_; }
++
++  // A frame, after EnsureDevice() and every Upload() it needs. SetVertices
++  // may fail (the buffer could not be mapped); Draw cannot, and is the first
++  // thing to write to |view|: it clears it whole, then draws |draws|, quad i
++  // from vertices 4i..4i+3 of the last SetVertices().
++  HRESULT SetVertices(base::span<const W10mD3D11Vertex> vertices);
++  void Draw(ID3D11RenderTargetView* view,
++            const gfx::Size& size,
++            base::span<const W10mD3D11Draw> draws);
++  // Once after a Draw(), when the next frame begins: the GPU had not
++  // finished that frame yet. Never waits. False when it cannot be told.
++  bool TakeStillDrawing();
++
++  // For --vw-compositor-check: what was drawn into |view|, as BGRA rows of
++  // |size|, read back through a staging texture (which waits for the GPU).
++  // False if it could not be read.
++  bool ReadBack(ID3D11RenderTargetView* view,
++                const gfx::Size& size,
++                std::vector<uint8_t>* pixels);
++
++ private:
++  static constexpr int kShaders =
++      static_cast<int>(W10mD3D11Draw::Shader::kCount);
++
++  Microsoft::WRL::ComPtr<ID3D11Device> device_;
++  Microsoft::WRL::ComPtr<ID3D11DeviceContext> context_;
++  uint32_t generation_ = 0;
++  int max_texture_size_ = D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION;
++  bool full_npot_ = true;
++
++  Microsoft::WRL::ComPtr<ID3D11VertexShader> vertex_shader_;
++  Microsoft::WRL::ComPtr<ID3D11PixelShader> pixel_shaders_[kShaders];
++  Microsoft::WRL::ComPtr<ID3D11InputLayout> layout_;
++  Microsoft::WRL::ComPtr<ID3D11Buffer> vertices_;
++  // The vertex buffer is a ring: where the next frame's vertices go, and
++  // where this frame's are.
++  UINT next_vertex_ = 0;
++  UINT first_vertex_ = 0;
++  Microsoft::WRL::ComPtr<ID3D11BlendState> blend_[2];  // replace, source over
++  Microsoft::WRL::ComPtr<ID3D11RasterizerState> rasterizer_;
++  Microsoft::WRL::ComPtr<ID3D11DepthStencilState> no_depth_;
++  Microsoft::WRL::ComPtr<ID3D11SamplerState> samplers_[2];  // linear, point
++  // Ended after a frame's last draw; null if the device has none to give.
++  Microsoft::WRL::ComPtr<ID3D11Query> frame_done_;
++  bool frame_done_asked_ = false;
++
++  base::flat_map<ResourceId, Texture> textures_;
++  size_t texture_bytes_ = 0;
++  int texture_count_ = 0;
++  // A texture was released, and the context not flushed since.
++  bool released_ = false;
++};
++
++}  // namespace viz
++
++#endif  // COMPONENTS_VIZ_SERVICE_DISPLAY_W10M_D3D11_PAINTER_H_
+diff --git a/components/viz/service/display/w10m_d3d11_renderer.cc b/components/viz/service/display/w10m_d3d11_renderer.cc
+new file mode 100644
+index 0000000000000000000000000000000000000000..58901c0c827abaddfe2172e4a2f23e7eb609d505
+--- /dev/null
++++ b/components/viz/service/display/w10m_d3d11_renderer.cc
+@@ -0,0 +1,1039 @@
++// Copyright 2026 The Venetium-W10M Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "components/viz/service/display/w10m_d3d11_renderer.h"
++
++#if defined(VENETIUM_W10M)
++
++#include <algorithm>
++#include <array>
++#include <bit>
++#include <cmath>
++#include <iterator>
++#include <string>
++#include <utility>
++
++#include "base/command_line.h"
++#include "base/logging.h"
++#include "base/strings/string_number_conversions.h"
++#include "base/strings/stringprintf.h"
++#include "cc/base/math_util.h"
++#include "components/viz/common/display/renderer_settings.h"
++#include "components/viz/common/quads/aggregated_render_pass.h"
++#include "components/viz/common/quads/aggregated_render_pass_draw_quad.h"
++#include "components/viz/common/quads/draw_quad.h"
++#include "components/viz/common/quads/shared_quad_state.h"
++#include "components/viz/common/quads/solid_color_draw_quad.h"
++#include "components/viz/common/quads/texture_draw_quad.h"
++#include "components/viz/common/quads/tile_draw_quad.h"
++#include "components/viz/service/display/output_surface.h"
++#include "components/viz/service/display/renderer_utils.h"
++#include "components/viz/service/display/software_output_device.h"
++#include "third_party/skia/include/core/SkBitmap.h"
++#include "third_party/skia/include/core/SkImage.h"
++#include "third_party/skia/include/core/SkMatrix.h"
++#include "third_party/skia/include/core/SkPixmap.h"
++#include "third_party/skia/include/core/SkPoint.h"
++#include "third_party/skia/include/core/SkRect.h"
++#include "ui/gfx/geometry/rect_f.h"
++#include "ui/gfx/geometry/skia_conversions.h"
++#include "ui/gfx/geometry/transform.h"
++
++namespace viz {
++
++namespace {
++
++// Steps that failed for a reason other than memory or the device going: how
++// many in a row end it for the run. And how many frames the CPU draws after
++// any failure before the GPU is tried again: this many the first time, twice
++// as many each time after, up to the most.
++constexpr int kMaxFailures = 3;
++constexpr uint64_t kBackOffFrames = 60;
++constexpr uint64_t kMaxBackOffFrames = 1800;
++
++// The log line: one for every ten seconds of animation, which is time
++// between frames that follow each other closely. A page standing still draws
++// nothing, and that time is not counted.
++constexpr base::TimeDelta kStatisticsPeriod = base::Seconds(10);
++constexpr base::TimeDelta kLongestAnimationGap = base::Milliseconds(250);
++// Textures nothing has been drawn from for this long, with the CPU drawing
++// frames all the while, are let go: a screenful is uploaded again in a frame.
++constexpr base::TimeDelta kIdleTextures = base::Seconds(2);
++// A present that stood: the frame before it had not been shown yet.
++constexpr base::TimeDelta kPresentWait = base::Milliseconds(4);
++
++// What the textures may take: four screens of pixels, within these.
++constexpr size_t kMinTextureBudget = 16u << 20;
++constexpr size_t kMaxTextureBudget = 64u << 20;
++
++// How far from one texel a pixel a quad may be and still be sampled as it
++// is, unfiltered: Skia's filter would give the same bytes. Also how far
++// texture coordinates may stray beyond the texture.
++constexpr double kAligned = 1.0 / 1024;
++
++// A rectangle with an edge further out than this Skia does not fill as a
++// rectangle but as a path (SkRectPriv::FitsInFixed in Draw::drawRect), which
++// places its edges another way.
++constexpr float kSkiaRectLimit = 32767.0f;
++
++// In the order of CpuReason.
++const char* const kReasonNames[] = {
++    "",
++    "given up",
++    "waiting after a failure",
++    "test",
++    "render pass with a backdrop filter",
++    "render pass with a filter",
++    "render pass with a mask",
++    "render passes, nothing more",
++    "copy request",
++    "root pass rect",
++    "too many quads",
++    "texture budget",
++    "quad material",
++    "blend mode",
++    "3D sorting",
++    "rounded corner",
++    "rotated or skewed",
++    "3D transform",
++    "texture quad state",
++    "resource missing",
++    "not a software resource",
++    "low latency canvas",
++    "pixel format",
++    "texture size",
++    "texture coordinates",
++    "texture not a power of two",
++    "no swap chain",
++    "new device",
++    "device objects",
++    "upload",
++    "present",
++    "test failure",
++    "test check",
++};
++static_assert(std::size(kReasonNames) ==
++              static_cast<size_t>(W10mD3D11Renderer::CpuReason::kCount));
++
++// --name=N from the engine's switches; 0 without it.
++int TestSwitch(const char* name) {
++  int value = 0;
++  base::StringToInt(
++      base::CommandLine::ForCurrentProcess()->GetSwitchValueASCII(name),
++      &value);
++  return std::max(value, 0);
++}
++
++bool NearInteger(double value) {
++  return std::abs(value - std::round(value)) <= kAligned;
++}
++
++// Into 0..1; what is not a number is 0.
++float Unit(float value) {
++  return value > 0.0f ? std::min(value, 1.0f) : 0.0f;
++}
++
++bool IsPowerOfTwo(int value) {
++  return value > 0 && std::has_single_bit(static_cast<uint32_t>(value));
++}
++
++}  // namespace
++
++W10mD3D11Renderer::W10mD3D11Renderer(
++    const RendererSettings* settings,
++    const DebugRendererSettings* debug_settings,
++    OutputSurface* output_surface,
++    DisplayResourceProviderSoftware* resource_provider,
++    OverlayProcessorInterface* overlay_processor,
++    W10mD3D11Target* target)
++    : SoftwareRenderer(settings,
++                       debug_settings,
++                       output_surface,
++                       resource_provider,
++                       overlay_processor),
++      target_(target),
++      test_flip_every_(TestSwitch("vw-compositor-flip")),
++      test_fail_every_(TestSwitch("vw-compositor-fail")),
++      test_check_every_(TestSwitch("vw-compositor-check")) {
++  resource_provider->SetW10mResourceObserver(this);
++  target_->SetD3D11Client(this);
++  if (settings->force_antialiasing) {
++    // Every edge would be Skia's to soften.
++    GiveUp("antialiasing is forced on", /*for_good=*/false);
++    FinishGivingUp();
++  }
++}
++
++W10mD3D11Renderer::~W10mD3D11Renderer() {
++  // Both outlive this (Display destroys its renderer first), and neither is
++  // to call into what is left of it. |painter_| lets go of the device's
++  // objects after this, the device still being there.
++  target_->SetD3D11Client(nullptr);
++  software_provider()->SetW10mResourceObserver(nullptr);
++}
++
++void W10mD3D11Renderer::BeginDrawingFrame() {
++  SoftwareRenderer::BeginDrawingFrame();
++  const base::TimeTicks last_frame_start = frame_start_;
++  frame_start_ = base::TimeTicks::Now();
++  ++frame_;
++  in_frame_ = true;
++  gpu_frame_ = false;
++  if (!last_frame_start.is_null() &&
++      frame_start_ - last_frame_start < kLongestAnimationGap) {
++    statistics_.animated += frame_start_ - last_frame_start;
++  }
++  if (painter_.TakeStillDrawing()) {
++    ++statistics_.gpu_behind;
++  }
++  // A device that has gone takes what was made on it along, before the
++  // embedder makes another.
++  if (painter_.device_generation() &&
++      painter_.device_generation() != target_->GetD3D11DeviceGeneration()) {
++    DropDevice();
++  }
++
++  DrawingFrame* frame = current_frame();
++  const gfx::Rect viewport(frame->device_viewport_size);
++  const bool little_changed = frame->root_damage_rect.size().Area64() * 8 <
++                              viewport.size().Area64();
++  const CpuReason reason = DrawGpuFrame();
++  if (reason == CpuReason::kNone) {
++    gpu_frame_ = true;
++    bitmap_stale_ = true;
++    last_gpu_frame_ = frame_start_;
++    if (little_changed) {
++      ++statistics_.small_frames;
++    }
++    // On screen already: nothing is left for DirectRenderer to draw. (If it
++    // redraws the root pass all the same -- the output was reshaped, or
++    // partial swap is off -- the two overrides below draw nothing.)
++    frame->root_damage_rect = gfx::Rect();
++    return;
++  }
++  ++statistics_.cpu_frames;
++  ++statistics_.reasons[static_cast<size_t>(reason)];
++  if (bitmap_stale_) {
++    // The bitmap missed the frames the GPU drew: all of it is drawn now, and
++    // the embedder is given all of it. Every quad of the frame is there to
++    // draw it from: the aggregator leaves none out for want of damage.
++    frame->root_damage_rect = viewport;
++    ++statistics_.switches_to_cpu;
++  }
++}
++
++void W10mD3D11Renderer::BeginDrawingRenderPass(
++    const AggregatedRenderPass* render_pass,
++    bool needs_clear,
++    const gfx::Rect& render_pass_update_rect,
++    const gfx::Size& viewport_size) {
++  if (gpu_frame_) {
++    // No canvas is taken from the output device, so the base class neither
++    // draws nor ends a paint.
++    return;
++  }
++  SoftwareRenderer::BeginDrawingRenderPass(render_pass, needs_clear,
++                                           render_pass_update_rect,
++                                           viewport_size);
++}
++
++void W10mD3D11Renderer::DoDrawQuad(const DrawQuad* quad,
++                                   const gfx::QuadF* draw_region) {
++  if (gpu_frame_) {
++    return;
++  }
++  SoftwareRenderer::DoDrawQuad(quad, draw_region);
++}
++
++void W10mD3D11Renderer::FinishDrawingFrame() {
++  // A frame the CPU drew is presented in here (EndPaint). The GPU's is on
++  // screen, and there is no canvas to end.
++  SoftwareRenderer::FinishDrawingFrame();
++  const base::TimeTicks now = base::TimeTicks::Now();
++  if (!gpu_frame_) {
++    if (!check_pixels_.empty()) {
++      CompareCheck();
++    }
++    bitmap_stale_ = false;
++    statistics_.cpu_frame_time += now - frame_start_;
++    if (painter_.texture_count() && now - last_gpu_frame_ > kIdleTextures) {
++      DropTextures();
++    }
++  }
++  in_frame_ = false;
++  for (ResourceId id : gone_) {
++    painter_.Remove(id);
++  }
++  gone_.clear();
++  LogStatistics();
++}
++
++void W10mD3D11Renderer::DidChangeVisibility() {
++  if (!visible_) {
++    // Before the base class tells the output device (DiscardBackbuffer): if
++    // the embedder trims its device there, what is released after may stay.
++    DropTextures();
++  }
++  SoftwareRenderer::DidChangeVisibility();
++}
++
++void W10mD3D11Renderer::OnW10mResourceGone(ResourceId id) {
++  if (in_frame_) {
++    // Does not happen (resources are returned when the draw is over); if it
++    // did, the frame's plan would still point at the texture.
++    gone_.push_back(id);
++    return;
++  }
++  painter_.Remove(id);
++}
++
++void W10mD3D11Renderer::ReleaseD3D11Textures() {
++  if (in_frame_) {
++    return;
++  }
++  DropTextures();
++}
++
++void W10mD3D11Renderer::DropTextures() {
++  statistics_.textures_dropped += painter_.texture_count();
++  painter_.DropTextures();
++  // Now, not at some later present.
++  painter_.Flush();
++}
++
++void W10mD3D11Renderer::DropDevice() {
++  statistics_.textures_dropped += painter_.texture_count();
++  painter_.DropDevice();
++}
++
++W10mD3D11Renderer::CpuReason W10mD3D11Renderer::DrawGpuFrame() {
++  if (given_up_) {
++    return CpuReason::kGivenUp;
++  }
++  if (frame_ < no_gpu_before_frame_) {
++    return CpuReason::kBackingOff;
++  }
++  const gfx::Size size = current_frame()->device_viewport_size;
++  // The plan counts on this device's limits and on the textures held now.
++  const uint32_t planned_on = painter_.device_generation();
++  CpuReason reason = PlanFrame(size);
++  if (reason != CpuReason::kNone) {
++    return reason;
++  }
++  if (test_flip_every_ && ++eligible_frames_ % test_flip_every_ == 0) {
++    return CpuReason::kTestFlip;
++  }
++
++  // From here the driver is asked for things, each of which may fail; the
++  // back buffer is first written to by Draw(), after all of them.
++  ID3D11RenderTargetView* view = nullptr;
++  switch (target_->BeginGpuFrame(size, &view)) {
++    case W10mD3D11Target::Begin::kReady:
++      break;
++    case W10mD3D11Target::Begin::kNotNow:
++      // No chain: the textures cannot be drawn from, and their room may be
++      // what the chain is refused for.
++      if (painter_.texture_count()) {
++        DropTextures();
++      }
++      return CpuReason::kNoTarget;
++    case W10mD3D11Target::Begin::kNever:
++      // The embedder has said why, and is not told what it knows.
++      given_up_ = true;
++      DropDevice();
++      LOG(WARNING) << "compositor: the embedder takes no more frames drawn "
++                      "by Direct3D 11; the CPU draws them from here";
++      return CpuReason::kGivenUp;
++  }
++  if (!view) {
++    // Not what kReady promises. Nothing to draw into, and nothing to say
++    // that there will be.
++    target_->AbandonGpuFrame();
++    FailedForNow("no view of the back buffer was given", /*counts=*/true);
++    FinishGivingUp();
++    return CpuReason::kNoTarget;
++  }
++  reason = PrepareFrame(planned_on);
++  if (reason == CpuReason::kNone && test_fail_every_ &&
++      ++begun_frames_ % test_fail_every_ == 0) {
++    reason = CpuReason::kTestFailure;
++  }
++  if (reason != CpuReason::kNone) {
++    // Nothing has been written to the back buffer. The target is told of a
++    // give-up only once its frame is over.
++    target_->AbandonGpuFrame();
++    FinishGivingUp();
++    return reason;
++  }
++
++  if (!said_first_draw_) {
++    said_first_draw_ = true;
++    LOG(WARNING) << base::StringPrintf(
++        "compositor: drawing the first frame, %d quads from %d textures",
++        static_cast<int>(draws_.size()), painter_.texture_count());
++  }
++  painter_.Draw(view, size, draws_);
++  if (test_check_every_ && ++drawn_frames_ % test_check_every_ == 0 &&
++      painter_.ReadBack(view, size, &check_pixels_)) {
++    // Not presented. The CPU draws the same frame, whole, which covers what
++    // was drawn here and is what is shown; the two are compared once it has
++    // (FinishDrawingFrame).
++    check_size_ = size;
++    target_->AbandonGpuFrame();
++    bitmap_stale_ = true;
++    return CpuReason::kTestCheck;
++  }
++  const base::TimeTicks drawn = base::TimeTicks::Now();
++  if (!target_->PresentGpuFrame()) {
++    // The embedder has said why. If it was the device, nothing of it is
++    // kept. If not, the swap chain has gone all the same, and is asked for
++    // again after a wait: nothing is drawn from the textures meanwhile, and
++    // their room may be what the next chain is refused for.
++    if (painter_.device_generation() != target_->GetD3D11DeviceGeneration()) {
++      DropDevice();
++    } else if (painter_.texture_count()) {
++      DropTextures();
++    }
++    // Drawn and not shown: the CPU's frame is a whole one, whatever the
++    // embedder does with the buffer.
++    bitmap_stale_ = true;
++    return CpuReason::kPresent;
++  }
++  const base::TimeTicks presented = base::TimeTicks::Now();
++  failures_ = 0;
++  back_off_frames_ = 0;
++  ++statistics_.gpu_frames;
++  statistics_.quads += static_cast<int>(draws_.size());
++  statistics_.antialiased_quads += antialiased_quads_;
++  statistics_.draw_time += drawn - frame_start_;
++  statistics_.longest_draw =
++      std::max(statistics_.longest_draw, drawn - frame_start_);
++  if (presented - drawn > kPresentWait) {
++    ++statistics_.present_waits;
++  }
++  statistics_.gpu_frame_time += presented - frame_start_;
++  return CpuReason::kNone;
++}
++
++W10mD3D11Renderer::CpuReason W10mD3D11Renderer::PlanFrame(
++    const gfx::Size& size) {
++  vertices_.clear();
++  draws_.clear();
++  uploads_.clear();
++  needed_bytes_ = 0;
++  antialiased_quads_ = 0;
++  filtered_quads_ = 0;
++
++  const DrawingFrame* frame = current_frame();
++  if (frame->render_passes_in_draw_order->size() != 1) {
++    return ClassifyRenderPasses();
++  }
++  const AggregatedRenderPass* root = frame->root_render_pass;
++  if (!root->copy_requests.empty()) {
++    // A copy is read from the bitmap.
++    return CpuReason::kCopyRequest;
++  }
++  if (size.IsEmpty() || root->output_rect != gfx::Rect(size)) {
++    return CpuReason::kRootRect;
++  }
++  // As DirectRenderer::DrawRenderPass has it for the root pass: all but the
++  // identity, and Skia is given it all the same.
++  target_to_device_ = CalculateTargetToDeviceTransform(root->output_rect, size);
++  const gfx::Rect viewport(size);
++  for (auto it = root->quad_list.BackToFrontBegin();
++       it != root->quad_list.BackToFrontEnd(); ++it) {
++    const DrawQuad& quad = **it;
++    // What DirectRenderer would not hand to DoDrawQuad either, in a frame
++    // that is damaged all over.
++    if (ShouldSkipQuad(quad, viewport)) {
++      continue;
++    }
++    const CpuReason reason = PlanQuad(quad, viewport);
++    if (reason != CpuReason::kNone) {
++      return reason;
++    }
++    if (draws_.size() > static_cast<size_t>(W10mD3D11Painter::kMaxQuads)) {
++      return CpuReason::kTooManyQuads;
++    }
++  }
++  if (needed_bytes_ > TextureBudget(size)) {
++    return CpuReason::kTextureBudget;
++  }
++  return CpuReason::kNone;
++}
++
++W10mD3D11Renderer::CpuReason W10mD3D11Renderer::ClassifyRenderPasses()
++    const {
++  // Only for the log: what a version that drew render passes would have to
++  // draw them with.
++  bool filter = false;
++  bool mask = false;
++  for (const auto& pass : *current_frame()->render_passes_in_draw_order) {
++    for (const DrawQuad* quad : pass->quad_list) {
++      const auto* pass_quad = quad->DynamicCast<AggregatedRenderPassDrawQuad>();
++      if (!pass_quad) {
++        continue;
++      }
++      if (!pass_quad->backdrop_filters.IsEmpty()) {
++        return CpuReason::kPassBackdropFilter;
++      }
++      filter |= !pass_quad->filters.IsEmpty();
++      mask |= !!pass_quad->mask_resource_id();
++    }
++  }
++  if (filter) {
++    return CpuReason::kPassFilter;
++  }
++  return mask ? CpuReason::kPassMask : CpuReason::kPassPlain;
++}
++
++W10mD3D11Renderer::CpuReason W10mD3D11Renderer::PlanQuad(
++    const DrawQuad& quad,
++    const gfx::Rect& viewport) {
++  const SharedQuadState* sqs = quad.shared_quad_state;
++  const bool solid = quad.material == DrawQuad::Material::kSolidColor;
++  if (!solid && quad.material != DrawQuad::Material::kTiledContent &&
++      quad.material != DrawQuad::Material::kTextureContent) {
++    return CpuReason::kMaterial;
++  }
++  if (sqs->blend_mode != SkBlendMode::kSrcOver) {
++    return CpuReason::kBlendMode;
++  }
++  if (sqs->sorting_context_id != 0) {
++    return CpuReason::kSortingContext;
++  }
++  if (ShouldApplyRoundedCorner(&quad)) {
++    return CpuReason::kRoundedCorner;
++  }
++  if (!sqs->quad_to_target_transform.IsScaleOrTranslation()) {
++    return sqs->quad_to_target_transform.Is2dTransform()
++               ? CpuReason::kTransform2d
++               : CpuReason::kTransform3d;
++  }
++  // The matrix SoftwareRenderer::DoDrawQuad gives Skia, made the same way,
++  // and the rectangle Skia fills under it, found with Skia's own calls: the
++  // quad's corners mapped in floats (Draw::drawRect), then each edge rounded
++  // to a whole pixel (SkScan::FillRect; an edge at exactly half a pixel goes
++  // up). The rasterizer is only ever given whole pixels, so its own rule for
++  // a centre on an edge, and how finely it places a vertex, never come into
++  // it.
++  gfx::Transform device_transform = sqs->quad_to_target_transform;
++  device_transform.PostConcat(target_to_device_);
++  device_transform.Flatten();
++  const SkMatrix matrix = gfx::TransformToFlattenedSkMatrix(device_transform);
++  if (!matrix.isFinite() || !matrix.isScaleTranslate()) {
++    return CpuReason::kTransform2d;
++  }
++  const SkRect visible = gfx::RectToSkRect(quad.visible_rect);
++  std::array<SkPoint, 2> corners = {SkPoint{visible.fLeft, visible.fTop},
++                                    SkPoint{visible.fRight, visible.fBottom}};
++  matrix.mapPoints(corners);
++  SkRect mapped = SkRect::MakeLTRB(corners[0].fX, corners[0].fY, corners[1].fX,
++                                   corners[1].fY);
++  mapped.sort();
++  // Written so that what is not a number fails it too.
++  if (!(mapped.fLeft >= -kSkiaRectLimit && mapped.fTop >= -kSkiaRectLimit &&
++        mapped.fRight <= kSkiaRectLimit && mapped.fBottom <= kSkiaRectLimit)) {
++    // A solid colour layer is one quad of all its bounds, however little
++    // of it shows (SolidColorLayerImpl::AppendQuads), and a long page has
++    // such layers. What Skia's path fill covers on the screen is the
++    // rectangle all the same; with no texture to place, the edges far off
++    // the screen are brought in to just outside it, which changes no pixel
++    // that is drawn.
++    if (!solid || !mapped.isFinite()) {
++      return CpuReason::kTransform2d;
++    }
++    mapped.fLeft = std::max(mapped.fLeft, -1.0f);
++    mapped.fTop = std::max(mapped.fTop, -1.0f);
++    mapped.fRight = std::min(mapped.fRight, viewport.right() + 1.0f);
++    mapped.fBottom = std::min(mapped.fBottom, viewport.bottom() + 1.0f);
++  }
++  SkIRect snapped;
++  mapped.round(&snapped);
++  // Clipped here: both are whole pixels, and no quad needs a scissor of its
++  // own.
++  gfx::Rect clip = viewport;
++  if (sqs->clip_rect) {
++    clip.Intersect(*sqs->clip_rect);
++  }
++  const int left = std::max(snapped.fLeft, clip.x());
++  const int right = std::min(snapped.fRight, clip.right());
++  const int top = std::max(snapped.fTop, clip.y());
++  const int bottom = std::min(snapped.fBottom, clip.bottom());
++  if (right <= left || bottom <= top) {
++    return CpuReason::kNone;
++  }
++
++  const bool blend = quad.ShouldDrawWithBlending();
++  W10mD3D11Draw draw;
++  draw.blend = blend;
++  float color[4] = {1.0f, 1.0f, 1.0f, 1.0f};
++  // The texture at |left|, |top|, |right|, |bottom|, and what samples stay
++  // within; as fractions of the texture.
++  double uv[4] = {0, 0, 0, 0};
++  float bounds[4] = {0, 0, 0, 0};
++
++  if (solid) {
++    const SolidColorDrawQuad* color_quad =
++        SolidColorDrawQuad::MaterialCast(&quad);
++    // SkPaint::setAlphaf(opacity * alpha), and the colour premultiplied.
++    const float alpha = Unit(sqs->opacity * color_quad->color.fA);
++    if (blend && alpha <= 0.0f) {
++      return CpuReason::kNone;
++    }
++    color[0] = Unit(color_quad->color.fR) * alpha;
++    color[1] = Unit(color_quad->color.fG) * alpha;
++    color[2] = Unit(color_quad->color.fB) * alpha;
++    color[3] = alpha;
++  } else {
++    const ResourceId id = quad.resource_id;
++    W10mD3D11Painter::Texture* texture = painter_.Find(id);
++    if (!texture) {
++      const CpuReason reason = Inspect(id, &texture);
++      if (reason != CpuReason::kNone) {
++        return reason;
++      }
++      if (!texture) {
++        return CpuReason::kNone;  // No pixels: Skia draws nothing either.
++      }
++    }
++    if (texture->unusable) {
++      return CpuReason::kPixelFormat;
++    }
++    const int width = texture->size.width();
++    const int height = texture->size.height();
++    const int max_size = painter_.max_texture_size();
++    if (width > max_size || height > max_size) {
++      return CpuReason::kTextureSize;
++    }
++
++    gfx::RectF texels;
++    bool nearest = false;
++    if (quad.material == DrawQuad::Material::kTiledContent) {
++      const TileDrawQuad* tile = TileDrawQuad::MaterialCast(&quad);
++      texels = tile->tex_coord_rect;
++      nearest = tile->nearest_neighbor;
++    } else {
++      const TextureDrawQuad* texture_quad =
++          TextureDrawQuad::MaterialCast(&quad);
++      // What SoftwareRenderer does with a flip or a colour filter of its
++      // own. The quad's other state it does not read, and neither is it
++      // read here.
++      if (texture->bottom_left ||
++          (texture_quad->background_color != SkColors::kTransparent &&
++           !texture->opaque)) {
++        return CpuReason::kTextureQuadState;
++      }
++      texels = texture_quad->GetUnnormalizedTexCoords(texture->size);
++      nearest = texture_quad->nearest_neighbor;
++    }
++    if (texels.IsEmpty()) {
++      return CpuReason::kNone;
++    }
++    // The part of the texture the visible part of the quad shows, as
++    // SoftwareRenderer works it out.
++    texels = cc::MathUtil::ScaleRectProportional(
++        texels, gfx::RectF(quad.rect), gfx::RectF(quad.visible_rect));
++    // Skia draws only as much of a quad as its texture has texels for.
++    if (texels.x() < -kAligned || texels.y() < -kAligned ||
++        texels.right() > width + kAligned ||
++        texels.bottom() > height + kAligned) {
++      return CpuReason::kTexCoords;
++    }
++    const double t0x = std::max<double>(texels.x(), 0);
++    const double t0y = std::max<double>(texels.y(), 0);
++    const double t1x = std::min<double>(texels.right(), width);
++    const double t1y = std::min<double>(texels.bottom(), height);
++    // Written so that what is not a number is nothing to draw, as for Skia.
++    if (!(t1x > t0x) || !(t1y > t0y)) {
++      return CpuReason::kNone;
++    }
++    // A pixel's centre reads the texture where the quad's own mapping puts
++    // it: linear between the edges Skia was given, not the snapped ones.
++    const bool flip_x = matrix.getScaleX() < 0;
++    const bool flip_y = matrix.getScaleY() < 0;
++    const double u_left = flip_x ? t1x : t0x;
++    const double v_top = flip_y ? t1y : t0y;
++    const double du = ((flip_x ? t0x : t1x) - u_left) /
++                      (static_cast<double>(mapped.fRight) - mapped.fLeft);
++    const double dv = ((flip_y ? t0y : t1y) - v_top) /
++                      (static_cast<double>(mapped.fBottom) - mapped.fTop);
++    uv[0] = (u_left + (left - mapped.fLeft) * du) / width;
++    uv[1] = (v_top + (top - mapped.fTop) * dv) / height;
++    uv[2] = (u_left + (right - mapped.fLeft) * du) / width;
++    uv[3] = (v_top + (bottom - mapped.fTop) * dv) / height;
++    // Skia's strict source rectangle: it cuts the whole texels the part
++    // shown touches out of the image and clamps to them
++    // (SkBitmapDevice::drawImageRect).
++    const double b0x = std::floor(t0x);
++    const double b0y = std::floor(t0y);
++    const double b1x = std::ceil(t1x);
++    const double b1y = std::ceil(t1y);
++    bounds[0] = static_cast<float>((b0x + 0.5) / width);
++    bounds[1] = static_cast<float>((b0y + 0.5) / height);
++    bounds[2] = static_cast<float>((b1x - 0.5) / width);
++    bounds[3] = static_cast<float>((b1y - 0.5) / height);
++
++    // One texel a pixel and no fraction between them: the texels as they
++    // are. Skia's filter gives the same there, and the GPU's must not differ
++    // by a rounding.
++    const bool aligned =
++        !flip_x && !flip_y &&
++        std::abs(mapped.width() - (t1x - t0x)) <= kAligned &&
++        std::abs(mapped.height() - (t1y - t0y)) <= kAligned &&
++        NearInteger(mapped.fLeft - t0x) && NearInteger(mapped.fTop - t0y);
++    // The clamp changes nothing where no sample can leave the texels shown:
++    // every sample is a texel's centre, or the texels shown are the whole
++    // texture, which the sampler keeps to.
++    const bool whole = b0x <= 0 && b0y <= 0 && b1x >= width && b1y >= height;
++    const bool clamp = !aligned && !whole;
++    if (clamp && !painter_.full_npot() &&
++        !(IsPowerOfTwo(width) && IsPowerOfTwo(height))) {
++      // This device reads such a texture only where the coordinate falls.
++      return CpuReason::kNonPow2;
++    }
++    draw.point_sampling = nearest || aligned;
++    draw.resource = id;
++    if (clamp) {
++      draw.shader = texture->opaque ? W10mD3D11Draw::Shader::kTextureOpaqueClamp
++                                    : W10mD3D11Draw::Shader::kTextureClamp;
++    } else {
++      draw.shader = texture->opaque ? W10mD3D11Draw::Shader::kTextureOpaque
++                                    : W10mD3D11Draw::Shader::kTexture;
++    }
++    if (blend) {
++      // SkPaint::setAlpha(opacity * 255): eight bits, cut off.
++      const float alpha = static_cast<int>(Unit(sqs->opacity) * 255) / 255.0f;
++      if (alpha <= 0.0f) {
++        return CpuReason::kNone;
++      }
++      color[0] = color[1] = color[2] = color[3] = alpha;
++    }
++    if (!draw.point_sampling) {
++      ++filtered_quads_;
++    }
++    if (texture->last_used_frame != frame_) {
++      texture->last_used_frame = frame_;
++      needed_bytes_ += static_cast<size_t>(width) * height * 4;
++      if (!texture->texture) {
++        uploads_.push_back(id);
++      }
++    }
++  }
++
++  // Where Skia softens the edges and this does not: a quad that is all of
++  // its layer, not on whole pixels (SoftwareRenderer::DoDrawQuad).
++  if (settings_->allow_antialiasing && !IsScaleAndIntegerTranslate(matrix) &&
++      quad.IsLeftEdge() && quad.IsTopEdge() && quad.IsRightEdge() &&
++      quad.IsBottomEdge()) {
++    ++antialiased_quads_;
++  }
++
++  // Pixels (origin top left, y down) to clip space (y up).
++  const float x0 = static_cast<float>(left * 2.0 / viewport.width() - 1);
++  const float x1 = static_cast<float>(right * 2.0 / viewport.width() - 1);
++  const float y0 = static_cast<float>(1 - top * 2.0 / viewport.height());
++  const float y1 = static_cast<float>(1 - bottom * 2.0 / viewport.height());
++  const float u0 = static_cast<float>(uv[0]);
++  const float v0 = static_cast<float>(uv[1]);
++  const float u1 = static_cast<float>(uv[2]);
++  const float v1 = static_cast<float>(uv[3]);
++  const struct {
++    float x, y, u, v;
++  } strip[4] = {
++      {x0, y0, u0, v0}, {x1, y0, u1, v0}, {x0, y1, u0, v1}, {x1, y1, u1, v1}};
++  for (const auto& corner : strip) {
++    W10mD3D11Vertex vertex;
++    vertex.x = corner.x;
++    vertex.y = corner.y;
++    vertex.u = corner.u;
++    vertex.v = corner.v;
++    std::copy(std::begin(bounds), std::end(bounds), vertex.uv_bounds);
++    std::copy(std::begin(color), std::end(color), vertex.color);
++    vertices_.push_back(vertex);
++  }
++  draws_.push_back(draw);
++  return CpuReason::kNone;
++}
++
++W10mD3D11Renderer::CpuReason W10mD3D11Renderer::Inspect(
++    ResourceId id,
++    W10mD3D11Painter::Texture** texture) {
++  *texture = nullptr;
++  DisplayResourceProviderSoftware* provider = software_provider();
++  // Asked first, and in the one way that is not fatal for an id the provider
++  // does not know: the plan looks at quads a frame's damage might never have
++  // had the CPU draw.
++  if (!id || provider->GetMailbox(id).IsZero()) {
++    return CpuReason::kNoResource;
++  }
++  if (!provider->IsResourceSoftwareBacked(id)) {
++    return CpuReason::kNotSoftware;
++  }
++  if (provider->IsLowLatencyRendering(id)) {
++    // Its pixels may change under the same id: no copy of them is kept.
++    return CpuReason::kLowLatency;
++  }
++  W10mD3D11Painter::Texture known;
++  known.bottom_left = provider->GetOrigin(id) == kBottomLeft_GrSurfaceOrigin;
++  // Not held beyond this: a resource that is locked cannot be given back.
++  DisplayResourceProviderSoftware::ScopedReadLockSkImage lock(provider, id);
++  if (!lock.valid()) {
++    return CpuReason::kNone;
++  }
++  known.size = gfx::Size(lock.sk_image()->width(), lock.sk_image()->height());
++  SkPixmap pixels;
++  if (known.size.IsEmpty() || !lock.sk_image()->peekPixels(&pixels) ||
++      (pixels.colorType() != kBGRA_8888_SkColorType &&
++       pixels.colorType() != kRGBA_8888_SkColorType) ||
++      (pixels.alphaType() != kPremul_SkAlphaType &&
++       pixels.alphaType() != kOpaque_SkAlphaType)) {
++    known.unusable = true;
++  } else {
++    known.rgba = pixels.colorType() == kRGBA_8888_SkColorType;
++    known.opaque = pixels.alphaType() == kOpaque_SkAlphaType;
++  }
++  *texture = painter_.Insert(id, std::move(known));
++  return CpuReason::kNone;
++}
++
++W10mD3D11Renderer::CpuReason W10mD3D11Renderer::PrepareFrame(
++    uint32_t planned_on) {
++  switch (painter_.EnsureDevice(target_)) {
++    case W10mD3D11Painter::DeviceResult::kReady:
++      break;
++    case W10mD3D11Painter::DeviceResult::kFailed:
++      FailedForNow("its shaders and states could not be made",
++                   /*counts=*/false);
++      return CpuReason::kDeviceObjects;
++    case W10mD3D11Painter::DeviceResult::kFailedForGood:
++      GiveUp("a shader or a state object could not be made",
++             /*for_good=*/true);
++      return CpuReason::kDeviceObjects;
++  }
++  if (painter_.device_generation() != planned_on) {
++    // The first frame on a device, the embedder's first or one it made
++    // inside BeginGpuFrame: the plan knew neither its limits nor that the
++    // textures it counted on would be gone. The next frame is planned on it.
++    return CpuReason::kNewDevice;
++  }
++
++  // Room for this frame's textures first.
++  size_t upload_bytes = 0;
++  for (ResourceId id : uploads_) {
++    if (const W10mD3D11Painter::Texture* texture = painter_.Find(id)) {
++      upload_bytes += static_cast<size_t>(texture->size.width()) *
++                      texture->size.height() * 4;
++    }
++  }
++  const size_t budget = TextureBudget(current_frame()->device_viewport_size);
++  painter_.EvictTo(budget - std::min(budget, upload_bytes), frame_);
++  if (!uploads_.empty()) {
++    // What was let go since the last flush -- just now, or when resources
++    // went after the last frame -- is the device's until a flush: it goes
++    // before more is made, so that the budget is what is really held.
++    painter_.FlushReleased();
++  }
++
++  if (!uploads_.empty() && !said_first_upload_) {
++    said_first_upload_ = true;
++    LOG(WARNING) << base::StringPrintf(
++        "compositor: making the first %d textures",
++        static_cast<int>(uploads_.size()));
++  }
++  DisplayResourceProviderSoftware* provider = software_provider();
++  for (ResourceId id : uploads_) {
++    W10mD3D11Painter::Texture* texture = painter_.Find(id);
++    if (texture && texture->texture) {
++      continue;
++    }
++    // What is known of a resource goes when the resource does, so both are
++    // there. Asked all the same, in the way that is not fatal: the lock is.
++    if (!texture || provider->GetMailbox(id).IsZero()) {
++      FailedForNow("a texture's resource is not there", /*counts=*/false);
++      return CpuReason::kUpload;
++    }
++    const base::TimeTicks before = base::TimeTicks::Now();
++    HRESULT hr = E_FAIL;
++    base::TimeDelta making;
++    {
++      // Straight from the resource's memory, under the lock, which is not
++      // kept.
++      DisplayResourceProviderSoftware::ScopedReadLockSkImage lock(provider,
++                                                                  id);
++      SkPixmap pixels;
++      if (lock.valid() && lock.sk_image()->peekPixels(&pixels) &&
++          pixels.width() == texture->size.width() &&
++          pixels.height() == texture->size.height() &&
++          pixels.info().bytesPerPixel() == 4) {
++        hr = painter_.Upload(texture, pixels, &making);
++      }
++    }
++    if (FAILED(hr)) {
++      // Memory comes and goes on a phone, and a device that has gone is the
++      // embedder's to make again: neither says the compositor cannot work.
++      FailedForNow("a texture could not be made",
++                   /*counts=*/hr != E_OUTOFMEMORY &&
++                       !painter_.DeviceRemoved());
++      return CpuReason::kUpload;
++    }
++    const base::TimeDelta took = base::TimeTicks::Now() - before;
++    ++statistics_.uploads;
++    statistics_.uploaded_bytes += texture->bytes();
++    statistics_.upload_time += took;
++    statistics_.making_time += making;
++    statistics_.longest_upload = std::max(statistics_.longest_upload, took);
++  }
++  if (!painter_.HasTextures(draws_)) {
++    // Never a textured quad with nothing to read from.
++    FailedForNow("a texture of the frame is not there", /*counts=*/false);
++    return CpuReason::kUpload;
++  }
++  const HRESULT hr = painter_.SetVertices(vertices_);
++  if (FAILED(hr)) {
++    FailedForNow("the vertex buffer could not be written",
++                 /*counts=*/hr != E_OUTOFMEMORY && !painter_.DeviceRemoved());
++    return CpuReason::kUpload;
++  }
++  return CpuReason::kNone;
++}
++
++void W10mD3D11Renderer::GiveUp(const char* reason, bool for_good) {
++  if (given_up_) {
++    return;
++  }
++  given_up_ = true;
++  give_up_reason_ = reason;
++  give_up_for_good_ = for_good;
++}
++
++void W10mD3D11Renderer::FinishGivingUp() {
++  if (!give_up_reason_) {
++    return;
++  }
++  const char* reason = give_up_reason_;
++  give_up_reason_ = nullptr;
++  DropDevice();
++  target_->OnGpuFramesGivenUp(reason, give_up_for_good_);
++}
++
++void W10mD3D11Renderer::FailedForNow(const char* what, bool counts) {
++  // Memory, most likely: what the textures hold is given back first, and
++  // now.
++  DropTextures();
++  back_off_frames_ = back_off_frames_
++                         ? std::min(back_off_frames_ * 2, kMaxBackOffFrames)
++                         : kBackOffFrames;
++  no_gpu_before_frame_ = frame_ + back_off_frames_;
++  // Once a failure, never once a frame: the next is at least kBackOffFrames
++  // frames away.
++  LOG(WARNING) << base::StringPrintf(
++      "compositor: %s; the CPU draws the next %d frames%s", what,
++      static_cast<int>(back_off_frames_),
++      counts ? "" : " (not counted against it)");
++  if (counts && ++failures_ >= kMaxFailures) {
++    GiveUp(what, /*for_good=*/false);
++  }
++}
++
++size_t W10mD3D11Renderer::TextureBudget(const gfx::Size& size) const {
++  const size_t screens =
++      static_cast<size_t>(size.width()) * size.height() * 4 * 4;
++  return std::clamp(screens, kMinTextureBudget, kMaxTextureBudget);
++}
++
++void W10mD3D11Renderer::CompareCheck() {
++  std::vector<uint8_t> gpu;
++  gpu.swap(check_pixels_);
++  // The bitmap the CPU has just drawn the frame into, whole (N32 is BGRA
++  // here, as the back buffer is). A test's way in, for a test.
++  const SkBitmap cpu = output_surface_->software_device()->ReadbackForTesting();
++  const size_t row = static_cast<size_t>(check_size_.width()) * 4;
++  if (cpu.width() != check_size_.width() ||
++      cpu.height() != check_size_.height() || cpu.bytesPerPixel() != 4 ||
++      gpu.size() != row * check_size_.height()) {
++    return;
++  }
++  // A rounding either way is not a wrong pixel.
++  constexpr int kTolerance = 2;
++  int differing = 0;
++  int largest = 0;
++  gfx::Rect where;
++  for (int y = 0; y < cpu.height(); ++y) {
++    const uint8_t* a = gpu.data() + y * row;
++    const uint8_t* b = static_cast<const uint8_t*>(cpu.getAddr(0, y));
++    for (int x = 0; x < cpu.width(); ++x, a += 4, b += 4) {
++      // Blue, green, red; the fourth byte is not shown.
++      const int difference =
++          std::max({std::abs(a[0] - b[0]), std::abs(a[1] - b[1]),
++                    std::abs(a[2] - b[2])});
++      largest = std::max(largest, difference);
++      if (difference > kTolerance) {
++        ++differing;
++        where.Union(gfx::Rect(x, y, 1, 1));
++      }
++    }
++  }
++  LOG(WARNING) << base::StringPrintf(
++      "compositor: check: frame %d, %d quads (%d filtered, Skia antialiases "
++      "%d): %d of %d pixels differ from the CPU's by more than %d (the "
++      "largest difference %d; within %s)",
++      static_cast<int>(frame_), static_cast<int>(draws_.size()),
++      filtered_quads_, antialiased_quads_, differing,
++      cpu.width() * cpu.height(), kTolerance, largest,
++      where.ToString().c_str());
++}
++
++void W10mD3D11Renderer::LogStatistics() {
++  Statistics& s = statistics_;
++  if (s.animated < kStatisticsPeriod) {
++    return;
++  }
++  // A summary, never a line a frame: a line in the embedder's log is a write
++  // and a flush. And none once the compositor is given up and every frame
++  // is the CPU's for that: it has been said.
++  const int frames = s.gpu_frames + s.cpu_frames;
++  if (frames >= 10 &&
++      s.reasons[static_cast<size_t>(CpuReason::kGivenUp)] != frames) {
++    // The commonest reasons the CPU drew a frame, five at most.
++    std::string reasons;
++    std::array<int, static_cast<size_t>(CpuReason::kCount)> left = s.reasons;
++    for (int i = 0; i < 5; ++i) {
++      const auto top = std::max_element(left.begin(), left.end());
++      if (*top == 0) {
++        break;
++      }
++      reasons += base::StringPrintf("%s%s %d", reasons.empty() ? "" : ", ",
++                                    kReasonNames[top - left.begin()], *top);
++      *top = 0;
++    }
++    const int gpu = std::max(s.gpu_frames, 1);
++    LOG(WARNING) << base::StringPrintf(
++        "compositor: over 10 s of animation %d frames drawn by the GPU (%d "
++        "of them changed under an eighth of the screen), %d by the CPU (%s), "
++        "the CPU taking over %d times; the CPU's part of a GPU frame %.1f ms "
++        "with its present (before it %.1f ms, the longest %.1f ms; %d quads; "
++        "Present waited over 4 ms for %d; the GPU was still at the frame "
++        "before for %d), a CPU frame %.1f ms; %d textures uploaded, %.1f MB "
++        "in %.1f ms (%.1f ms of it making them), the longest %.1f ms; %d "
++        "textures held, %.1f MB (%d let go unused); %d quads Skia would have "
++        "antialiased",
++        s.gpu_frames, s.small_frames, s.cpu_frames,
++        reasons.empty() ? "none" : reasons.c_str(), s.switches_to_cpu,
++        s.gpu_frame_time.InMillisecondsF() / gpu,
++        s.draw_time.InMillisecondsF() / gpu, s.longest_draw.InMillisecondsF(),
++        s.quads / gpu, s.present_waits, s.gpu_behind,
++        s.cpu_frame_time.InMillisecondsF() / std::max(s.cpu_frames, 1),
++        s.uploads, s.uploaded_bytes / 1048576.0,
++        s.upload_time.InMillisecondsF(), s.making_time.InMillisecondsF(),
++        s.longest_upload.InMillisecondsF(), painter_.texture_count(),
++        painter_.texture_bytes() / 1048576.0, s.textures_dropped,
++        s.antialiased_quads);
++  }
++  s = Statistics();
++}
++
++}  // namespace viz
++
++#endif  // defined(VENETIUM_W10M)
+diff --git a/components/viz/service/display/w10m_d3d11_renderer.h b/components/viz/service/display/w10m_d3d11_renderer.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..527e141f0991fb07469d67ef20eb3f3611915797
+--- /dev/null
++++ b/components/viz/service/display/w10m_d3d11_renderer.h
+@@ -0,0 +1,244 @@
++// Copyright 2026 The Venetium-W10M Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef COMPONENTS_VIZ_SERVICE_DISPLAY_W10M_D3D11_RENDERER_H_
++#define COMPONENTS_VIZ_SERVICE_DISPLAY_W10M_D3D11_RENDERER_H_
++
++// Built with the rest of viz on Windows; there is something in it only where
++// the provider and the output device have their Windows 10 Mobile hooks.
++#if defined(VENETIUM_W10M)
++
++#include <stddef.h>
++#include <stdint.h>
++
++#include <array>
++#include <vector>
++
++#include "base/memory/raw_ptr.h"
++#include "base/time/time.h"
++#include "components/viz/common/resources/resource_id.h"
++#include "components/viz/service/display/display_resource_provider_software.h"
++#include "components/viz/service/display/software_renderer.h"
++#include "components/viz/service/display/w10m_d3d11_painter.h"
++#include "components/viz/service/display/w10m_d3d11_target.h"
++#include "components/viz/service/viz_service_export.h"
++#include "ui/gfx/geometry/axis_transform2d.h"
++#include "ui/gfx/geometry/rect.h"
++#include "ui/gfx/geometry/size.h"
++
++namespace viz {
++
++// Windows 10 Mobile (Venetium): the software renderer, with the GPU doing the
++// compositing where it can -- "the CPU draws, the GPU composites", for phones
++// whose GPU stops at Direct3D feature level 9_3.
++//
++// cc still rasters on the CPU and viz still gets tiles as software resources.
++// A frame that is nothing but tiles, textures and solid colours, moved and
++// scaled along the axes, is not drawn by Skia into the output device's
++// bitmap and uploaded whole: its resources are kept as textures on the
++// device that presents (uploaded once each), and its quads are drawn from
++// them into the swap chain's back buffer (W10mD3D11Target). Any other frame
++// is SoftwareRenderer's, as it was, so nothing is ever missing from the
++// picture. Which of the two a frame is, is decided when it begins: all of a
++// GPU frame, its present included, happens in BeginDrawingFrame(), and
++// DirectRenderer is then left with nothing to draw.
++class VIZ_SERVICE_EXPORT W10mD3D11Renderer
++    : public SoftwareRenderer,
++      public DisplayResourceProviderSoftware::W10mResourceObserver,
++      public W10mD3D11Target::Client {
++ public:
++  // Why a frame was left to the CPU: the first thing found in its way. The
++  // log counts frames by these.
++  enum class CpuReason {
++    kNone,  // not left to the CPU
++    // The run.
++    kGivenUp,
++    kBackingOff,
++    kTestFlip,
++    // The frame. More render passes than the root: by what the passes are
++    // drawn with, the most demanding first.
++    kPassBackdropFilter,
++    kPassFilter,
++    kPassMask,
++    kPassPlain,
++    kCopyRequest,
++    kRootRect,
++    kTooManyQuads,
++    kTextureBudget,
++    // A quad.
++    kMaterial,
++    kBlendMode,
++    kSortingContext,
++    kRoundedCorner,
++    kTransform2d,
++    kTransform3d,
++    // A quad's resource.
++    kTextureQuadState,
++    kNoResource,
++    kNotSoftware,
++    kLowLatency,
++    kPixelFormat,
++    kTextureSize,
++    kTexCoords,
++    kNonPow2,
++    // The device.
++    kNoTarget,
++    kNewDevice,
++    kDeviceObjects,
++    kUpload,
++    kPresent,
++    kTestFailure,
++    kTestCheck,
++    kCount
++  };
++
++  W10mD3D11Renderer(const RendererSettings* settings,
++                    const DebugRendererSettings* debug_settings,
++                    OutputSurface* output_surface,
++                    DisplayResourceProviderSoftware* resource_provider,
++                    OverlayProcessorInterface* overlay_processor,
++                    W10mD3D11Target* target);
++  W10mD3D11Renderer(const W10mD3D11Renderer&) = delete;
++  W10mD3D11Renderer& operator=(const W10mD3D11Renderer&) = delete;
++  ~W10mD3D11Renderer() override;
++
++ protected:
++  // SoftwareRenderer:
++  void BeginDrawingFrame() override;
++  void BeginDrawingRenderPass(const AggregatedRenderPass* render_pass,
++                              bool needs_clear,
++                              const gfx::Rect& render_pass_update_rect,
++                              const gfx::Size& viewport_size) override;
++  void DoDrawQuad(const DrawQuad* quad, const gfx::QuadF* draw_region) override;
++  void FinishDrawingFrame() override;
++  void DidChangeVisibility() override;
++
++ private:
++  // DisplayResourceProviderSoftware::W10mResourceObserver:
++  void OnW10mResourceGone(ResourceId id) override;
++
++  // W10mD3D11Target::Client:
++  void ReleaseD3D11Textures() override;
++
++  DisplayResourceProviderSoftware* software_provider() {
++    return static_cast<DisplayResourceProviderSoftware*>(
++        resource_provider_.get());
++  }
++
++  // The whole of a GPU frame: planned, drawn and presented. kNone if it is
++  // on screen; otherwise why the CPU draws this frame.
++  CpuReason DrawGpuFrame();
++  // Fills |vertices_|, |draws_| and |uploads_| from the root pass. No
++  // Direct3D call is made.
++  CpuReason PlanFrame(const gfx::Size& size);
++  // Which of the kPass reasons a frame of several render passes is.
++  CpuReason ClassifyRenderPasses() const;
++  CpuReason PlanQuad(const DrawQuad& quad, const gfx::Rect& viewport);
++  // What |id|'s pixels are, looked at once: null with kNone if there are
++  // none to draw.
++  CpuReason Inspect(ResourceId id, W10mD3D11Painter::Texture** texture);
++  // After BeginGpuFrame(): the device's objects, this frame's textures and
++  // vertices. Nothing has been written to the back buffer if it fails.
++  // |planned_on| is the device the plan was made on.
++  CpuReason PrepareFrame(uint32_t planned_on);
++  // No more GPU frames in this run. The embedder is told by
++  // FinishGivingUp(), outside the frame.
++  void GiveUp(const char* reason, bool for_good);
++  void FinishGivingUp();
++  // A step failed that may work later: none for a while, longer each time.
++  // If it |counts| (it was not memory, nor the device going), kMaxFailures
++  // in a row end it for the run.
++  void FailedForNow(const char* what, bool counts);
++  // Every texture, and now; with the device, everything made on it.
++  void DropTextures();
++  void DropDevice();
++  size_t TextureBudget(const gfx::Size& size) const;
++  // --vw-compositor-check: the frame the GPU drew and did not present,
++  // against the same frame as the CPU has just drawn it.
++  void CompareCheck();
++  void LogStatistics();
++
++  const raw_ptr<W10mD3D11Target> target_;
++  W10mD3D11Painter painter_;
++
++  bool given_up_ = false;
++  // Given up inside a frame: what the embedder is told once the frame is
++  // over.
++  const char* give_up_reason_ = nullptr;
++  bool give_up_for_good_ = false;
++  // This frame was drawn by the GPU: the base class has nothing to draw.
++  bool gpu_frame_ = false;
++  // The output device's bitmap has missed frames (the GPU drew them): the
++  // next frame the CPU draws is drawn whole.
++  bool bitmap_stale_ = false;
++  // Between BeginDrawingFrame and FinishDrawingFrame: resources that go are
++  // noted in |gone_| and forgotten at the end.
++  bool in_frame_ = false;
++  std::vector<ResourceId> gone_;
++  uint64_t frame_ = 0;
++  uint64_t no_gpu_before_frame_ = 0;
++  uint64_t back_off_frames_ = 0;
++  int failures_ = 0;
++  // The log has been told that the first textures are being made, and the
++  // first frame drawn: said before, for a driver that does not come back.
++  bool said_first_upload_ = false;
++  bool said_first_draw_ = false;
++  base::TimeTicks frame_start_;
++  base::TimeTicks last_gpu_frame_;
++
++  // The frame being planned.
++  gfx::AxisTransform2d target_to_device_;
++  std::vector<W10mD3D11Vertex> vertices_;
++  std::vector<W10mD3D11Draw> draws_;
++  std::vector<ResourceId> uploads_;
++  size_t needed_bytes_ = 0;
++  int antialiased_quads_ = 0;
++  int filtered_quads_ = 0;
++
++  // --vw-compositor-flip=N, --vw-compositor-fail=N, --vw-compositor-check=N.
++  const int test_flip_every_;
++  const int test_fail_every_;
++  const int test_check_every_;
++  uint64_t eligible_frames_ = 0;
++  uint64_t begun_frames_ = 0;
++  uint64_t drawn_frames_ = 0;
++  // A frame read back for the check, until the CPU has drawn it too (in the
++  // same DrawFrame, so the plan above is still that frame's).
++  std::vector<uint8_t> check_pixels_;
++  gfx::Size check_size_;
++
++  // What the log line every ten seconds says.
++  struct Statistics {
++    // Time between frames that followed each other closely.
++    base::TimeDelta animated;
++    int gpu_frames = 0;
++    // Of them: little of the screen had changed; the GPU was still at the
++    // frame before when the next began.
++    int small_frames = 0;
++    int gpu_behind = 0;
++    int cpu_frames = 0;
++    std::array<int, static_cast<size_t>(CpuReason::kCount)> reasons = {};
++    int switches_to_cpu = 0;
++    int quads = 0;
++    int antialiased_quads = 0;
++    int uploads = 0;
++    uint64_t uploaded_bytes = 0;
++    base::TimeDelta upload_time;
++    base::TimeDelta making_time;
++    base::TimeDelta longest_upload;
++    base::TimeDelta draw_time;
++    base::TimeDelta longest_draw;
++    int present_waits = 0;
++    base::TimeDelta gpu_frame_time;
++    base::TimeDelta cpu_frame_time;
++    int textures_dropped = 0;
++  };
++  Statistics statistics_;
++};
++
++}  // namespace viz
++
++#endif  // defined(VENETIUM_W10M)
++
++#endif  // COMPONENTS_VIZ_SERVICE_DISPLAY_W10M_D3D11_RENDERER_H_
+diff --git a/components/viz/service/display/w10m_d3d11_shaders.h b/components/viz/service/display/w10m_d3d11_shaders.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..b059533be546bd71ec77733f8dc516612da1f047
+--- /dev/null
++++ b/components/viz/service/display/w10m_d3d11_shaders.h
+@@ -0,0 +1,470 @@
++// Copyright 2026 The Venetium-W10M Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++//
++// Generated by w10m_d3d11_shaders.py from w10m_d3d11_shaders.hlsl; do not
++// edit. Each array is the bytecode fxc writes for
++//   fxc /nologo /T <profile> /E <entry> /O3 /Vn <array> /Fh <file>
++//       w10m_d3d11_shaders.hlsl
++// with the profile and the entry point named above the array.
++
++#ifndef COMPONENTS_VIZ_SERVICE_DISPLAY_W10M_D3D11_SHADERS_H_
++#define COMPONENTS_VIZ_SERVICE_DISPLAY_W10M_D3D11_SHADERS_H_
++
++#include <stdint.h>
++
++namespace viz {
++
++// clang-format off
++
++// vs_4_0_level_9_3, QuadVS: 948 bytes.
++inline constexpr uint8_t kW10mD3D11QuadVS[] = {
++     68,  88,  66,  67, 184, 173, 126,  45,  47, 155, 124,  21,
++     44, 100, 173,  15,  11,  24, 180, 101,   1,   0,   0,   0,
++    180,   3,   0,   0,   6,   0,   0,   0,  56,   0,   0,   0,
++    248,   0,   0,   0, 224,   1,   0,   0,  92,   2,   0,   0,
++    168,   2,   0,   0,  44,   3,   0,   0,  65, 111, 110,  57,
++    184,   0,   0,   0, 184,   0,   0,   0,   0,   2, 254, 255,
++    144,   0,   0,   0,  40,   0,   0,   0,   0,   0,  36,   0,
++      0,   0,  36,   0,   0,   0,  36,   0,   0,   0,  36,   0,
++      1,   0,  36,   0,   0,   0,   0,   0,   1,   2, 254, 255,
++     81,   0,   0,   5,   1,   0,  15, 160,   0,   0,   0,   0,
++      0,   0, 128,  63,   0,   0,   0,   0,   0,   0,   0,   0,
++     31,   0,   0,   2,   5,   0,   0, 128,   0,   0,  15, 144,
++     31,   0,   0,   2,   5,   0,   1, 128,   1,   0,  15, 144,
++     31,   0,   0,   2,   5,   0,   2, 128,   2,   0,  15, 144,
++     31,   0,   0,   2,   5,   0,   3, 128,   3,   0,  15, 144,
++      2,   0,   0,   3,   0,   0,   3, 192,   0,   0, 228, 144,
++      0,   0, 228, 160,   1,   0,   0,   2,   0,   0,   3, 224,
++      1,   0, 228, 144,   1,   0,   0,   2,   1,   0,  15, 224,
++      2,   0, 228, 144,   1,   0,   0,   2,   2,   0,  15, 224,
++      3,   0, 228, 144,   1,   0,   0,   2,   0,   0,  12, 192,
++      1,   0,  68, 160, 255, 255,   0,   0,  83,  72,  68,  82,
++    224,   0,   0,   0,  64,   0,   1,   0,  56,   0,   0,   0,
++     95,   0,   0,   3,  50,  16,  16,   0,   0,   0,   0,   0,
++     95,   0,   0,   3,  50,  16,  16,   0,   1,   0,   0,   0,
++     95,   0,   0,   3, 242,  16,  16,   0,   2,   0,   0,   0,
++     95,   0,   0,   3, 242,  16,  16,   0,   3,   0,   0,   0,
++    101,   0,   0,   3,  50,  32,  16,   0,   0,   0,   0,   0,
++    101,   0,   0,   3, 242,  32,  16,   0,   1,   0,   0,   0,
++    101,   0,   0,   3, 242,  32,  16,   0,   2,   0,   0,   0,
++    103,   0,   0,   4, 242,  32,  16,   0,   3,   0,   0,   0,
++      1,   0,   0,   0,  54,   0,   0,   5,  50,  32,  16,   0,
++      0,   0,   0,   0,  70,  16,  16,   0,   1,   0,   0,   0,
++     54,   0,   0,   5, 242,  32,  16,   0,   1,   0,   0,   0,
++     70,  30,  16,   0,   2,   0,   0,   0,  54,   0,   0,   5,
++    242,  32,  16,   0,   2,   0,   0,   0,  70,  30,  16,   0,
++      3,   0,   0,   0,  54,   0,   0,   5,  50,  32,  16,   0,
++      3,   0,   0,   0,  70,  16,  16,   0,   0,   0,   0,   0,
++     54,   0,   0,   8, 194,  32,  16,   0,   3,   0,   0,   0,
++      2,  64,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0, 128,  63,  62,   0,   0,   1,
++     83,  84,  65,  84, 116,   0,   0,   0,   6,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,   0,   0,   8,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
++      1,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
++      5,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,  82,  68,  69,  70,  68,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
++     28,   0,   0,   0,   0,   4, 254, 255,   0, 129,   0,   0,
++     28,   0,   0,   0,  77, 105,  99, 114, 111, 115, 111, 102,
++    116,  32,  40,  82,  41,  32,  72,  76,  83,  76,  32,  83,
++    104,  97, 100, 101, 114,  32,  67, 111, 109, 112, 105, 108,
++    101, 114,  32,  49,  48,  46,  49,   0,  73,  83,  71,  78,
++    124,   0,   0,   0,   4,   0,   0,   0,   8,   0,   0,   0,
++    104,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
++      3,   0,   0,   0,   0,   0,   0,   0,   3,   3,   0,   0,
++    113,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
++      3,   0,   0,   0,   1,   0,   0,   0,   3,   3,   0,   0,
++    113,   0,   0,   0,   1,   0,   0,   0,   0,   0,   0,   0,
++      3,   0,   0,   0,   2,   0,   0,   0,  15,  15,   0,   0,
++    113,   0,   0,   0,   2,   0,   0,   0,   0,   0,   0,   0,
++      3,   0,   0,   0,   3,   0,   0,   0,  15,  15,   0,   0,
++     80,  79,  83,  73,  84,  73,  79,  78,   0,  84,  69,  88,
++     67,  79,  79,  82,  68,   0, 171, 171,  79,  83,  71,  78,
++    128,   0,   0,   0,   4,   0,   0,   0,   8,   0,   0,   0,
++    104,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
++      3,   0,   0,   0,   0,   0,   0,   0,   3,  12,   0,   0,
++    104,   0,   0,   0,   1,   0,   0,   0,   0,   0,   0,   0,
++      3,   0,   0,   0,   1,   0,   0,   0,  15,   0,   0,   0,
++    104,   0,   0,   0,   2,   0,   0,   0,   0,   0,   0,   0,
++      3,   0,   0,   0,   2,   0,   0,   0,  15,   0,   0,   0,
++    113,   0,   0,   0,   0,   0,   0,   0,   1,   0,   0,   0,
++      3,   0,   0,   0,   3,   0,   0,   0,  15,   0,   0,   0,
++     84,  69,  88,  67,  79,  79,  82,  68,   0,  83,  86,  95,
++     80, 111, 115, 105, 116, 105, 111, 110,   0, 171, 171, 171,
++};
++
++// ps_4_0_level_9_3, ColorPS: 548 bytes.
++inline constexpr uint8_t kW10mD3D11ColorPS[] = {
++     68,  88,  66,  67, 254, 140, 178,  17,  49, 120, 226, 237,
++     26, 101,  95, 193, 174,   6, 250, 204,   1,   0,   0,   0,
++     36,   2,   0,   0,   6,   0,   0,   0,  56,   0,   0,   0,
++    132,   0,   0,   0, 196,   0,   0,   0,  64,   1,   0,   0,
++    140,   1,   0,   0, 240,   1,   0,   0,  65, 111, 110,  57,
++     68,   0,   0,   0,  68,   0,   0,   0,   0,   2, 255, 255,
++     32,   0,   0,   0,  36,   0,   0,   0,   0,   0,  36,   0,
++      0,   0,  36,   0,   0,   0,  36,   0,   0,   0,  36,   0,
++      0,   0,  36,   0,   1,   2, 255, 255,  31,   0,   0,   2,
++      0,   0,   0, 128,   2,   0,  15, 176,   1,   0,   0,   2,
++      0,   8,  15, 128,   2,   0, 228, 176, 255, 255,   0,   0,
++     83,  72,  68,  82,  56,   0,   0,   0,  64,   0,   0,   0,
++     14,   0,   0,   0,  98,  16,   0,   3, 242,  16,  16,   0,
++      2,   0,   0,   0, 101,   0,   0,   3, 242,  32,  16,   0,
++      0,   0,   0,   0,  54,   0,   0,   5, 242,  32,  16,   0,
++      0,   0,   0,   0,  70,  30,  16,   0,   2,   0,   0,   0,
++     62,   0,   0,   1,  83,  84,  65,  84, 116,   0,   0,   0,
++      2,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
++      2,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   1,   0,   0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   1,   0,   0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,   0,   0,  82,  68,  69,  70,
++     68,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,  28,   0,   0,   0,   0,   4, 255, 255,
++      0, 129,   0,   0,  28,   0,   0,   0,  77, 105,  99, 114,
++    111, 115, 111, 102, 116,  32,  40,  82,  41,  32,  72,  76,
++     83,  76,  32,  83, 104,  97, 100, 101, 114,  32,  67, 111,
++    109, 112, 105, 108, 101, 114,  32,  49,  48,  46,  49,   0,
++     73,  83,  71,  78,  92,   0,   0,   0,   3,   0,   0,   0,
++      8,   0,   0,   0,  80,   0,   0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   3,   0,   0,   0,   0,   0,   0,   0,
++      3,   0,   0,   0,  80,   0,   0,   0,   1,   0,   0,   0,
++      0,   0,   0,   0,   3,   0,   0,   0,   1,   0,   0,   0,
++     15,   0,   0,   0,  80,   0,   0,   0,   2,   0,   0,   0,
++      0,   0,   0,   0,   3,   0,   0,   0,   2,   0,   0,   0,
++     15,  15,   0,   0,  84,  69,  88,  67,  79,  79,  82,  68,
++      0, 171, 171, 171,  79,  83,  71,  78,  44,   0,   0,   0,
++      1,   0,   0,   0,   8,   0,   0,   0,  32,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,   0,   0,   3,   0,   0,   0,
++      0,   0,   0,   0,  15,   0,   0,   0,  83,  86,  95,  84,
++     97, 114, 103, 101, 116,   0, 171, 171,
++};
++
++// ps_4_0_level_9_3, TexturePS: 792 bytes.
++inline constexpr uint8_t kW10mD3D11TexturePS[] = {
++     68,  88,  66,  67, 242, 221, 210, 132, 197, 124, 109, 166,
++    122,  99,  94, 241,  76, 204, 227, 126,   1,   0,   0,   0,
++     24,   3,   0,   0,   6,   0,   0,   0,  56,   0,   0,   0,
++    192,   0,   0,   0,  92,   1,   0,   0, 216,   1,   0,   0,
++    128,   2,   0,   0, 228,   2,   0,   0,  65, 111, 110,  57,
++    128,   0,   0,   0, 128,   0,   0,   0,   0,   2, 255, 255,
++     88,   0,   0,   0,  40,   0,   0,   0,   0,   0,  40,   0,
++      0,   0,  40,   0,   0,   0,  40,   0,   1,   0,  36,   0,
++      0,   0,  40,   0,   0,   0,   0,   0,   1,   2, 255, 255,
++     31,   0,   0,   2,   0,   0,   0, 128,   0,   0,   3, 176,
++     31,   0,   0,   2,   0,   0,   0, 128,   2,   0,  15, 176,
++     31,   0,   0,   2,   0,   0,   0, 144,   0,   8,  15, 160,
++     66,   0,   0,   3,   0,   0,  15, 128,   0,   0, 228, 176,
++      0,   8, 228, 160,   5,   0,   0,   3,   0,   0,  15, 128,
++      0,   0, 228, 128,   2,   0, 228, 176,   1,   0,   0,   2,
++      0,   8,  15, 128,   0,   0, 228, 128, 255, 255,   0,   0,
++     83,  72,  68,  82, 148,   0,   0,   0,  64,   0,   0,   0,
++     37,   0,   0,   0,  90,   0,   0,   3,   0,  96,  16,   0,
++      0,   0,   0,   0,  88,  24,   0,   4,   0, 112,  16,   0,
++      0,   0,   0,   0,  85,  85,   0,   0,  98,  16,   0,   3,
++     50,  16,  16,   0,   0,   0,   0,   0,  98,  16,   0,   3,
++    242,  16,  16,   0,   2,   0,   0,   0, 101,   0,   0,   3,
++    242,  32,  16,   0,   0,   0,   0,   0, 104,   0,   0,   2,
++      1,   0,   0,   0,  69,   0,   0,   9, 242,   0,  16,   0,
++      0,   0,   0,   0,  70,  16,  16,   0,   0,   0,   0,   0,
++     70, 126,  16,   0,   0,   0,   0,   0,   0,  96,  16,   0,
++      0,   0,   0,   0,  56,   0,   0,   7, 242,  32,  16,   0,
++      0,   0,   0,   0,  70,  14,  16,   0,   0,   0,   0,   0,
++     70,  30,  16,   0,   2,   0,   0,   0,  62,   0,   0,   1,
++     83,  84,  65,  84, 116,   0,   0,   0,   3,   0,   0,   0,
++      1,   0,   0,   0,   0,   0,   0,   0,   3,   0,   0,   0,
++      1,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
++      1,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   1,   0,   0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,  82,  68,  69,  70, 160,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,   0,   0,   2,   0,   0,   0,
++     28,   0,   0,   0,   0,   4, 255, 255,   0, 129,   0,   0,
++    118,   0,   0,   0,  92,   0,   0,   0,   3,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   1,   0,   0,   0,   1,   0,   0,   0,
++    105,   0,   0,   0,   2,   0,   0,   0,   5,   0,   0,   0,
++      4,   0,   0,   0, 255, 255, 255, 255,   0,   0,   0,   0,
++      1,   0,   0,   0,  13,   0,   0,   0, 113, 117,  97, 100,
++     95, 115,  97, 109, 112, 108, 101, 114,   0, 113, 117,  97,
++    100,  95, 116, 101, 120, 116, 117, 114, 101,   0,  77, 105,
++     99, 114, 111, 115, 111, 102, 116,  32,  40,  82,  41,  32,
++     72,  76,  83,  76,  32,  83, 104,  97, 100, 101, 114,  32,
++     67, 111, 109, 112, 105, 108, 101, 114,  32,  49,  48,  46,
++     49,   0, 171, 171,  73,  83,  71,  78,  92,   0,   0,   0,
++      3,   0,   0,   0,   8,   0,   0,   0,  80,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,   0,   0,   3,   0,   0,   0,
++      0,   0,   0,   0,   3,   3,   0,   0,  80,   0,   0,   0,
++      1,   0,   0,   0,   0,   0,   0,   0,   3,   0,   0,   0,
++      1,   0,   0,   0,  15,   0,   0,   0,  80,   0,   0,   0,
++      2,   0,   0,   0,   0,   0,   0,   0,   3,   0,   0,   0,
++      2,   0,   0,   0,  15,  15,   0,   0,  84,  69,  88,  67,
++     79,  79,  82,  68,   0, 171, 171, 171,  79,  83,  71,  78,
++     44,   0,   0,   0,   1,   0,   0,   0,   8,   0,   0,   0,
++     32,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
++      3,   0,   0,   0,   0,   0,   0,   0,  15,   0,   0,   0,
++     83,  86,  95,  84,  97, 114, 103, 101, 116,   0, 171, 171,
++};
++
++// ps_4_0_level_9_3, TextureOpaquePS: 856 bytes.
++inline constexpr uint8_t kW10mD3D11TextureOpaquePS[] = {
++     68,  88,  66,  67, 222,  91, 104,   3,  54, 175,   3,  58,
++    161, 120, 156, 179, 179,  70, 239, 195,   1,   0,   0,   0,
++     88,   3,   0,   0,   6,   0,   0,   0,  56,   0,   0,   0,
++    236,   0,   0,   0, 156,   1,   0,   0,  24,   2,   0,   0,
++    192,   2,   0,   0,  36,   3,   0,   0,  65, 111, 110,  57,
++    172,   0,   0,   0, 172,   0,   0,   0,   0,   2, 255, 255,
++    132,   0,   0,   0,  40,   0,   0,   0,   0,   0,  40,   0,
++      0,   0,  40,   0,   0,   0,  40,   0,   1,   0,  36,   0,
++      0,   0,  40,   0,   0,   0,   0,   0,   1,   2, 255, 255,
++     81,   0,   0,   5,   0,   0,  15, 160,   0,   0, 128,  63,
++      0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
++     31,   0,   0,   2,   0,   0,   0, 128,   0,   0,   3, 176,
++     31,   0,   0,   2,   0,   0,   0, 128,   2,   0,  15, 176,
++     31,   0,   0,   2,   0,   0,   0, 144,   0,   8,  15, 160,
++     66,   0,   0,   3,   0,   0,  15, 128,   0,   0, 228, 176,
++      0,   8, 228, 160,   4,   0,   0,   4,   0,   0,  15, 128,
++      0,   0,  36, 128,   0,   0,  64, 160,   0,   0,  21, 160,
++      5,   0,   0,   3,   0,   0,  15, 128,   0,   0, 228, 128,
++      2,   0, 228, 176,   1,   0,   0,   2,   0,   8,  15, 128,
++      0,   0, 228, 128, 255, 255,   0,   0,  83,  72,  68,  82,
++    168,   0,   0,   0,  64,   0,   0,   0,  42,   0,   0,   0,
++     90,   0,   0,   3,   0,  96,  16,   0,   0,   0,   0,   0,
++     88,  24,   0,   4,   0, 112,  16,   0,   0,   0,   0,   0,
++     85,  85,   0,   0,  98,  16,   0,   3,  50,  16,  16,   0,
++      0,   0,   0,   0,  98,  16,   0,   3, 242,  16,  16,   0,
++      2,   0,   0,   0, 101,   0,   0,   3, 242,  32,  16,   0,
++      0,   0,   0,   0, 104,   0,   0,   2,   1,   0,   0,   0,
++     69,   0,   0,   9, 242,   0,  16,   0,   0,   0,   0,   0,
++     70,  16,  16,   0,   0,   0,   0,   0,  70, 126,  16,   0,
++      0,   0,   0,   0,   0,  96,  16,   0,   0,   0,   0,   0,
++     54,   0,   0,   5, 130,   0,  16,   0,   0,   0,   0,   0,
++      1,  64,   0,   0,   0,   0, 128,  63,  56,   0,   0,   7,
++    242,  32,  16,   0,   0,   0,   0,   0,  70,  14,  16,   0,
++      0,   0,   0,   0,  70,  30,  16,   0,   2,   0,   0,   0,
++     62,   0,   0,   1,  83,  84,  65,  84, 116,   0,   0,   0,
++      4,   0,   0,   0,   1,   0,   0,   0,   0,   0,   0,   0,
++      3,   0,   0,   0,   1,   0,   0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   1,   0,   0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,   0,   0,   1,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   1,   0,   0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,   0,   0,  82,  68,  69,  70,
++    160,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
++      2,   0,   0,   0,  28,   0,   0,   0,   0,   4, 255, 255,
++      0, 129,   0,   0, 118,   0,   0,   0,  92,   0,   0,   0,
++      3,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,   0,   0,   1,   0,   0,   0,
++      1,   0,   0,   0, 105,   0,   0,   0,   2,   0,   0,   0,
++      5,   0,   0,   0,   4,   0,   0,   0, 255, 255, 255, 255,
++      0,   0,   0,   0,   1,   0,   0,   0,  13,   0,   0,   0,
++    113, 117,  97, 100,  95, 115,  97, 109, 112, 108, 101, 114,
++      0, 113, 117,  97, 100,  95, 116, 101, 120, 116, 117, 114,
++    101,   0,  77, 105,  99, 114, 111, 115, 111, 102, 116,  32,
++     40,  82,  41,  32,  72,  76,  83,  76,  32,  83, 104,  97,
++    100, 101, 114,  32,  67, 111, 109, 112, 105, 108, 101, 114,
++     32,  49,  48,  46,  49,   0, 171, 171,  73,  83,  71,  78,
++     92,   0,   0,   0,   3,   0,   0,   0,   8,   0,   0,   0,
++     80,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
++      3,   0,   0,   0,   0,   0,   0,   0,   3,   3,   0,   0,
++     80,   0,   0,   0,   1,   0,   0,   0,   0,   0,   0,   0,
++      3,   0,   0,   0,   1,   0,   0,   0,  15,   0,   0,   0,
++     80,   0,   0,   0,   2,   0,   0,   0,   0,   0,   0,   0,
++      3,   0,   0,   0,   2,   0,   0,   0,  15,  15,   0,   0,
++     84,  69,  88,  67,  79,  79,  82,  68,   0, 171, 171, 171,
++     79,  83,  71,  78,  44,   0,   0,   0,   1,   0,   0,   0,
++      8,   0,   0,   0,  32,   0,   0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   3,   0,   0,   0,   0,   0,   0,   0,
++     15,   0,   0,   0,  83,  86,  95,  84,  97, 114, 103, 101,
++    116,   0, 171, 171,
++};
++
++// ps_4_0_level_9_3, TextureClampPS: 916 bytes.
++inline constexpr uint8_t kW10mD3D11TextureClampPS[] = {
++     68,  88,  66,  67,  34, 118, 100,  80, 115, 105,  35, 215,
++     84, 207,   4,  51, 138, 189, 131,  97,   1,   0,   0,   0,
++    148,   3,   0,   0,   6,   0,   0,   0,  56,   0,   0,   0,
++    248,   0,   0,   0, 216,   1,   0,   0,  84,   2,   0,   0,
++    252,   2,   0,   0,  96,   3,   0,   0,  65, 111, 110,  57,
++    184,   0,   0,   0, 184,   0,   0,   0,   0,   2, 255, 255,
++    144,   0,   0,   0,  40,   0,   0,   0,   0,   0,  40,   0,
++      0,   0,  40,   0,   0,   0,  40,   0,   1,   0,  36,   0,
++      0,   0,  40,   0,   0,   0,   0,   0,   1,   2, 255, 255,
++     31,   0,   0,   2,   0,   0,   0, 128,   0,   0,   3, 176,
++     31,   0,   0,   2,   0,   0,   0, 128,   1,   0,  15, 176,
++     31,   0,   0,   2,   0,   0,   0, 128,   2,   0,  15, 176,
++     31,   0,   0,   2,   0,   0,   0, 144,   0,   8,  15, 160,
++      1,   0,   0,   2,   0,   0,   3, 128,   1,   0, 228, 176,
++     11,   0,   0,   3,   1,   0,   3, 128,   0,   0, 228, 176,
++      0,   0, 228, 128,  10,   0,   0,   3,   0,   0,   3, 128,
++      1,   0, 238, 176,   1,   0, 228, 128,  66,   0,   0,   3,
++      0,   0,  15, 128,   0,   0, 228, 128,   0,   8, 228, 160,
++      5,   0,   0,   3,   0,   0,  15, 128,   0,   0, 228, 128,
++      2,   0, 228, 176,   1,   0,   0,   2,   0,   8,  15, 128,
++      0,   0, 228, 128, 255, 255,   0,   0,  83,  72,  68,  82,
++    216,   0,   0,   0,  64,   0,   0,   0,  54,   0,   0,   0,
++     90,   0,   0,   3,   0,  96,  16,   0,   0,   0,   0,   0,
++     88,  24,   0,   4,   0, 112,  16,   0,   0,   0,   0,   0,
++     85,  85,   0,   0,  98,  16,   0,   3,  50,  16,  16,   0,
++      0,   0,   0,   0,  98,  16,   0,   3, 242,  16,  16,   0,
++      1,   0,   0,   0,  98,  16,   0,   3, 242,  16,  16,   0,
++      2,   0,   0,   0, 101,   0,   0,   3, 242,  32,  16,   0,
++      0,   0,   0,   0, 104,   0,   0,   2,   1,   0,   0,   0,
++     52,   0,   0,   7,  50,   0,  16,   0,   0,   0,   0,   0,
++     70,  16,  16,   0,   0,   0,   0,   0,  70,  16,  16,   0,
++      1,   0,   0,   0,  51,   0,   0,   7,  50,   0,  16,   0,
++      0,   0,   0,   0,  70,   0,  16,   0,   0,   0,   0,   0,
++    230,  26,  16,   0,   1,   0,   0,   0,  69,   0,   0,   9,
++    242,   0,  16,   0,   0,   0,   0,   0,  70,   0,  16,   0,
++      0,   0,   0,   0,  70, 126,  16,   0,   0,   0,   0,   0,
++      0,  96,  16,   0,   0,   0,   0,   0,  56,   0,   0,   7,
++    242,  32,  16,   0,   0,   0,   0,   0,  70,  14,  16,   0,
++      0,   0,   0,   0,  70,  30,  16,   0,   2,   0,   0,   0,
++     62,   0,   0,   1,  83,  84,  65,  84, 116,   0,   0,   0,
++      5,   0,   0,   0,   1,   0,   0,   0,   0,   0,   0,   0,
++      4,   0,   0,   0,   3,   0,   0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   1,   0,   0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,   0,   0,   1,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,   0,   0,  82,  68,  69,  70,
++    160,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
++      2,   0,   0,   0,  28,   0,   0,   0,   0,   4, 255, 255,
++      0, 129,   0,   0, 118,   0,   0,   0,  92,   0,   0,   0,
++      3,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,   0,   0,   1,   0,   0,   0,
++      1,   0,   0,   0, 105,   0,   0,   0,   2,   0,   0,   0,
++      5,   0,   0,   0,   4,   0,   0,   0, 255, 255, 255, 255,
++      0,   0,   0,   0,   1,   0,   0,   0,  13,   0,   0,   0,
++    113, 117,  97, 100,  95, 115,  97, 109, 112, 108, 101, 114,
++      0, 113, 117,  97, 100,  95, 116, 101, 120, 116, 117, 114,
++    101,   0,  77, 105,  99, 114, 111, 115, 111, 102, 116,  32,
++     40,  82,  41,  32,  72,  76,  83,  76,  32,  83, 104,  97,
++    100, 101, 114,  32,  67, 111, 109, 112, 105, 108, 101, 114,
++     32,  49,  48,  46,  49,   0, 171, 171,  73,  83,  71,  78,
++     92,   0,   0,   0,   3,   0,   0,   0,   8,   0,   0,   0,
++     80,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
++      3,   0,   0,   0,   0,   0,   0,   0,   3,   3,   0,   0,
++     80,   0,   0,   0,   1,   0,   0,   0,   0,   0,   0,   0,
++      3,   0,   0,   0,   1,   0,   0,   0,  15,  15,   0,   0,
++     80,   0,   0,   0,   2,   0,   0,   0,   0,   0,   0,   0,
++      3,   0,   0,   0,   2,   0,   0,   0,  15,  15,   0,   0,
++     84,  69,  88,  67,  79,  79,  82,  68,   0, 171, 171, 171,
++     79,  83,  71,  78,  44,   0,   0,   0,   1,   0,   0,   0,
++      8,   0,   0,   0,  32,   0,   0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   3,   0,   0,   0,   0,   0,   0,   0,
++     15,   0,   0,   0,  83,  86,  95,  84,  97, 114, 103, 101,
++    116,   0, 171, 171,
++};
++
++// ps_4_0_level_9_3, TextureOpaqueClampPS: 980 bytes.
++inline constexpr uint8_t kW10mD3D11TextureOpaqueClampPS[] = {
++     68,  88,  66,  67,  94,  97,  83,  85, 186,  85, 195,  72,
++      3,  94, 210,  65, 237,  50,  74, 179,   1,   0,   0,   0,
++    212,   3,   0,   0,   6,   0,   0,   0,  56,   0,   0,   0,
++     36,   1,   0,   0,  24,   2,   0,   0, 148,   2,   0,   0,
++     60,   3,   0,   0, 160,   3,   0,   0,  65, 111, 110,  57,
++    228,   0,   0,   0, 228,   0,   0,   0,   0,   2, 255, 255,
++    188,   0,   0,   0,  40,   0,   0,   0,   0,   0,  40,   0,
++      0,   0,  40,   0,   0,   0,  40,   0,   1,   0,  36,   0,
++      0,   0,  40,   0,   0,   0,   0,   0,   1,   2, 255, 255,
++     81,   0,   0,   5,   0,   0,  15, 160,   0,   0, 128,  63,
++      0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
++     31,   0,   0,   2,   0,   0,   0, 128,   0,   0,   3, 176,
++     31,   0,   0,   2,   0,   0,   0, 128,   1,   0,  15, 176,
++     31,   0,   0,   2,   0,   0,   0, 128,   2,   0,  15, 176,
++     31,   0,   0,   2,   0,   0,   0, 144,   0,   8,  15, 160,
++      1,   0,   0,   2,   0,   0,   3, 128,   1,   0, 228, 176,
++     11,   0,   0,   3,   1,   0,   3, 128,   0,   0, 228, 176,
++      0,   0, 228, 128,  10,   0,   0,   3,   0,   0,   3, 128,
++      1,   0, 238, 176,   1,   0, 228, 128,  66,   0,   0,   3,
++      0,   0,  15, 128,   0,   0, 228, 128,   0,   8, 228, 160,
++      4,   0,   0,   4,   0,   0,  15, 128,   0,   0,  36, 128,
++      0,   0,  64, 160,   0,   0,  21, 160,   5,   0,   0,   3,
++      0,   0,  15, 128,   0,   0, 228, 128,   2,   0, 228, 176,
++      1,   0,   0,   2,   0,   8,  15, 128,   0,   0, 228, 128,
++    255, 255,   0,   0,  83,  72,  68,  82, 236,   0,   0,   0,
++     64,   0,   0,   0,  59,   0,   0,   0,  90,   0,   0,   3,
++      0,  96,  16,   0,   0,   0,   0,   0,  88,  24,   0,   4,
++      0, 112,  16,   0,   0,   0,   0,   0,  85,  85,   0,   0,
++     98,  16,   0,   3,  50,  16,  16,   0,   0,   0,   0,   0,
++     98,  16,   0,   3, 242,  16,  16,   0,   1,   0,   0,   0,
++     98,  16,   0,   3, 242,  16,  16,   0,   2,   0,   0,   0,
++    101,   0,   0,   3, 242,  32,  16,   0,   0,   0,   0,   0,
++    104,   0,   0,   2,   1,   0,   0,   0,  52,   0,   0,   7,
++     50,   0,  16,   0,   0,   0,   0,   0,  70,  16,  16,   0,
++      0,   0,   0,   0,  70,  16,  16,   0,   1,   0,   0,   0,
++     51,   0,   0,   7,  50,   0,  16,   0,   0,   0,   0,   0,
++     70,   0,  16,   0,   0,   0,   0,   0, 230,  26,  16,   0,
++      1,   0,   0,   0,  69,   0,   0,   9, 242,   0,  16,   0,
++      0,   0,   0,   0,  70,   0,  16,   0,   0,   0,   0,   0,
++     70, 126,  16,   0,   0,   0,   0,   0,   0,  96,  16,   0,
++      0,   0,   0,   0,  54,   0,   0,   5, 130,   0,  16,   0,
++      0,   0,   0,   0,   1,  64,   0,   0,   0,   0, 128,  63,
++     56,   0,   0,   7, 242,  32,  16,   0,   0,   0,   0,   0,
++     70,  14,  16,   0,   0,   0,   0,   0,  70,  30,  16,   0,
++      2,   0,   0,   0,  62,   0,   0,   1,  83,  84,  65,  84,
++    116,   0,   0,   0,   6,   0,   0,   0,   1,   0,   0,   0,
++      0,   0,   0,   0,   4,   0,   0,   0,   3,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,   0,   0,   1,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
++      1,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,   0,   0,   1,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
++     82,  68,  69,  70, 160,   0,   0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   2,   0,   0,   0,  28,   0,   0,   0,
++      0,   4, 255, 255,   0, 129,   0,   0, 118,   0,   0,   0,
++     92,   0,   0,   0,   3,   0,   0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
++      1,   0,   0,   0,   1,   0,   0,   0, 105,   0,   0,   0,
++      2,   0,   0,   0,   5,   0,   0,   0,   4,   0,   0,   0,
++    255, 255, 255, 255,   0,   0,   0,   0,   1,   0,   0,   0,
++     13,   0,   0,   0, 113, 117,  97, 100,  95, 115,  97, 109,
++    112, 108, 101, 114,   0, 113, 117,  97, 100,  95, 116, 101,
++    120, 116, 117, 114, 101,   0,  77, 105,  99, 114, 111, 115,
++    111, 102, 116,  32,  40,  82,  41,  32,  72,  76,  83,  76,
++     32,  83, 104,  97, 100, 101, 114,  32,  67, 111, 109, 112,
++    105, 108, 101, 114,  32,  49,  48,  46,  49,   0, 171, 171,
++     73,  83,  71,  78,  92,   0,   0,   0,   3,   0,   0,   0,
++      8,   0,   0,   0,  80,   0,   0,   0,   0,   0,   0,   0,
++      0,   0,   0,   0,   3,   0,   0,   0,   0,   0,   0,   0,
++      3,   3,   0,   0,  80,   0,   0,   0,   1,   0,   0,   0,
++      0,   0,   0,   0,   3,   0,   0,   0,   1,   0,   0,   0,
++     15,  15,   0,   0,  80,   0,   0,   0,   2,   0,   0,   0,
++      0,   0,   0,   0,   3,   0,   0,   0,   2,   0,   0,   0,
++     15,  15,   0,   0,  84,  69,  88,  67,  79,  79,  82,  68,
++      0, 171, 171, 171,  79,  83,  71,  78,  44,   0,   0,   0,
++      1,   0,   0,   0,   8,   0,   0,   0,  32,   0,   0,   0,
++      0,   0,   0,   0,   0,   0,   0,   0,   3,   0,   0,   0,
++      0,   0,   0,   0,  15,   0,   0,   0,  83,  86,  95,  84,
++     97, 114, 103, 101, 116,   0, 171, 171,
++};
++
++// clang-format on
++
++}  // namespace viz
++
++#endif  // COMPONENTS_VIZ_SERVICE_DISPLAY_W10M_D3D11_SHADERS_H_
+diff --git a/components/viz/service/display/w10m_d3d11_shaders.hlsl b/components/viz/service/display/w10m_d3d11_shaders.hlsl
+new file mode 100644
+index 0000000000000000000000000000000000000000..a9a9a6d343d177df409ce34f896ad760f00a8720
+--- /dev/null
++++ b/components/viz/service/display/w10m_d3d11_shaders.hlsl
+@@ -0,0 +1,83 @@
++// Copyright 2026 The Venetium-W10M Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++//
++// The shaders of W10mD3D11Painter: one vertex shader and five pixel shaders
++// for Direct3D feature level 9_3. Compiled offline into
++// w10m_d3d11_shaders.h by w10m_d3d11_shaders.py (the command lines are in
++// both); nothing is compiled on the phone.
++//
++// A vertex arrives finished: the CPU has transformed, snapped and clipped
++// the quad, so there are no constant buffers at all, and everything a pixel
++// needs comes with the vertices. The pixel shaders do not declare
++// SV_Position, which a level 9 pixel shader cannot read; the stages link by
++// register, so the vertex shader writes its TEXCOORDs first and the position
++// last.
++
++struct VertexIn {
++  float2 position : POSITION;   // clip space: x right, y up, -1..1
++  float2 uv : TEXCOORD0;        // 0..1 over the whole texture
++  float4 uv_bounds : TEXCOORD1; // min.xy, max.xy the samples stay within
++  float4 color : TEXCOORD2;     // premultiplied; multiplies the texel
++};
++
++struct VertexOut {
++  float2 uv : TEXCOORD0;
++  float4 uv_bounds : TEXCOORD1;
++  float4 color : TEXCOORD2;
++  float4 position : SV_Position;
++};
++
++struct PixelIn {
++  float2 uv : TEXCOORD0;
++  float4 uv_bounds : TEXCOORD1;
++  float4 color : TEXCOORD2;
++};
++
++Texture2D quad_texture : register(t0);
++SamplerState quad_sampler : register(s0);
++
++VertexOut QuadVS(VertexIn input) {
++  VertexOut output;
++  output.uv = input.uv;
++  output.uv_bounds = input.uv_bounds;
++  output.color = input.color;
++  // z = 0 and w = 1: inside the depth range, which cannot be switched off
++  // at this level, and no perspective.
++  output.position = float4(input.position, 0.0f, 1.0f);
++  return output;
++}
++
++// A solid colour quad.
++float4 ColorPS(PixelIn input) : SV_Target {
++  return input.color;
++}
++
++// A premultiplied BGRA or RGBA texture (the texture's format orders the
++// channels), read where the coordinate was interpolated to. For quads whose
++// samples cannot leave the texels they show: one texel a pixel, or the whole
++// texture shown, which the sampler's CLAMP keeps to. Not a dependent read,
++// which is all a level 9 device without full support for textures that are
++// not powers of two may do with one.
++float4 TexturePS(PixelIn input) : SV_Target {
++  return quad_texture.Sample(quad_sampler, input.uv) * input.color;
++}
++
++// The same for a texture whose alpha bytes mean nothing (an opaque image).
++float4 TextureOpaquePS(PixelIn input) : SV_Target {
++  return float4(quad_texture.Sample(quad_sampler, input.uv).rgb, 1.0f) *
++         input.color;
++}
++
++// A quad that shows part of its texture, filtered or scaled. The clamp is
++// Skia's strict source rectangle: no sample reads a texel outside the part
++// shown.
++float4 TextureClampPS(PixelIn input) : SV_Target {
++  float2 uv = clamp(input.uv, input.uv_bounds.xy, input.uv_bounds.zw);
++  return quad_texture.Sample(quad_sampler, uv) * input.color;
++}
++
++float4 TextureOpaqueClampPS(PixelIn input) : SV_Target {
++  float2 uv = clamp(input.uv, input.uv_bounds.xy, input.uv_bounds.zw);
++  return float4(quad_texture.Sample(quad_sampler, uv).rgb, 1.0f) * input.color;
++}
+diff --git a/components/viz/service/display/w10m_d3d11_shaders.py b/components/viz/service/display/w10m_d3d11_shaders.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..d0e7fddfacb77be88f9e326f1a3b2a13a93d2a88
+--- /dev/null
++++ b/components/viz/service/display/w10m_d3d11_shaders.py
+@@ -0,0 +1,133 @@
++#!/usr/bin/env python3
++# Copyright 2026 The Venetium-W10M Authors
++# Use of this source code is governed by a BSD-style license that can be
++# found in the LICENSE file.
++"""Compiles w10m_d3d11_shaders.hlsl into w10m_d3d11_shaders.h.
++
++Run by hand after the HLSL changes, with the Windows SDK's fxc.exe:
++
++  python w10m_d3d11_shaders.py <fxc.exe> [<directory for fxc's listings>]
++
++for example with
++"C:/Program Files (x86)/Windows Kits/10/bin/10.0.22621.0/x64/fxc.exe".
++Not part of the build: the header is checked in, so that the build needs no
++SDK tool and the phone compiles nothing.
++
++What it runs, once for each shader (QuadVS.h and so on are temporary files):
++
++  fxc /nologo /T vs_4_0_level_9_3 /E QuadVS /O3 /Vn kW10mD3D11QuadVS
++      /Fh QuadVS.h w10m_d3d11_shaders.hlsl
++  fxc /nologo /T ps_4_0_level_9_3 /E ColorPS /O3 /Vn kW10mD3D11ColorPS
++      /Fh ColorPS.h w10m_d3d11_shaders.hlsl
++  fxc /nologo /T ps_4_0_level_9_3 /E TexturePS /O3 /Vn kW10mD3D11TexturePS
++      /Fh TexturePS.h w10m_d3d11_shaders.hlsl
++  fxc /nologo /T ps_4_0_level_9_3 /E TextureOpaquePS /O3
++      /Vn kW10mD3D11TextureOpaquePS /Fh TextureOpaquePS.h
++      w10m_d3d11_shaders.hlsl
++  fxc /nologo /T ps_4_0_level_9_3 /E TextureClampPS /O3
++      /Vn kW10mD3D11TextureClampPS /Fh TextureClampPS.h
++      w10m_d3d11_shaders.hlsl
++  fxc /nologo /T ps_4_0_level_9_3 /E TextureOpaqueClampPS /O3
++      /Vn kW10mD3D11TextureOpaqueClampPS /Fh TextureOpaqueClampPS.h
++      w10m_d3d11_shaders.hlsl
++
++With a directory for listings, /Fc <directory>/<entry>.asm is added: the
++level 9 code and its instruction count are in there.
++"""
++
++import os
++import re
++import subprocess
++import sys
++import tempfile
++
++SHADERS = [
++    # (profile, entry point, array)
++    ('vs_4_0_level_9_3', 'QuadVS', 'kW10mD3D11QuadVS'),
++    ('ps_4_0_level_9_3', 'ColorPS', 'kW10mD3D11ColorPS'),
++    ('ps_4_0_level_9_3', 'TexturePS', 'kW10mD3D11TexturePS'),
++    ('ps_4_0_level_9_3', 'TextureOpaquePS', 'kW10mD3D11TextureOpaquePS'),
++    ('ps_4_0_level_9_3', 'TextureClampPS', 'kW10mD3D11TextureClampPS'),
++    ('ps_4_0_level_9_3', 'TextureOpaqueClampPS',
++     'kW10mD3D11TextureOpaqueClampPS'),
++]
++
++HEAD = '''// Copyright 2026 The Venetium-W10M Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++//
++// Generated by w10m_d3d11_shaders.py from w10m_d3d11_shaders.hlsl; do not
++// edit. Each array is the bytecode fxc writes for
++//   fxc /nologo /T <profile> /E <entry> /O3 /Vn <array> /Fh <file>
++//       w10m_d3d11_shaders.hlsl
++// with the profile and the entry point named above the array.
++
++#ifndef COMPONENTS_VIZ_SERVICE_DISPLAY_W10M_D3D11_SHADERS_H_
++#define COMPONENTS_VIZ_SERVICE_DISPLAY_W10M_D3D11_SHADERS_H_
++
++#include <stdint.h>
++
++namespace viz {
++
++// clang-format off
++'''
++
++TAIL = '''
++// clang-format on
++
++}  // namespace viz
++
++#endif  // COMPONENTS_VIZ_SERVICE_DISPLAY_W10M_D3D11_SHADERS_H_
++'''
++
++
++def Compile(fxc, hlsl, profile, entry, array, listings):
++  """Returns the shader's bytecode as a list of byte values."""
++  with tempfile.TemporaryDirectory() as temp:
++    header = os.path.join(temp, entry + '.h')
++    command = [
++        fxc, '/nologo', '/T', profile, '/E', entry, '/O3', '/Vn', array,
++        '/Fh', header
++    ]
++    if listings:
++      command += ['/Fc', os.path.join(listings, entry + '.asm')]
++    command.append(hlsl)
++    subprocess.check_call(command, stdout=subprocess.DEVNULL)
++    with open(header) as f:
++      text = f.read()
++  # fxc's listing (#if 0 ... #endif) comes first and is dropped; of the array
++  # only the numbers are kept, so that the header needs no windows.h for a
++  # BYTE and has no blanks at the ends of its lines.
++  body = text[text.index('const BYTE ' + array):]
++  code = [int(n) for n in re.findall(r'-?\d+', body[body.index('{'):])]
++  if bytes(code[:4]) != b'DXBC':
++    raise SystemExit('%s: not what fxc writes for /Fh' % entry)
++  return code
++
++
++def main():
++  if len(sys.argv) not in (2, 3):
++    raise SystemExit(__doc__)
++  fxc = sys.argv[1]
++  listings = sys.argv[2] if len(sys.argv) == 3 else None
++  if listings:
++    os.makedirs(listings, exist_ok=True)
++  here = os.path.dirname(os.path.abspath(__file__))
++  hlsl = os.path.join(here, 'w10m_d3d11_shaders.hlsl')
++  out = [HEAD]
++  for profile, entry, array in SHADERS:
++    code = Compile(fxc, hlsl, profile, entry, array, listings)
++    out.append('\n// %s, %s: %d bytes.\n' % (profile, entry, len(code)))
++    out.append('inline constexpr uint8_t %s[] = {\n' % array)
++    for i in range(0, len(code), 12):
++      out.append('    %s,\n' % ', '.join('%3d' % b for b in code[i:i + 12]))
++    out.append('};\n')
++    print('%s %s: %d bytes' % (profile, entry, len(code)))
++  out.append(TAIL)
++  with open(os.path.join(here, 'w10m_d3d11_shaders.h'), 'w',
++            newline='\n') as f:
++    f.write(''.join(out))
++
++
++if __name__ == '__main__':
++  main()

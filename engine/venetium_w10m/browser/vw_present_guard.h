@@ -8,7 +8,8 @@
 // a driver that cannot do it would otherwise end every launch. A way that
 // fails without taking the process down (GL does not start) is given up at
 // once. Each way has its own count: frames shown through plain Direct3D 11
-// say nothing about ANGLE, so they do not clear its count.
+// say nothing about ANGLE or the Direct3D 11 compositor, so they do not
+// clear those counts.
 //
 // The way back: a different package (a new build) or other engine switches,
 // or the user switching Hardware graphics off and on (--vw-gpu=retry),
@@ -47,19 +48,41 @@ class PresentGuard {
             const std::string& made_of,
             bool forget);
 
-  // Whether this run may try |kind| (kAngle or kD3D11), and how many runs
-  // with it ended before a frame.
+  // Whether this run may try |kind| (kAngle, kD3D11 or kCompositor), and how
+  // many runs with it ended before a frame.
   bool Allowed(PresentKind kind);
   int Failures(PresentKind kind);
 
-  // This run tries |kind|: counted against it until Worked(kind).
+  // This run tries |kind|: counted against it until Worked(kind). Once a
+  // run.
   void Trying(PresentKind kind);
+
+  // The Direct3D 11 compositor draws only the frames it can, and a run may
+  // show none of those; such a run did nothing a driver could die of.
+  // Entered(), any thread: |kind| is about to ask the driver for something
+  // (the compositor: its first frame, and every one after). Left(), any
+  // thread: a frame |kind| entered and did not show is over all the same --
+  // the CPU drew it and it is out -- with the process alive. Untried(), any
+  // thread: the run is being suspended; if it is counted against |kind| and
+  // |kind| is not in the middle of a frame it entered, it is not counted any
+  // more -- and is again when |kind| next enters one. So only a run that
+  // ends, or hangs and is closed, inside such a frame is |kind|'s doing.
+  void Entered(PresentKind kind);
+  void Left(PresentKind kind);
+  void Untried(PresentKind kind);
+
+  // Any thread: |kind| was given up in this run with the process alive and
+  // nothing to show that it cannot work (memory; no swap chain to draw
+  // into). The run outlived it, so it is not a run that died of it: not
+  // counted any more.
+  void Survived(PresentKind kind);
 
   // Any thread: |kind| put a frame on screen. True the first time. Frames
   // through Direct3D 11 are no longer counted against from here. GPU
-  // compositing is only known to have started: a driver that dies a moment
-  // after its first frame would otherwise end every launch, with no way to
-  // the menu. Its count goes when Proven() says the run went on.
+  // compositing, ANGLE's or the Direct3D 11 compositor's, is only known to
+  // have started: a driver that dies a moment after its first frame would
+  // otherwise end every launch, with no way to the menu. Its count goes when
+  // Proven() says the run went on.
   bool Worked(PresentKind kind);
 
   // Any thread: the run has gone on for a while with |kind| on screen, or
@@ -91,7 +114,19 @@ class PresentGuard {
   void VideoSuspended(bool suspended);
 
  private:
-  int* Count(PresentKind kind);
+  // One way of showing frames.
+  struct Way {
+    // Runs that ended before it showed a frame; kGivenUp for good.
+    int count = 0;
+    // In this run: it showed a frame; the run is in |count|; it is in a
+    // frame it entered (Entered() with no Left() after it); the run was
+    // taken out of |count| by Untried().
+    bool worked = false;
+    bool counted = false;
+    bool entered = false;
+    bool untried = false;
+  };
+  Way* WayOf(PresentKind kind);
   void Write();
 
   base::Lock lock_;
@@ -106,10 +141,9 @@ class PresentGuard {
   bool video_watched_ = false;
   bool video_worked_ = false;
   bool video_suspended_ = false;
-  int angle_ = 0;
-  int d3d11_ = 0;
-  bool angle_worked_ = false;
-  bool d3d11_worked_ = false;
+  Way angle_;
+  Way d3d11_;
+  Way compositor_;
 };
 
 }  // namespace venetium_w10m

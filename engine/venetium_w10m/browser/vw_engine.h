@@ -46,6 +46,14 @@ struct EngineConfig {
   // The compositor itself runs on the GPU (ANGLE on Direct3D 11) and
   // presents into the panel; the two above are what it falls back to.
   bool gpu_compositing = false;
+  // Viz draws the frames it can with Direct3D 11 itself, into the swap chain
+  // software frames are presented through (the Direct3D 11 compositor, for
+  // GPUs that stop at feature level 9_3). The frames it cannot draw are
+  // software compositing's, presented as above.
+  bool d3d_compositing = false;
+  // The device is asked for at feature level 9_3 and no better
+  // (--vw-gpu=d3d11: the compositor as a 9_3 phone runs it, on any phone).
+  bool d3d_level_9_3 = false;
   // H.264 goes to the GPU's own decoder (Chromium's D3D11VideoDecoder, on
   // ANGLE's device); only with gpu_compositing, whose compositor takes the
   // decoded frames as textures.
@@ -96,8 +104,9 @@ class VwEngine {
   // started or not.
   void EngineExited();
 
-  // Any thread: |kind| (PresentKind::kD3D11 or kAngle) put a frame on
-  // screen; it is no longer counted against (vw_present_guard.h).
+  // Any thread: |kind| (PresentKind::kD3D11, kAngle or kCompositor) put a
+  // frame on screen; it is no longer counted against, at once or when the
+  // run has gone on for a little (vw_present_guard.h).
   void HardwarePresentWorked(PresentKind kind);
 
   // Any thread: GPU compositing cannot go on in this run (GL did not start,
@@ -108,6 +117,14 @@ class VwEngine {
   // one that died would.
   void GpuCompositingFailed(const char* reason, bool for_good);
   bool gpu_compositing_failed() const { return gpu_failed_.load(); }
+
+  // Any thread: the Direct3D 11 compositor draws no more frames in this run;
+  // software compositing draws them all, presented as before. Logged once.
+  // |for_good| is proof that it cannot work on this phone, as above.
+  // Otherwise the run is not counted against it: unlike a run that dies, it
+  // has shown that the compositor can be tried without harm.
+  void CompositorFailed(const char* reason, bool for_good);
+  bool compositor_failed() const { return compositor_failed_.load(); }
 
   // Tab ids are handed out here so that venetium_w10m_tab_create can return
   // one at once, before the tab exists. Never reused within a run.
@@ -140,6 +157,7 @@ class VwEngine {
   std::atomic<bool> running_{false};
   std::atomic<bool> stopping_{false};
   std::atomic<bool> gpu_failed_{false};
+  std::atomic<bool> compositor_failed_{false};
   // No more tasks are taken (the browser is going or the engine has ended).
   bool stopped_ = false;  // under lock_
   std::atomic<int32_t> next_tab_id_{1};

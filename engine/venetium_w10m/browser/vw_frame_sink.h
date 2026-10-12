@@ -58,6 +58,13 @@ class FrameBuffer {
 // thread starts.
 void InstallFrameSink();
 
+// Any thread: memory is wanted back from the graphics side. The Direct3D 11
+// compositor lets go of its textures (they are made again when next drawn);
+// with |trim|, the app being suspended, the driver is also asked for what it
+// keeps for speed. Done on viz's thread, a moment later; nothing if frames
+// do not go through Direct3D 11.
+void ReleaseGraphicsMemory(bool trim);
+
 }  // namespace venetium_w10m
 
 #endif  // VENETIUM_W10M_BROWSER_VW_FRAME_SINK_H_

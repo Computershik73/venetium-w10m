@@ -939,6 +939,8 @@ void MainPage::ShowEngineSwitches() {
     note.Text(L"Extra command-line switches for the engine, separated by "
               L"spaces; used from the next start. For example:\n"
               L"--vw-gpu=off  (no GPU compositing)\n"
+              L"--vw-gpu=d3d11  (the Direct3D 11 compositor, device held to "
+              L"9_3)\n"
               L"--vw-vsync=timer  (frames from a timer)\n"
               L"--vw-present-buffers=2\n"
               L"--vw-codecs=all  (VP9 and AV1 video offered again)\n"

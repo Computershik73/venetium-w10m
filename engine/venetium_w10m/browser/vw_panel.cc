@@ -456,6 +456,19 @@ bool PanelHost::CompositorPresented() {
   return true;
 }
 
+void PanelHost::SetKind(uint32_t generation, PresentKind kind) {
+  State& state = GetState();
+  {
+    base::AutoLock hold(state.lock);
+    if (!generation || state.generation != generation || !state.current ||
+        presenting_.load() == static_cast<int32_t>(kind)) {
+      return;
+    }
+    presenting_.store(static_cast<int32_t>(kind));
+  }
+  NoteF("panel: chain %u shows %s", generation, KindName(kind));
+}
+
 void PanelHost::Presented(uint32_t generation) {
   State& state = GetState();
   {

@@ -1,0 +1,276 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Mon, 12 Oct 2026 15:53:46 +0400
+Subject: [PATCH] viz: a software output device can offer a Direct3D 11 target
+ (Windows 10 Mobile)
+
+The seam for a compositor that draws most frames with Direct3D 11 where
+ANGLE cannot run (feature level 9_3): the embedder's SoftwareOutputDevice
+owns the device and the swap chain and offers them through
+viz::W10mD3D11Target (GetW10mD3D11Target(), null by default), and
+DisplayResourceProviderSoftware tells an observer when it lets go of a
+resource's pixels, for a cache of textures made from them.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../display_resource_provider_software.cc     |   8 +
+ .../display_resource_provider_software.h      |  21 +++
+ .../service/display/software_output_device.cc |   6 +
+ .../service/display/software_output_device.h  |  10 ++
+ .../viz/service/display/w10m_d3d11_target.h   | 144 ++++++++++++++++++
+ 5 files changed, 189 insertions(+)
+ create mode 100644 components/viz/service/display/w10m_d3d11_target.h
+
+diff --git a/components/viz/service/display/display_resource_provider_software.cc b/components/viz/service/display/display_resource_provider_software.cc
+index 551ed1e891ee093ac4c87e0e6e8f84be55e7465c..b66ed79f1f53091cb899432562f4b167610df2ce 100644
+--- a/components/viz/service/display/display_resource_provider_software.cc
++++ b/components/viz/service/display/display_resource_provider_software.cc
+@@ -99,6 +99,14 @@ DisplayResourceProviderSoftware::DeleteAndReturnUnusedResourcesToChildImpl(
+     ChildResource& resource = it->second;
+     DCHECK(!resource.is_gpu_resource_type());
+ 
++#if defined(VENETIUM_W10M)
++    // With the image this provider made of the pixels go the copies others
++    // made of them, also when the deletion itself is put off.
++    if (w10m_resource_observer_) {
++      w10m_resource_observer_->OnW10mResourceGone(local_id);
++    }
++#endif
++
+     auto sk_image_it = resource_sk_images_.find(local_id);
+     if (sk_image_it != resource_sk_images_.end()) {
+       resource_sk_images_.erase(sk_image_it);
+diff --git a/components/viz/service/display/display_resource_provider_software.h b/components/viz/service/display/display_resource_provider_software.h
+index fabe7ba0816321f9fc7c817a87617b6b24b1d0f6..9939d463b56b2080d9018fcf82801d4ed60d7618 100644
+--- a/components/viz/service/display/display_resource_provider_software.h
++++ b/components/viz/service/display/display_resource_provider_software.h
+@@ -54,6 +54,23 @@ class VIZ_SERVICE_EXPORT DisplayResourceProviderSoftware
+     sk_sp<SkImage> sk_image_;
+   };
+ 
++#if defined(VENETIUM_W10M)
++  // Windows 10 Mobile: told when a resource's pixels stop being this
++  // provider's to hand out (the client no longer uses it), so that copies
++  // of them made elsewhere -- W10mD3D11Renderer's textures -- go too. No
++  // other resource is given the id before this has been called for it.
++  class W10mResourceObserver {
++   public:
++    virtual void OnW10mResourceGone(ResourceId id) = 0;
++
++   protected:
++    virtual ~W10mResourceObserver() = default;
++  };
++  void SetW10mResourceObserver(W10mResourceObserver* observer) {
++    w10m_resource_observer_ = observer;
++  }
++#endif
++
+   // Waits on the SyncToken and returns MemoryImageRepresentation of the
+   // SharedImage pointed by mailbox.
+   std::unique_ptr<gpu::MemoryImageRepresentation> GetSharedImageRepresentation(
+@@ -80,6 +97,10 @@ class VIZ_SERVICE_EXPORT DisplayResourceProviderSoftware
+ 
+   base::flat_map<ResourceId, sk_sp<SkImage>> resource_sk_images_;
+ 
++#if defined(VENETIUM_W10M)
++  raw_ptr<W10mResourceObserver> w10m_resource_observer_ = nullptr;
++#endif
++
+   std::unique_ptr<gpu::MemoryTypeTracker> memory_tracker_;
+ 
+   struct SharedImageAccess {
+diff --git a/components/viz/service/display/software_output_device.cc b/components/viz/service/display/software_output_device.cc
+index bac6593ea12904808dc63506d10e09fb17b0063a..0962e5b754c41a1484495e4561531ddb2af7cd53 100644
+--- a/components/viz/service/display/software_output_device.cc
++++ b/components/viz/service/display/software_output_device.cc
+@@ -70,6 +70,12 @@ bool SoftwareOutputDevice::SupportsOverridePlatformSize() const {
+   return false;
+ }
+ 
++#if defined(VENETIUM_W10M)
++W10mD3D11Target* SoftwareOutputDevice::GetW10mD3D11Target() {
++  return nullptr;
++}
++#endif
++
+ SkBitmap SoftwareOutputDevice::ReadbackForTesting() {
+   SkBitmap bitmap;
+   bitmap.allocPixels(
+diff --git a/components/viz/service/display/software_output_device.h b/components/viz/service/display/software_output_device.h
+index 2e5f6986c775383ea000f13999d7e2ec8aeccef0..888a4f3f51f27136953f42cf807952d28354d8ac 100644
+--- a/components/viz/service/display/software_output_device.h
++++ b/components/viz/service/display/software_output_device.h
+@@ -27,6 +27,9 @@ class VSyncProvider;
+ namespace viz {
+ 
+ class SoftwareOutputDeviceClient;
++#if defined(VENETIUM_W10M)
++class W10mD3D11Target;
++#endif
+ 
+ // This is a "tear-off" class providing software drawing support to
+ // OutputSurface, such as to a platform-provided window framebuffer.
+@@ -85,6 +88,13 @@ class VIZ_SERVICE_EXPORT SoftwareOutputDevice {
+   // platform's proposed surface size.
+   virtual bool SupportsOverridePlatformSize() const;
+ 
++#if defined(VENETIUM_W10M)
++  // Windows 10 Mobile: where the renderer may draw frames with Direct3D 11
++  // itself instead of into this device's bitmap (w10m_d3d11_target.h), or
++  // null. Owned by the device, and lives as long as it does.
++  virtual W10mD3D11Target* GetW10mD3D11Target();
++#endif
++
+   // Copy and return the contents of |surface_|.
+   SkBitmap ReadbackForTesting();
+ 
+diff --git a/components/viz/service/display/w10m_d3d11_target.h b/components/viz/service/display/w10m_d3d11_target.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..7a3d46f25303bbf116062662ae188baf70321440
+--- /dev/null
++++ b/components/viz/service/display/w10m_d3d11_target.h
+@@ -0,0 +1,144 @@
++// Copyright 2026 The Venetium-W10M Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef COMPONENTS_VIZ_SERVICE_DISPLAY_W10M_D3D11_TARGET_H_
++#define COMPONENTS_VIZ_SERVICE_DISPLAY_W10M_D3D11_TARGET_H_
++
++#include <stdint.h>
++
++#include "ui/gfx/geometry/size.h"
++
++struct ID3D11Device;
++struct ID3D11DeviceContext;
++struct ID3D11RenderTargetView;
++
++namespace viz {
++
++// Windows 10 Mobile (Venetium): where W10mD3D11Renderer draws the frames it
++// composites with Direct3D 11 itself.
++//
++// The embedder presents software frames through a Direct3D 11 swap chain in
++// its XAML panel. A SoftwareOutputDevice that hands out one of these
++// (SoftwareOutputDevice::GetW10mD3D11Target) lets the renderer draw a
++// frame's quads straight into that swap chain's back buffer, on the same
++// device, instead of having Skia draw them into the device's bitmap. The
++// renderer decides frame by frame; a frame it does not draw here goes
++// through SoftwareOutputDevice::BeginPaint/EndPaint as before, and the two
++// kinds may follow each other in any order.
++//
++// Threads: everything here, and Client too, is called on the thread the
++// Display lives on (viz's compositor thread); frames only from inside
++// DirectRenderer::DrawFrame. The device's immediate context is used on that
++// thread alone, by both sides, and neither keeps anything bound in it for
++// the other: the renderer sets the whole pipeline state for every frame it
++// draws, and either side may clear the state and flush between frames.
++//
++// Pixels: the back buffer is B8G8R8A8_UNORM, |size| pixels, origin at the
++// top left, its alpha not shown. Direct3D 10's rules hold at every feature
++// level, 9_3 included: a pixel's centre is at +0.5, and there is no
++// half-pixel offset to correct for.
++//
++// Whole frames: a frame drawn here covers the whole back buffer, whatever
++// the buffer held (the renderer never counts on what a flipped buffer has
++// kept). So when one is presented every other buffer of the chain has missed
++// the whole picture, as far as the embedder can know. In return the first
++// frame the renderer leaves to the CPU after one drawn here -- presented or
++// not -- is painted whole: BeginPaint() is given the whole output as its
++// damage, and what EndPaint() finds in the bitmap is the complete picture.
++//
++// Lifetime: owned by the SoftwareOutputDevice that handed it out, and good
++// for as long as that device is.
++class W10mD3D11Target {
++ public:
++  // What the embedder asks of the renderer. Never called between
++  // BeginGpuFrame() and the end of that frame, nor from inside any call the
++  // renderer makes on the target.
++  class Client {
++   public:
++    // Memory is wanted back (the app is being suspended, the system is
++    // short): the renderer releases every texture it keeps on the device
++    // and flushes the context, so that they go now and not at some later
++    // present. They are made again from the resources when next drawn. What
++    // else the renderer made on the device (shaders, states, a vertex
++    // buffer) it may keep.
++    virtual void ReleaseD3D11Textures() = 0;
++
++   protected:
++    virtual ~Client() = default;
++  };
++
++  enum class Begin {
++    // The back buffer is ready to be drawn into.
++    kReady,
++    // No swap chain of that size, or no view of its back buffer, for the
++    // moment (the chain is being made again, the device was lost, memory is
++    // short): this frame goes through BeginPaint/EndPaint, and a later one
++    // may ask again. The renderer cannot draw from its textures meanwhile,
++    // and lets them go.
++    kNotNow,
++    // Not in this run: do not ask again. The embedder has said why in its
++    // own log; OnGpuFramesGivenUp() is not called for it.
++    kNever,
++  };
++
++  // The renderer, for as long as it lives; null when it goes. At most one
++  // at a time. Outside a frame.
++  virtual void SetD3D11Client(Client* client) = 0;
++
++  // Starts a frame of |size| pixels that the renderer draws. Makes the
++  // device and the swap chain, or resizes the chain, if need be: |size| is
++  // the size of the frame, which the output device may not have been
++  // resized to yet. On kReady |*view| is a render target view of the whole
++  // back buffer: owned by the target, not bound, good until
++  // PresentGpuFrame() or AbandonGpuFrame(), one of which must follow before
++  // anything else is asked of the target but the device, its context and
++  // its number. On any other answer |*view| is null and neither follows.
++  virtual Begin BeginGpuFrame(const gfx::Size& size,
++                              ID3D11RenderTargetView** view) = 0;
++
++  // The device the back buffer belongs to and its immediate context, not
++  // AddRef'd. Only between BeginGpuFrame() returning kReady and the end of
++  // that frame; a caller that keeps them takes its own references.
++  virtual ID3D11Device* GetD3D11Device() = 0;
++  virtual ID3D11DeviceContext* GetD3D11Context() = 0;
++
++  // Which device that is: another number for every device of the run, never
++  // 0. May be asked at any time, and is 0 while there is no device. Whatever
++  // the renderer made on a device (shaders, state objects, textures) it lets
++  // go as soon as this is no longer that device's number: the device is
++  // lost, and the embedder makes another when it can. That may be inside
++  // BeginGpuFrame(): the renderer compares the number after kReady with the
++  // one it planned the frame on, and draws nothing it planned on another.
++  virtual uint32_t GetD3D11DeviceGeneration() = 0;
++
++  // The frame begun is drawn: presents it, in step with the display, as
++  // software frames are. When this returns the view is gone and no render
++  // target is bound. False if the frame did not reach the screen (Present
++  // failed, the device was removed). The embedder has dealt with its side of
++  // that; the renderer has this same frame drawn by the CPU, whole, through
++  // BeginPaint/EndPaint.
++  virtual bool PresentGpuFrame() = 0;
++
++  // The frame begun will not be presented. When this returns the view is
++  // gone and no render target is bound. Whether or not the back buffer was
++  // drawn into does not matter: a frame through BeginPaint/EndPaint follows
++  // in the same DrawFrame, and it is a whole one if anything was drawn.
++  virtual void AbandonGpuFrame() = 0;
++
++  // The renderer draws no more frames here in this run; every frame goes
++  // through BeginPaint/EndPaint from now on, and BeginGpuFrame() is not
++  // called again. |for_good|: a device in working order refused something
++  // the renderer cannot do without (a shader, a state object), so later runs
++  // need not try; otherwise it failed this time, with nothing to show that
++  // it would again. |reason| is for the log, and is not kept. At most once,
++  // and never between BeginGpuFrame() and the end of that frame.
++  virtual void OnGpuFramesGivenUp(const char* reason, bool for_good) = 0;
++
++ protected:
++  virtual ~W10mD3D11Target() = default;
++};
++
++}  // namespace viz
++
++#endif  // COMPONENTS_VIZ_SERVICE_DISPLAY_W10M_D3D11_TARGET_H_

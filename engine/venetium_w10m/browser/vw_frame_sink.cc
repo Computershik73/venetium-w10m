@@ -12,16 +12,25 @@
 #include <algorithm>
 #include <deque>
 #include <memory>
+#include <string>
 
+#include "base/functional/bind.h"
+#include "base/location.h"
+#include "base/memory/raw_ptr.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/no_destructor.h"
+#include "base/synchronization/lock.h"
+#include "base/task/sequenced_task_runner.h"
 #include "base/time/time.h"
 #include "components/viz/service/display/software_output_device.h"
+#include "components/viz/service/display/w10m_d3d11_target.h"
 #include "components/viz/service/display_embedder/w10m_software_output_device.h"
 #include "third_party/skia/include/core/SkPixmap.h"
 #include "third_party/skia/include/core/SkSurface.h"
 #include "ui/gl/w10m_panel.h"
 #include "venetium_w10m/browser/vw_engine.h"
 #include "venetium_w10m/browser/vw_panel.h"
+#include "venetium_w10m/browser/vw_present_guard.h"
 #include "venetium_w10m/common/vw_log.h"
 
 namespace venetium_w10m {
@@ -37,15 +46,45 @@ constexpr base::TimeDelta kFirstBackoff = base::Seconds(1);
 constexpr base::TimeDelta kMaxBackoff = base::Seconds(30);
 constexpr int kStrikes = 3;
 
+// Frames of the Direct3D 11 compositor's that could not be presented, or
+// that lost the device before they could be, in a row, before it is given
+// up: the device going once is a device going, twice with none of its
+// frames shown in between is its doing. Fewer than kStrikes, so that what
+// only its frames ask of the driver cannot cost software frames their swap
+// chain.
+constexpr int kGpuStrikes = 2;
+static_assert(kGpuStrikes < kStrikes);
+
+// From the app being told it is suspended to its being frozen: the shell
+// holds that off for a second and a half (its App.cpp), and frames are
+// still made meanwhile. What is given back at the start of it is not made
+// again before it is over, and a giving back that only gets its turn after
+// it -- when the app is back -- is not done at all.
+constexpr base::TimeDelta kSuspendWindow = base::Seconds(3);
+
+// Every device of the run has a number of its own: viz's renderer keeps
+// what it made on a device by it (viz::W10mD3D11Target). Viz thread.
+uint32_t g_devices = 0;
+
 // Software frames presented by the GPU: a Direct3D 11 swap chain made for
 // composition and shown by the shell's SwapChainPanel. Only what changed is
 // uploaded; the system compositor shows it, in step with the display. Works
 // at every feature level from 9_3 up, and is what everything faster falls
 // back to. Its swap chain is gecko-w10m's proven one: BGRA, flip-sequential,
 // stretched, opaque.
+//
+// With the Direct3D 11 compositor (|compositor|) the same chain also takes
+// frames viz draws into its back buffer itself, on this device; the two kinds
+// follow each other in any order. A frame drawn there is always the whole
+// buffer, so the chain's other buffers have missed everything when one is
+// presented, and the next software frame -- which viz draws whole after one
+// of those -- is uploaded whole to each of them in turn.
 class D3D11Target {
  public:
-  explicit D3D11Target(int buffers) : buffers_(std::clamp(buffers, 2, 3)) {}
+  D3D11Target(int buffers, bool compositor, bool level_9_3)
+      : buffers_(std::clamp(buffers, 2, 3)),
+        compositor_(compositor),
+        level_9_3_(level_9_3) {}
   D3D11Target(const D3D11Target&) = delete;
   D3D11Target& operator=(const D3D11Target&) = delete;
   ~D3D11Target() { Release(); }
@@ -64,6 +103,10 @@ class D3D11Target {
     }
     if (chain_ && size == size_) {
       return true;
+    }
+    // Nothing may hold a buffer across a resize.
+    if (gpu_view_) {
+      EndGpuFrame();
     }
     if (!chain_ && !retry_at_.is_null() &&
         base::TimeTicks::Now() < retry_at_) {
@@ -128,6 +171,7 @@ class D3D11Target {
       if (!generation_) {
         return Later("giving the swap chain to the panel", E_FAIL);
       }
+      kind_ = PresentKind::kD3D11;
     }
     size_ = size;
     // Every buffer holds nothing yet: whole frames until each has had one.
@@ -191,22 +235,245 @@ class D3D11Target {
     return true;
   }
 
+  // --- The Direct3D 11 compositor: viz::W10mD3D11Target, by way of the
+  // output device. Viz thread. ---
+
+  // A frame viz draws itself: a view of the back buffer of a chain of
+  // |size|.
+  viz::W10mD3D11Target::Begin BeginGpuFrame(const gfx::Size& size,
+                                            ID3D11RenderTargetView** view) {
+    using Begin = viz::W10mD3D11Target::Begin;
+    *view = nullptr;
+    if (gpu_view_) {
+      // A frame begun and never ended: nothing more is drawn into it.
+      EndGpuFrame();
+    }
+    if (!compositor_ || failed_) {
+      return Begin::kNever;
+    }
+    // No view could be had a moment ago, for want of memory, or the app is
+    // on its way out: software frames need none, and go on through this
+    // chain meanwhile.
+    if (!gpu_retry_at_.is_null() && base::TimeTicks::Now() < gpu_retry_at_) {
+      return Begin::kNotNow;
+    }
+    if (!EnsureSize(size)) {
+      return failed_ ? Begin::kNever : Begin::kNotNow;
+    }
+    // From here the driver is asked for what software frames never needed:
+    // the run counts against the compositor (vw_present_guard.h).
+    PresentGuard::Get()->Entered(PresentKind::kCompositor);
+    // Made for the frame and gone with it (gecko-w10m does the same on a
+    // Lumia 650): nothing holds the buffer when the chain is resized.
+    ComPtr<ID3D11Texture2D> back;
+    HRESULT hr = chain_->GetBuffer(0, IID_PPV_ARGS(&back));
+    if (SUCCEEDED(hr)) {
+      hr = device_->CreateRenderTargetView(back.Get(), nullptr, &gpu_view_);
+    }
+    if (SUCCEEDED(hr) && !gpu_view_) {
+      hr = E_FAIL;
+    }
+    if (FAILED(hr)) {
+      gpu_view_.Reset();
+      // Nothing of the chain is held when it is dropped below.
+      back.Reset();
+      if (DeviceGone(hr) || FAILED(device_->GetDeviceRemovedReason())) {
+        // The device went: the chain goes the usual way, and is asked for
+        // again. Software frames never ask for a view, so twice running
+        // this is the compositor's.
+        Later("a view of the back buffer", hr);
+        if (DeviceWentInGpuFrame()) {
+          return Begin::kNever;
+        }
+        return failed_ ? Begin::kNever : Begin::kNotNow;
+      }
+      if (hr == E_OUTOFMEMORY) {
+        // The chain is good, and stays: without it frames would go to the
+        // bitmap, which takes more memory, not less.
+        gpu_backoff_ = gpu_backoff_.is_zero()
+                           ? kFirstBackoff
+                           : std::min(gpu_backoff_ * 2, kMaxBackoff);
+        gpu_retry_at_ = base::TimeTicks::Now() + gpu_backoff_;
+        NoteF("d3d11: no view of the back buffer for want of memory, "
+              "0x%08lx: software frames for %d s",
+              static_cast<unsigned long>(hr),
+              static_cast<int>(gpu_backoff_.InSeconds()));
+        return Begin::kNotNow;
+      }
+      // The chain is good for software frames, and stays.
+      NoteF("d3d11: no render target view of the back buffer, 0x%08lx",
+            static_cast<unsigned long>(hr));
+      StopCompositor("the swap chain's back buffer cannot be drawn into",
+                     /*for_good=*/true);
+      return Begin::kNever;
+    }
+    *view = gpu_view_.Get();
+    return Begin::kReady;
+  }
+
+  // The frame begun is drawn: on screen with it. False if it did not get
+  // there; viz has the CPU draw it then.
+  bool PresentGpuFrame() {
+    const bool begun = gpu_view_.Get() != nullptr;
+    EndGpuFrame();
+    if (!begun || failed_ || !chain_) {
+      return false;
+    }
+    const base::TimeTicks before = base::TimeTicks::Now();
+    const HRESULT hr = chain_->Present(1, 0);
+    if (FAILED(hr)) {
+      Later("Present of a frame drawn by Direct3D 11", hr);
+      // Memory comes and goes; anything else twice running is the frames.
+      if (hr != E_OUTOFMEMORY && ++gpu_strikes_ >= kGpuStrikes) {
+        StopCompositor("frames drawn by Direct3D 11 could not be presented",
+                       /*for_good=*/true);
+      }
+      return false;
+    }
+    // A whole frame: this buffer is blank no longer, and every other buffer
+    // has missed all of it, whatever the software frames before it changed.
+    if (blank_buffers_ > 0) {
+      --blank_buffers_;
+    }
+    history_.assign(buffers_ - 1, gfx::Rect(size_));
+    NotePace(before);
+    strikes_ = 0;
+    gpu_strikes_ = 0;
+    backoff_ = base::TimeDelta();
+    retry_at_ = base::TimeTicks();
+    gpu_backoff_ = base::TimeDelta();
+    gpu_retry_at_ = base::TimeTicks();
+    if (kind_ != PresentKind::kCompositor) {
+      kind_ = PresentKind::kCompositor;
+      PanelHost::Get()->SetKind(generation_, kind_);
+    }
+    if (!gpu_presented_) {
+      gpu_presented_ = true;
+      VwEngine::Get()->HardwarePresentWorked(PresentKind::kCompositor);
+    }
+    PanelHost::Get()->Presented(generation_);
+    return true;
+  }
+
+  // The frame begun is not presented; nothing was drawn, or a whole software
+  // frame follows.
+  void AbandonGpuFrame() {
+    EndGpuFrame();
+    // If what failed on viz's side was the device going, the chain goes the
+    // usual way, and comes back the usual way.
+    if (device_ && chain_) {
+      const HRESULT reason = device_->GetDeviceRemovedReason();
+      if (FAILED(reason)) {
+        Later("the device", reason);
+        DeviceWentInGpuFrame();
+      }
+    }
+  }
+
+  // No more frames drawn by viz in this run; software frames as before, on
+  // the same chain.
+  void StopCompositor(const char* reason, bool for_good) {
+    compositor_ = false;
+    EndGpuFrame();
+    VwEngine::Get()->CompositorFailed(reason, for_good);
+    if (kind_ == PresentKind::kCompositor) {
+      kind_ = PresentKind::kD3D11;
+      PanelHost::Get()->SetKind(generation_, kind_);
+    }
+  }
+
+  // Viz thread, between frames, the app being suspended: what the driver
+  // keeps for speed goes back to the system, as Direct3D asks of an app
+  // that is suspended. Neither side keeps anything bound between frames.
+  void Trim(bool driver_too) {
+    // The frames still made on the way out are the CPU's: the textures viz
+    // has just let go of are not made again for a suspended app to hold.
+    gpu_retry_at_ =
+        std::max(gpu_retry_at_, base::TimeTicks::Now() + kSuspendWindow);
+    if (!driver_too || !device_ || !context_) {
+      return;
+    }
+    ComPtr<IDXGIDevice3> dxgi_device;
+    if (FAILED(device_.As(&dxgi_device))) {
+      return;
+    }
+    if (!trimmed_) {
+      // Said once, before the first: no driver here has been asked this
+      // yet, and a log that ends with this line says which could not.
+      trimmed_ = true;
+      Note("d3d11: trimming the device, the app being suspended");
+    }
+    context_->ClearState();
+    context_->Flush();
+    dxgi_device->Trim();
+  }
+
+  // Not AddRef'd; null and 0 while there is no device.
+  ID3D11Device* device() const { return device_.Get(); }
+  ID3D11DeviceContext* context() const { return context_.Get(); }
+  uint32_t device_generation() const { return device_generation_; }
+
   void Release() {
     if (generation_) {
       PanelHost::Get()->Detach(generation_);
       generation_ = 0;
     }
+    gpu_view_.Reset();
     chain_.Reset();
     context_.Reset();
     device_.Reset();
+    device_generation_ = 0;
   }
 
  private:
+  // The device went while a frame of viz's own was being made. Counted with
+  // the frames that could not be presented; true if that ended the
+  // compositor.
+  bool DeviceWentInGpuFrame() {
+    if (++gpu_strikes_ < kGpuStrikes) {
+      return false;
+    }
+    StopCompositor("the device was lost twice running while Direct3D 11 was "
+                   "to draw a frame",
+                   /*for_good=*/true);
+    return true;
+  }
+
+  // The view of a frame viz drew, or did not: unbound and let go, so that
+  // nothing holds the back buffer between frames.
+  void EndGpuFrame() {
+    if (context_) {
+      context_->OMSetRenderTargets(0, nullptr, nullptr);
+    }
+    gpu_view_.Reset();
+  }
+
   bool CreateDevice() {
     static const D3D_FEATURE_LEVEL kLevels[] = {
         D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_1,
         D3D_FEATURE_LEVEL_10_0, D3D_FEATURE_LEVEL_9_3};
     D3D_FEATURE_LEVEL level = {};
+    if (level_9_3_) {
+      // --vw-gpu=d3d11: the device a 9_3 phone has, whatever this one could
+      // do, so that the compositor is tested within a 9_3 phone's limits.
+      static const D3D_FEATURE_LEVEL kLevel93 = D3D_FEATURE_LEVEL_9_3;
+      const HRESULT only = D3D11CreateDevice(
+          nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
+          D3D11_CREATE_DEVICE_BGRA_SUPPORT, &kLevel93, 1, D3D11_SDK_VERSION,
+          &device_, &level, &context_);
+      if (SUCCEEDED(only)) {
+        device_generation_ = ++g_devices;
+        NoteF("d3d11: device %u at feature level 0x%x (no better was asked "
+              "for)",
+              device_generation_, static_cast<unsigned>(level));
+        return true;
+      }
+      // This driver has no 9_3 device to give. The compositor is the same
+      // code at any level: tried at the phone's own, and said so.
+      NoteF("d3d11: no device at feature level 9_3 alone, 0x%08lx: the "
+            "phone's best level instead (not a test of 9_3)",
+            static_cast<unsigned long>(only));
+    }
     HRESULT hr = D3D11CreateDevice(
         nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
         D3D11_CREATE_DEVICE_BGRA_SUPPORT, kLevels, std::size(kLevels),
@@ -222,7 +489,9 @@ class D3D11Target {
             static_cast<unsigned long>(hr));
       return false;
     }
-    NoteF("d3d11: device at feature level 0x%x", static_cast<unsigned>(level));
+    device_generation_ = ++g_devices;
+    NoteF("d3d11: device %u at feature level 0x%x", device_generation_,
+          static_cast<unsigned>(level));
     return true;
   }
 
@@ -278,6 +547,7 @@ class D3D11Target {
       PanelHost::Get()->DetachToReplace(generation_);
       generation_ = 0;
     }
+    gpu_view_.Reset();
     chain_.Reset();
     if (context_) {
       context_->ClearState();
@@ -286,6 +556,8 @@ class D3D11Target {
     if (device_too) {
       context_.Reset();
       device_.Reset();
+      // What viz made on it is viz's to drop: it sees the number gone.
+      device_generation_ = 0;
     }
   }
 
@@ -321,6 +593,25 @@ class D3D11Target {
   }
 
   const int buffers_;
+  // Viz may draw frames into the back buffer itself, until that is given
+  // up; the device is asked for at feature level 9_3 and no better.
+  bool compositor_;
+  const bool level_9_3_;
+  // Of a frame viz is drawing: between BeginGpuFrame and its end.
+  ComPtr<ID3D11RenderTargetView> gpu_view_;
+  // |device_|'s number among the run's devices; 0 without one.
+  uint32_t device_generation_ = 0;
+  // What the panel has been told the chain shows.
+  PresentKind kind_ = PresentKind::kD3D11;
+  bool gpu_presented_ = false;
+  // Frames viz drew that could not be presented, in a row.
+  int gpu_strikes_ = 0;
+  // A view of the back buffer that memory was refused for is asked for
+  // again after a wait that doubles; the chain stays. No frame is begun
+  // before |gpu_retry_at_|, which Trim() sets too.
+  base::TimeDelta gpu_backoff_;
+  base::TimeTicks gpu_retry_at_;
+  bool trimmed_ = false;
   ComPtr<ID3D11Device> device_;
   ComPtr<ID3D11DeviceContext> context_;
   ComPtr<IDXGISwapChain1> chain_;
@@ -346,18 +637,133 @@ class D3D11Target {
   int pace_waited_ = 0;
 };
 
+class VwSoftwareOutputDevice;
+
+// The output device, for ReleaseGraphicsMemory(): the thread it lives on
+// (viz's) and itself. The device is made and destroyed on that thread, and
+// only used on it.
+struct TheDevice {
+  static TheDevice* Get() {
+    static base::NoDestructor<TheDevice> the_device;
+    return the_device.get();
+  }
+
+  base::Lock lock;
+  scoped_refptr<base::SequencedTaskRunner> runner;
+  raw_ptr<VwSoftwareOutputDevice> device = nullptr;
+};
+
 // The base class keeps an N32 raster surface the compositor draws into; on
 // Windows N32 is BGRA, which is what both a WriteableBitmap and the swap
 // chain hold, so a frame is a plain row copy either way.
-class VwSoftwareOutputDevice : public viz::SoftwareOutputDevice {
+//
+// With the Direct3D 11 compositor it is also what viz's renderer draws its
+// own frames through (viz::W10mD3D11Target): the target may go for good in
+// the middle of a run, and this stays to say so.
+class VwSoftwareOutputDevice : public viz::SoftwareOutputDevice,
+                               public viz::W10mD3D11Target {
  public:
   VwSoftwareOutputDevice() {
     const EngineConfig config = VwEngine::Get()->config();
     if (config.hardware_present && PanelHost::Get()->has_panel()) {
-      target_ = std::make_unique<D3D11Target>(config.present_buffers);
+      // Given up earlier in the run (by a device before this one) is given
+      // up for the run.
+      compositor_ =
+          config.d3d_compositing && !VwEngine::Get()->compositor_failed();
+      target_ = std::make_unique<D3D11Target>(
+          config.present_buffers, compositor_, config.d3d_level_9_3);
+    }
+    // IDXGIDevice3::Trim is new to every driver here, and one that cannot
+    // take it would end the app at every suspension with nothing
+    // remembered: "--vw-trim=off" among the engine switches leaves it out.
+    trim_driver_ =
+        config.switches.find("--vw-trim=off") == std::string::npos;
+    TheDevice* the_device = TheDevice::Get();
+    base::AutoLock hold(the_device->lock);
+    the_device->runner = task_runner_;
+    the_device->device = this;
+  }
+  ~VwSoftwareOutputDevice() override {
+    TheDevice* the_device = TheDevice::Get();
+    base::AutoLock hold(the_device->lock);
+    if (the_device->device == this) {
+      the_device->device = nullptr;
     }
   }
-  ~VwSoftwareOutputDevice() override = default;
+
+  // Viz thread, between frames: see ReleaseGraphicsMemory().
+  void ReleaseMemory(bool trim) {
+    if (d3d11_client_) {
+      d3d11_client_->ReleaseD3D11Textures();
+    }
+    if (trim && target_) {
+      target_->Trim(trim_driver_);
+    }
+  }
+
+  // viz::SoftwareOutputDevice: null leaves viz with its plain software
+  // renderer, as in every run without the compositor.
+  viz::W10mD3D11Target* GetW10mD3D11Target() override {
+    return compositor_ ? this : nullptr;
+  }
+
+  // viz::W10mD3D11Target:
+  void SetD3D11Client(Client* client) override { d3d11_client_ = client; }
+  Begin BeginGpuFrame(const gfx::Size& size,
+                      ID3D11RenderTargetView** view) override {
+    *view = nullptr;
+    if (!target_) {
+      return Begin::kNever;
+    }
+    const Begin begin = target_->BeginGpuFrame(size, view);
+    if (begin != Begin::kReady) {
+      // No frame of the compositor's is in the driver (vw_present_guard.h).
+      PresentGuard::Get()->Left(PresentKind::kCompositor);
+    }
+    DropTargetIfFailed();
+    return begin;
+  }
+  ID3D11Device* GetD3D11Device() override {
+    return target_ ? target_->device() : nullptr;
+  }
+  ID3D11DeviceContext* GetD3D11Context() override {
+    return target_ ? target_->context() : nullptr;
+  }
+  uint32_t GetD3D11DeviceGeneration() override {
+    return target_ ? target_->device_generation() : 0;
+  }
+  bool PresentGpuFrame() override {
+    if (!target_) {
+      return false;
+    }
+    const bool presented = target_->PresentGpuFrame();
+    // The driver has answered for the whole frame, its present included.
+    PresentGuard::Get()->Left(PresentKind::kCompositor);
+    if (!presented) {
+      DropTargetIfFailed();
+      return false;
+    }
+    if (to_bitmap_) {
+      // Back in the panel, as in EndPaint.
+      to_bitmap_ = false;
+      FrameBuffer::Get()->Reset();
+    }
+    return true;
+  }
+  void AbandonGpuFrame() override {
+    if (target_) {
+      target_->AbandonGpuFrame();
+      PresentGuard::Get()->Left(PresentKind::kCompositor);
+      DropTargetIfFailed();
+    }
+  }
+  void OnGpuFramesGivenUp(const char* reason, bool for_good) override {
+    if (target_) {
+      target_->StopCompositor(reason, for_good);
+    } else {
+      VwEngine::Get()->CompositorFailed(reason, for_good);
+    }
+  }
 
   void Resize(const gfx::Size& pixel_size, float scale_factor) override {
     if (pixel_size != viewport_pixel_size_) {
@@ -374,6 +780,18 @@ class VwSoftwareOutputDevice : public viz::SoftwareOutputDevice {
   }
 
   void EndPaint() override {
+    // The end of a frame the CPU drew. If the compositor had begun it and
+    // left it to the CPU, all it asked of the driver has been answered and
+    // the frame is out: a run suspended from here did not die of that
+    // (vw_present_guard.h).
+    struct Leave {
+      ~Leave() {
+        if (compositor) {
+          PresentGuard::Get()->Left(PresentKind::kCompositor);
+        }
+      }
+      bool compositor;
+    } leave{compositor_ && !VwEngine::Get()->compositor_failed()};
     if (!surface_) {
       return;
     }
@@ -409,10 +827,22 @@ class VwSoftwareOutputDevice : public viz::SoftwareOutputDevice {
   void DropTargetIfFailed() {
     if (target_ && target_->failed()) {
       target_.reset();
+      if (compositor_) {
+        // Not its doing, and nothing of its to remember: there is no swap
+        // chain for it to draw into.
+        VwEngine::Get()->CompositorFailed("no swap chain can be had",
+                                          /*for_good=*/false);
+      }
     }
   }
 
   std::unique_ptr<D3D11Target> target_;
+  // This run composites with Direct3D 11 where it can (EngineConfig).
+  bool compositor_ = false;
+  // The driver is asked to trim when the app is suspended.
+  bool trim_driver_ = true;
+  // Viz's renderer, while there is one that draws with Direct3D 11.
+  raw_ptr<viz::W10mD3D11Target::Client> d3d11_client_ = nullptr;
   // Frames are going to the bitmap although there is, or was, a target.
   bool to_bitmap_ = false;
 };
@@ -511,6 +941,45 @@ void FrameBuffer::Reset() {
 uint64_t FrameBuffer::serial() {
   base::AutoLock hold(lock_);
   return serial_;
+}
+
+namespace {
+
+void ReleaseOnVizThread(bool trim, base::TimeTicks asked) {
+  const base::TimeDelta waited = base::TimeTicks::Now() - asked;
+  if (trim && waited > kSuspendWindow) {
+    // The app was frozen before this had its turn, and is back: what would
+    // be given away is wanted again now.
+    NoteF("d3d11: the app was suspended before its graphics memory could be "
+          "given back (%d s ago)",
+          static_cast<int>(waited.InSeconds()));
+    return;
+  }
+  VwSoftwareOutputDevice* device = nullptr;
+  {
+    TheDevice* the_device = TheDevice::Get();
+    base::AutoLock hold(the_device->lock);
+    device = the_device->device;
+  }
+  // Made, used and destroyed on this thread: it cannot go meanwhile.
+  if (device) {
+    device->ReleaseMemory(trim);
+  }
+}
+
+}  // namespace
+
+void ReleaseGraphicsMemory(bool trim) {
+  scoped_refptr<base::SequencedTaskRunner> runner;
+  {
+    TheDevice* the_device = TheDevice::Get();
+    base::AutoLock hold(the_device->lock);
+    runner = the_device->runner;
+  }
+  if (runner) {
+    runner->PostTask(FROM_HERE, base::BindOnce(&ReleaseOnVizThread, trim,
+                                               base::TimeTicks::Now()));
+  }
 }
 
 void InstallFrameSink() {
