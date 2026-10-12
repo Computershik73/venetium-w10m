@@ -114,7 +114,21 @@ void ChoosePresentation(EngineConfig* config, uint64_t ram_mb) {
   const unsigned level = ProbeD3D11();
   config->present_guard = config->profile_dir.Append(L"present-guard");
   PresentGuard* guard = PresentGuard::Get();
-  guard->Load(config->present_guard,
+  // What a verdict belongs to: this package (its directory carries the appx
+  // version; the engine DLL alone is the same in a build that changes only
+  // ANGLE or the shell) and the switches of the run, less the two the shell
+  // adds for its Hardware graphics setting.
+  std::string made_of = base::ToLowerASCII(
+      base::WideToUTF8(config->install_dir.BaseName().value()));
+  for (const std::string& token :
+       base::SplitString(config->switches, " ", base::TRIM_WHITESPACE,
+                         base::SPLIT_WANT_NONEMPTY)) {
+    if (token != "--vw-gpu=retry" && token != "--vw-present=bitmap") {
+      made_of += ' ';
+      made_of += token;
+    }
+  }
+  guard->Load(config->present_guard, made_of,
               HasSwitch(config->switches, "--vw-gpu=retry"));
   if (HasSwitch(config->switches, "--vw-present=bitmap")) {
     Note("gpu: frames through the bitmap (the shell asked for it)");
@@ -126,8 +140,8 @@ void ChoosePresentation(EngineConfig* config, uint64_t ram_mb) {
   }
   if (!guard->Allowed(PresentKind::kD3D11)) {
     NoteF("gpu: frames through the bitmap: %d runs presenting through "
-          "Direct3D 11 ended before their first frame (a new build, or "
-          "Hardware graphics off and on, tries again)",
+          "Direct3D 11 ended before their first frame (a new build, other "
+          "engine switches, or Hardware graphics off and on, tries again)",
           guard->Failures(PresentKind::kD3D11));
     return;
   }
@@ -137,9 +151,9 @@ void ChoosePresentation(EngineConfig* config, uint64_t ram_mb) {
   config->gpu_compositing =
       angle_capable && guard->Allowed(PresentKind::kAngle);
   if (angle_capable && !config->gpu_compositing) {
-    NoteF("gpu: no GPU compositing: it did not get to a frame in earlier "
-          "runs (count %d; a new build, or Hardware graphics off and on, "
-          "tries again)",
+    NoteF("gpu: no GPU compositing: earlier runs with it did not last "
+          "(count %d; a new build, other engine switches, or Hardware "
+          "graphics off and on, tries again)",
           guard->Failures(PresentKind::kAngle));
   }
   // GPU compositing falls back to presenting through Direct3D 11 within the
@@ -257,8 +271,18 @@ void SetUpCommandLine(const EngineConfig& config) {
     if (equals == std::string_view::npos) {
       command_line->AppendSwitch(std::string(arg));
     } else {
-      command_line->AppendSwitchASCII(std::string(arg.substr(0, equals)),
-                                      std::string(arg.substr(equals + 1)));
+      const std::string name(arg.substr(0, equals));
+      std::string value(arg.substr(equals + 1));
+      // A feature list adds to the engine's own: a switch given twice keeps
+      // only its last value, and what was turned off above would be back.
+      if (name == switches::kDisableFeatures ||
+          name == switches::kEnableFeatures) {
+        const std::string ours = command_line->GetSwitchValueASCII(name);
+        if (!ours.empty()) {
+          value = ours + "," + value;
+        }
+      }
+      command_line->AppendSwitchASCII(name, value);
     }
   }
   NoteF("command line: %s",

@@ -20,10 +20,10 @@ vsync parameters of its own over what is measured.
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  components/viz/service/BUILD.gn               |   2 +
- .../external_begin_frame_source_w10m.cc       | 585 ++++++++++++++++++
+ .../external_begin_frame_source_w10m.cc       | 596 ++++++++++++++++++
  .../external_begin_frame_source_w10m.h        |  97 +++
  .../root_compositor_frame_sink_impl.cc        |  35 +-
- 4 files changed, 717 insertions(+), 2 deletions(-)
+ 4 files changed, 728 insertions(+), 2 deletions(-)
  create mode 100644 components/viz/service/frame_sinks/external_begin_frame_source_w10m.cc
  create mode 100644 components/viz/service/frame_sinks/external_begin_frame_source_w10m.h
 
@@ -42,10 +42,10 @@ index f3d928a48b6b3dc73153dd1eb797b68fe757f932..d95e3895e699c2d19bc5309e74218685
        "gl/info_collection_gpu_service_impl.cc",
 diff --git a/components/viz/service/frame_sinks/external_begin_frame_source_w10m.cc b/components/viz/service/frame_sinks/external_begin_frame_source_w10m.cc
 new file mode 100644
-index 0000000000000000000000000000000000000000..d7094a77e560abf32522286c77b488bc3a26bbf2
+index 0000000000000000000000000000000000000000..3df63b4f615807c8625f6ef0083af5b7a449a5f4
 --- /dev/null
 +++ b/components/viz/service/frame_sinks/external_begin_frame_source_w10m.cc
-@@ -0,0 +1,585 @@
+@@ -0,0 +1,596 @@
 +// Copyright 2026 The Venetium-W10M Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -61,6 +61,7 @@ index 0000000000000000000000000000000000000000..d7094a77e560abf32522286c77b488bc
 +#include <utility>
 +
 +#include "base/check.h"
++#include "base/command_line.h"
 +#include "base/functional/bind.h"
 +#include "base/location.h"
 +#include "base/logging.h"
@@ -516,7 +517,17 @@ index 0000000000000000000000000000000000000000..d7094a77e560abf32522286c77b488bc
 +  const bool silent = !last_begin_frame_args_.IsValid() ||
 +                      now - last_begin_frame_args_.frame_time >=
 +                          last_begin_frame_args_.interval * 2;
-+  if (silent && !core_->TickPending()) {
++  // Only with "--vw-vsync=eager". A frame made up between two blanks is one
++  // more than the display has blanks for: when the blank that follows comes
++  // before that frame is presented, the two are presented inside one
++  // refresh, and every frame of the scroll or fling after them waits a
++  // refresh longer in the swap chain's queue (Present(1, 0) drops none).
++  // Without it the observer gets the last BeginFrame (cc discards it if its
++  // deadline has passed) and the real one with the next blank.
++  static const bool eager =
++      base::CommandLine::ForCurrentProcess()->GetSwitchValueASCII(
++          "vw-vsync") == "eager";
++  if (eager && silent && !core_->TickPending()) {
 +    base::TimeTicks frame_time = now;
 +    base::TimeDelta interval = interval_;
 +    if (last_begin_frame_args_.IsValid()) {

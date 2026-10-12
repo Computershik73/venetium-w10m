@@ -63,9 +63,17 @@ PresentGuard* PresentGuard::Get() {
   return &guard;
 }
 
-void PresentGuard::Load(const base::FilePath& file, bool forget) {
+void PresentGuard::Load(const base::FilePath& file,
+                        const std::string& made_of,
+                        bool forget) {
   base::AutoLock hold(lock_);
   file_ = file;
+  // BuildStamp() follows venetium_engine.dll alone; ANGLE's two DLLs and the
+  // shell are built and packed apart from it.
+  stamp_ = BuildStamp();
+  for (const char c : made_of) {
+    stamp_ = (stamp_ ^ static_cast<uint8_t>(c)) * 16777619u;
+  }
   angle_ = 0;
   d3d11_ = 0;
   if (forget) {
@@ -90,9 +98,9 @@ void PresentGuard::Load(const base::FilePath& file, bool forget) {
   if (sscanf_s(text, "VWG1 %x %d %d", &stamp, &angle, &d3d11) != 3) {
     return;
   }
-  if (stamp != BuildStamp()) {
-    Note("gpu: a new build of the engine; what the last one could not do "
-         "is forgotten");
+  if (stamp != stamp_) {
+    Note("gpu: a new build, or other engine switches; what earlier runs "
+         "could not do is forgotten");
     return;
   }
   angle_ = angle;
@@ -126,11 +134,23 @@ bool PresentGuard::Worked(PresentKind kind) {
     return false;
   }
   worked = true;
-  if (*Count(kind) != 0 && *Count(kind) != kGivenUp) {
+  if (kind != PresentKind::kAngle && *Count(kind) != 0 &&
+      *Count(kind) != kGivenUp) {
     *Count(kind) = 0;
     Write();
   }
   return true;
+}
+
+void PresentGuard::Proven(PresentKind kind) {
+  base::AutoLock hold(lock_);
+  const bool worked =
+      kind == PresentKind::kAngle ? angle_worked_ : d3d11_worked_;
+  if (!worked || *Count(kind) == 0 || *Count(kind) == kGivenUp) {
+    return;
+  }
+  *Count(kind) = 0;
+  Write();
 }
 
 void PresentGuard::GaveUp(PresentKind kind) {
@@ -146,8 +166,8 @@ void PresentGuard::GaveUp(PresentKind kind) {
   }
   *Count(kind) = kGivenUp;
   Write();
-  NoteF("gpu: %s is left alone from now on (a new build, or Hardware "
-        "graphics off and on, tries again)",
+  NoteF("gpu: %s is left alone from now on (a new build, other engine "
+        "switches, or Hardware graphics off and on, tries again)",
         Name(kind));
 }
 
@@ -161,7 +181,7 @@ void PresentGuard::Write() {
   }
   char text[64];
   const int length = sprintf_s(text, "VWG1 %08x %d %d\n",
-                               static_cast<unsigned>(BuildStamp()), angle_,
+                               static_cast<unsigned>(stamp_), angle_,
                                d3d11_);
   HANDLE handle = ::CreateFileW(file_.value().c_str(), GENERIC_WRITE, 0,
                                 nullptr, CREATE_ALWAYS, 0, nullptr);

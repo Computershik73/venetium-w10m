@@ -20,12 +20,12 @@ work on this phone (ui/gl/w10m_panel.h).
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  .../output_surface_provider_impl.cc           |  7 +++
- components/viz/service/gl/gpu_service_impl.cc | 41 ++++++++++++++++
- gpu/ipc/service/gpu_init.cc                   | 48 +++++++++++++++++++
- ui/gl/gl_context.cc                           |  6 +++
- ui/gl/init/gl_factory_win.cc                  | 18 +++++++
- ui/gl/w10m_panel.h                            | 24 ++++++++++
- 6 files changed, 144 insertions(+)
+ components/viz/service/gl/gpu_service_impl.cc | 41 ++++++++++++++
+ gpu/ipc/service/gpu_init.cc                   | 56 +++++++++++++++++++
+ ui/gl/gl_context.cc                           |  6 ++
+ ui/gl/init/gl_factory_win.cc                  | 18 ++++++
+ ui/gl/w10m_panel.h                            | 24 ++++++++
+ 6 files changed, 152 insertions(+)
 
 diff --git a/components/viz/service/display_embedder/output_surface_provider_impl.cc b/components/viz/service/display_embedder/output_surface_provider_impl.cc
 index 8c3c3e496173d8ff9388058b22aa2a5b9e03df41..24d3452d145242cbf80154b57c0f9e4cef70e427 100644
@@ -119,7 +119,7 @@ index 393ba3e0e0e7e74c27ddc98fd7114d0374074a1d..f87bd3333c70dfed12158c42ed2fd253
      std::move(callback).Run(/*success=*/false, gpu::GPUInfo(),
                              gpu::GpuFeatureInfo(),
 diff --git a/gpu/ipc/service/gpu_init.cc b/gpu/ipc/service/gpu_init.cc
-index a556afa8571333e07d8357fabdecd588cc8fa4e1..b3d10a5070211b03b976e420236f265e9e70d0a8 100644
+index a556afa8571333e07d8357fabdecd588cc8fa4e1..d6b6e791d6f04cba10dd7d044f469086df65e7bd 100644
 --- a/gpu/ipc/service/gpu_init.cc
 +++ b/gpu/ipc/service/gpu_init.cc
 @@ -52,6 +52,10 @@
@@ -133,7 +133,7 @@ index a556afa8571333e07d8357fabdecd588cc8fa4e1..b3d10a5070211b03b976e420236f265e
  #if BUILDFLAG(IS_MAC)
  #include <GLES2/gl2.h>
  #endif
-@@ -1103,10 +1107,38 @@ void GpuInit::InitializeInProcess(base::CommandLine* command_line,
+@@ -1103,10 +1107,46 @@ void GpuInit::InitializeInProcess(base::CommandLine* command_line,
    gl_display = gl::init::InitializeGLNoExtensionsOneOff(
        /*init_bindings=*/true,
        /*gpu_preference=*/gl::GpuPreference::kDefault);
@@ -158,7 +158,15 @@ index a556afa8571333e07d8357fabdecd588cc8fa4e1..b3d10a5070211b03b976e420236f265e
 +    gpu_feature_info_ = ComputeGpuFeatureInfoWithNoGpu();
 +    gpu_preferences_.gr_context_type = GrContextType::kNone;
 +    gpu_info_.gl_implementation_parts = gl::GetGLImplementationParts();
-+    gl::W10mGpuGivenUp(reason, /*for_good=*/true);
++    // Proof that GL cannot start on this phone only if it was asked for the
++    // way the embedder asks (--use-gl=angle --use-angle=d3d11): with another
++    // backend named among the shell's switches the failure is the switch's.
++    const bool as_the_embedder_asks =
++        command_line->GetSwitchValueASCII(switches::kUseGL) ==
++            gl::kGLImplementationANGLEName &&
++        command_line->GetSwitchValueASCII(switches::kUseANGLE) ==
++            gl::kANGLEImplementationD3D11Name;
++    gl::W10mGpuGivenUp(reason, /*for_good=*/as_the_embedder_asks);
 +  };
 +  if (!gl_display) {
 +    give_up_gl("ANGLE did not start (no EGL display)");
@@ -172,7 +180,7 @@ index a556afa8571333e07d8357fabdecd588cc8fa4e1..b3d10a5070211b03b976e420236f265e
    bool gl_disabled = gl::GetGLImplementation() == gl::kGLImplementationDisabled;
  
  #if BUILDFLAG(IS_LINUX) || \
-@@ -1122,7 +1154,11 @@ void GpuInit::InitializeInProcess(base::CommandLine* command_line,
+@@ -1122,7 +1162,11 @@ void GpuInit::InitializeInProcess(base::CommandLine* command_line,
    gpu_info_.gl_implementation_parts = gl::GetGLImplementationParts();
  
    if (!gl_disabled && !gl_use_swiftshader_) {
@@ -184,7 +192,7 @@ index a556afa8571333e07d8357fabdecd588cc8fa4e1..b3d10a5070211b03b976e420236f265e
      gpu_feature_info_ = ComputeGpuFeatureInfo(gpu_info_, gpu_preferences_,
                                                command_line, nullptr);
      gl_use_swiftshader_ = EnableSwiftShaderIfNeeded(
-@@ -1157,6 +1193,18 @@ void GpuInit::InitializeInProcess(base::CommandLine* command_line,
+@@ -1157,6 +1201,18 @@ void GpuInit::InitializeInProcess(base::CommandLine* command_line,
      }
    }
  

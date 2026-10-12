@@ -11,6 +11,9 @@
 
 #include "base/containers/flat_map.h"
 #include "base/functional/bind.h"
+#include "base/location.h"
+#include "base/task/single_thread_task_runner.h"
+#include "base/time/time.h"
 #include "base/containers/flat_set.h"
 #include "base/observer_list.h"
 #include "base/scoped_observation.h"
@@ -33,6 +36,7 @@
 #include "venetium_w10m/browser/vw_engine.h"
 #include "venetium_w10m/browser/vw_input_method.h"
 #include "venetium_w10m/browser/vw_panel.h"
+#include "venetium_w10m/browser/vw_present_guard.h"
 #include "venetium_w10m/browser/vw_vsync.h"
 #include "venetium_w10m/common/vw_log.h"
 
@@ -310,11 +314,27 @@ void VwPlatform::WatchCompositorFrame() {
 }
 
 void VwPlatform::OnCompositorFrame(const viz::FrameTimingDetails&) {
+  // GL has been given up: every frame from here is software compositing's,
+  // and those count themselves (a present through Direct3D 11, or the
+  // shell's first copy of the bitmap). Not asked again, and no frame forced.
+  if (VwEngine::Get()->gpu_compositing_failed()) {
+    return;
+  }
   // Counted only if ANGLE's chain is the one in the panel at this moment. It
   // is not while its surface is being made again (a swap chain that would
   // not be resized), nor once software compositing has taken over.
   if (PanelHost::Get()->CompositorPresented()) {
     VwEngine::Get()->HardwarePresentWorked(PresentKind::kAngle);
+    // One frame is a start, not proof: the run has to go on for a little
+    // before it stops counting against GPU compositing.
+    base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
+        FROM_HERE, base::BindOnce([]() {
+          if (!VwEngine::Get()->gpu_compositing_failed()) {
+            PresentGuard::Get()->Proven(PresentKind::kAngle);
+            Note("gpu: GPU compositing has run for five seconds");
+          }
+        }),
+        base::Seconds(5));
     return;
   }
   if (PanelHost::Get()->presenting() == PresentKind::kD3D11 ||
@@ -334,6 +354,11 @@ void VwPlatform::OnVSync(base::TimeTicks timebase, base::TimeDelta interval) {
 }
 
 void VwPlatform::SetActive(bool active) {
+  if (!active && !VwEngine::Get()->gpu_compositing_failed()) {
+    // Suspended by the user with GPU compositing on screen: the run did not
+    // die of it, however short it was.
+    PresentGuard::Get()->Proven(PresentKind::kAngle);
+  }
   if (vsync_) {
     vsync_->SetActive(active);
   }

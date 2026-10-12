@@ -15,12 +15,12 @@ The device the port is brought up on: HP Elite x3 class, Windows 10 Mobile
 |---|---|
 | Engine loads, pages render, text input, tabs, network | on the phone (appx 222.10 and later) |
 | Frames through a Direct3D 11 swap chain in a XAML `SwapChainPanel` (software compositing) | on the phone (222.17: first frame presented, 16.98 ms refresh measured) |
-| GPU compositing through ANGLE on Direct3D 11 | 222.17 died at start: ANGLE refused the native display (our own patch; `GetDC(NULL)` is not null on the phone) and Chromium then hit `NOTREACHED` instead of falling back. Fixed in 222.18, untested |
-| Fallback to software compositing when GL cannot start, cannot make a context or a surface, or loses its context | built (222.18), untested; `--use-angle=d3d9` among the engine switches provokes the first case |
-| BeginFrames from the display's vertical blank (`IDXGIOutput::WaitForVBlank`), as gecko-w10m ticks | built (222.18), untested; `--vw-vsync=timer` is the old way |
-| The panel's swap chain resized in place when the room changes (keyboard, rotation) | built (222.18), untested |
-| Touch flings (the curve was built from 0 pixels per inch: no inertia at all) | fixed in 222.18, untested |
-| Address space: 512 MB that Blink set aside for array buffers, now 96 MB | built (222.18); the log's `memory:` line says what takes the rest |
+| GPU compositing through ANGLE on Direct3D 11 | 222.17 died at start: ANGLE refused the native display (our own patch; `GetDC(NULL)` is not null on the phone) and Chromium then hit `NOTREACHED` instead of falling back. Fixed in 222.19, untested |
+| Fallback to software compositing when GL cannot start, cannot make a context or a surface, or loses its context | built (222.19), untested; `--use-angle=d3d9` among the engine switches provokes the first case |
+| BeginFrames from the display's vertical blank (`IDXGIOutput::WaitForVBlank`), as gecko-w10m ticks | built (222.19), untested; `--vw-vsync=timer` is the old way |
+| The panel's swap chain resized in place when the room changes (keyboard, rotation) | built (222.19), untested |
+| Touch flings (the curve was built from 0 pixels per inch: no inertia at all) | fixed in 222.19, untested |
+| Address space: 512 MB that Blink set aside for array buffers, now 96 MB | built (222.19); the log's `memory:` line says what takes the rest |
 | Feature level 9_3 phones: frames through Direct3D 11 (the row above); a Direct3D 11 compositor of our own for them | the first is built and is what such a phone gets today; the second is designed, not written |
 
 What the log says about graphics, in order: `gpu: Direct3D 11 feature
@@ -29,9 +29,14 @@ compositing`, `panel: chain N shows ...`, `gpu: first frame on screen
 through ...`, then every ten seconds of animation `vsync: N ticks ...` and
 (software compositing) `frames: N in runs ...`. `gpu: GPU compositing given
 up ...: <reason>` is the fallback. What a run could not do is remembered in
-`present-guard` (two runs that end before a frame, or one failure that
-proves it, and that way of presenting is left alone until the engine is a
-new build or Hardware graphics is switched off and on).
+`present-guard` (two runs that end before GPU compositing has run for five
+seconds, or one failure that proves it, and that way of presenting is left
+alone until the package is a new build, the engine switches change, or
+Hardware graphics is switched off and on). Menu → Engine switches takes
+Chromium's and the engine's own switches for the next start:
+`--vw-gpu=off`, `--vw-vsync=timer` (frames from a timer, as before),
+`--vw-vsync=eager` (a frame made up at once when an animation starts),
+`--disable_post_sub_buffers_for_onscreen_surfaces` (whole-frame presents).
 
 ## Toolchain and tree — built/checked
 
@@ -138,7 +143,7 @@ notice, keyboard sink, back button.
 
 ## Next
 
-1. GPU compositing on the phone: read the first 222.18 log (does ANGLE
+1. GPU compositing on the phone: read the first 222.19 log (does ANGLE
    start, does the first frame come, does a resize stay in place, what the
    `vsync:` and `memory:` lines say).
 2. Feature level 9_3: a Direct3D 11 compositor in viz for phones ANGLE's
