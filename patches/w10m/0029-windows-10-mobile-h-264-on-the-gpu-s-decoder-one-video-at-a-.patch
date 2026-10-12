@@ -1,0 +1,998 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Mon, 12 Oct 2026 14:51:07 +0400
+Subject: [PATCH] Windows 10 Mobile: H.264 on the GPU's decoder, one video at a
+ time
+
+Chromium's D3D11VideoDecoder, on ANGLE's device, in a process that is the
+whole browser and on Adreno drivers gecko-w10m has met:
+
+- One video at a time has the GPU's decoder; the others are refused in
+  Initialize() and go on to the software decoder. One decoder of the
+  driver's exists at a time: none is made from Initialize(), the old one is
+  released and flushed before the next is made, and another video's waits
+  until the last has been gone a second. (A second DXVA session beside the
+  first, or right after it, ran the Adreno 530 driver's stack out under
+  gecko-w10m.)
+- The driver is asked what it decodes on ANGLE's own device, and no H.264
+  is offered unless it lists a configuration with short slices, the only
+  form this decoder sends. What it answers is in the log.
+- With frames copied out by the video processor (the embedder's default),
+  the decoder's textures are made for decoding only.
+- The embedder is told when the driver is first asked and when frames have
+  come out for a while (ui/gl/w10m_panel.h), and counts the runs that end
+  in between.
+- Where upstream loses a GPU process, this build would lose the browser:
+  four CHECKs on the path are failures instead, a driver that stays busy
+  fails the decode after two seconds, sizes beyond 3840x2160 are not
+  probed.
+- A decoder that fails after its first frame, or whose GL has been given
+  up, has the page's player start again (it then gets the software
+  decoder) instead of showing an error: DecoderStream keeps the failure's
+  code for the next Read().
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ content/renderer/media/batching_media_log.cc  |  11 +
+ media/filters/decoder_stream.cc               |  14 +
+ media/filters/decoder_stream.h                |  11 +
+ .../gpu/windows/d3d11_decoder_configurator.cc |  17 +
+ media/gpu/windows/d3d11_texture_wrapper.cc    |   9 +
+ media/gpu/windows/d3d11_video_decoder.cc      | 491 +++++++++++++++++-
+ .../windows/d3d11_video_decoder_wrapper.cc    |  37 ++
+ .../windows/d3d11_video_processor_proxy.cc    |  13 +
+ .../gpu/windows/supported_profile_helpers.cc  |   8 +
+ media/renderers/video_renderer_impl.cc        |  15 +
+ ui/gl/w10m_panel.h                            |  37 ++
+ 11 files changed, 662 insertions(+), 1 deletion(-)
+
+diff --git a/content/renderer/media/batching_media_log.cc b/content/renderer/media/batching_media_log.cc
+index d657a3ee6a5f60b27a243a34d2796945fcd07b54..a40828075d869d3048cc5076ed9d998769b7f9d6 100644
+--- a/content/renderer/media/batching_media_log.cc
++++ b/content/renderer/media/batching_media_log.cc
+@@ -26,6 +26,17 @@ std::string ToJSON(const media::MediaLogRecord& event) {
+ // Print an event to the chromium log.
+ // TODO(tmathmeyer) replace this with a log-only EventHandler.
+ void Log(const media::MediaLogRecord& event) {
++#if defined(VENETIUM_W10M)
++  // A phone has no DevTools and no media-internals: what a player or a
++  // decoder reports as an error -- the hardware decoder's failed calls with
++  // their HRESULTs among them -- goes to the log (the embedder's too).
++  if (event.type == media::MediaLogRecord::Type::kMediaStatus ||
++      (event.type == media::MediaLogRecord::Type::kMessage &&
++       event.params.Find("error"))) {
++    LOG(WARNING) << "MediaEvent: " << ToJSON(event);
++    return;
++  }
++#endif
+   if (event.type == media::MediaLogRecord::Type::kMediaStatus) {
+     DVLOG(1) << "MediaEvent: " << ToJSON(event);
+   } else if (event.type == media::MediaLogRecord::Type::kMessage &&
+diff --git a/media/filters/decoder_stream.cc b/media/filters/decoder_stream.cc
+index 738c726d8152be34373c9de6e0094dd0fdd43299..98fb51f30ed38e0c7f251ef4a271469ef03a452c 100644
+--- a/media/filters/decoder_stream.cc
++++ b/media/filters/decoder_stream.cc
+@@ -195,6 +195,14 @@ void DecoderStream<StreamType>::Read(ReadCB read_cb) {
+     read_cb_ = base::BindPostTaskToCurrentDefault(std::move(read_cb));
+     // OnDecodeDone, OnBufferReady, and CompleteDecoderReinitialization all set
+     // kStateError and call SatisfyRead, passing the error back to a ReadCB.
++#if defined(VENETIUM_W10M)
++    // Unless nobody was reading then (w10m_platform_decode_failure_).
++    if (w10m_platform_decode_failure_) {
++      w10m_platform_decode_failure_ = false;
++      SatisfyRead(DecoderStatus::Codes::kPlatformDecodeFailure);
++      return;
++    }
++#endif
+     SatisfyRead(DecoderStatus::Codes::kDecoderStreamInErrorState);
+     return;
+   }
+@@ -676,6 +684,12 @@ void DecoderStream<StreamType>::OnDecodeDone(
+ 
+         state_ = State::kStateError;
+         ClearOutputs();
++#if defined(VENETIUM_W10M)
++        // Kept for the next Read() when there is none to tell now.
++        w10m_platform_decode_failure_ =
++            StreamType == DemuxerStream::VIDEO && !read_cb_ &&
++            status.code() == DecoderStatus::Codes::kPlatformDecodeFailure;
++#endif
+         if (read_cb_)
+           SatisfyRead(std::move(status));
+       }
+diff --git a/media/filters/decoder_stream.h b/media/filters/decoder_stream.h
+index bb6c5667eddc45b846fcfd93df2e99fac974c188..5ebf85d8a8def1e77319da3c1f9b7464bb307bcb 100644
+--- a/media/filters/decoder_stream.h
++++ b/media/filters/decoder_stream.h
+@@ -307,6 +307,17 @@ class MEDIA_EXPORT DecoderStream {
+ 
+   int fallback_buffers_being_decoded_ = 0;
+ 
++#if defined(VENETIUM_W10M)
++  // Windows 10 Mobile: a hardware decoder's failure
++  // (DecoderStatus::Codes::kPlatformDecodeFailure) put the stream into
++  // kStateError while nobody was reading -- the usual case in steady
++  // playback, where frames are decoded ahead of the reads. The next Read()
++  // is told that code and not kDecoderStreamInErrorState, so that
++  // VideoRendererImpl can tell it from a bad stream and have the player
++  // start again with the software decoder.
++  bool w10m_platform_decode_failure_ = false;
++#endif
++
+   // Last timestamp seen by DecodeInternal(), used for average duration when
+   // explicit duration information is missing.
+   base::TimeDelta last_buffer_timestamp_ = kNoTimestamp;
+diff --git a/media/gpu/windows/d3d11_decoder_configurator.cc b/media/gpu/windows/d3d11_decoder_configurator.cc
+index 5e410bbf733c33a49f8df1701f369d7434eeef6e..015a29907a1ac531f7959f960bf4cda266dad6b8 100644
+--- a/media/gpu/windows/d3d11_decoder_configurator.cc
++++ b/media/gpu/windows/d3d11_decoder_configurator.cc
+@@ -152,9 +152,26 @@ std::unique_ptr<D3D11DecoderConfigurator> D3D11DecoderConfigurator::Create(
+       << "D3D11VideoDecoder is using " << GetProfileName(config.profile())
+       << " / " << VideoChromaSamplingToString(chroma_sampling);
+ 
++#if defined(VENETIUM_W10M)
++  auto configurator = std::make_unique<D3D11DecoderConfigurator>(
++      decoder_dxgi_format, decoder_guid, config.coded_size(),
++      config.is_encrypted(), supports_nv12_decode_swap_chain);
++  // With frames copied out by the video processor (no zero copy,
++  // d3d11_texture_selector.cc) nothing samples the decoder's own textures,
++  // and they are made for decoding only. Whether the Adreno drivers make a
++  // decoder's texture that can be sampled as well is not known: gecko-w10m
++  // never asks for one (the system's decoder makes its own there, and they
++  // are only ever copied from).
++  if (!gpu_preferences.enable_zero_copy_dxgi_video ||
++      workarounds.disable_dxgi_zero_copy_video) {
++    configurator->output_texture_desc_.BindFlags = D3D11_BIND_DECODER;
++  }
++  return configurator;
++#else
+   return std::make_unique<D3D11DecoderConfigurator>(
+       decoder_dxgi_format, decoder_guid, config.coded_size(),
+       config.is_encrypted(), supports_nv12_decode_swap_chain);
++#endif
+ }
+ 
+ bool D3D11DecoderConfigurator::SupportsDevice(
+diff --git a/media/gpu/windows/d3d11_texture_wrapper.cc b/media/gpu/windows/d3d11_texture_wrapper.cc
+index cf4de05aec19f1258eb89359f402e487d3391c7d..63a79f0b41fd80863a9b81183805b2cc8d5822ca 100644
+--- a/media/gpu/windows/d3d11_texture_wrapper.cc
++++ b/media/gpu/windows/d3d11_texture_wrapper.cc
+@@ -191,6 +191,14 @@ DefaultTexture2DWrapper::GpuResources::GpuResources(
+                 base::win::ScopedHandle(shared_handle), texture);
+   }
+ 
++#if defined(VENETIUM_W10M)
++  // One GPU thread decodes and draws here (the media service has a thread of
++  // its own only with Graphite on Dawn, which this build has not got), so
++  // the image needs no lock; and a device is not asked for ID3D11Multithread
++  // (newer than Direct3D 11's video interfaces, and unknown on a phone)
++  // under a CHECK that would end the whole browser.
++  const bool is_thread_safe = false;
++#else
+   Microsoft::WRL::ComPtr<ID3D11Multithread> multi_threaded;
+   hr = video_device.As(&multi_threaded);
+   CHECK_EQ(hr, S_OK);
+@@ -201,6 +209,7 @@ DefaultTexture2DWrapper::GpuResources::GpuResources(
+   const bool is_thread_safe =
+       multi_threaded->GetMultithreadProtected() &&
+       IsDedicatedMediaServiceThreadEnabled(gl::ANGLEImplementation::kD3D11);
++#endif
+ 
+   gpu::SharedImageInfo si_info{output_si_format, size, color_space, usage,
+                                "VideoTexture"};
+diff --git a/media/gpu/windows/d3d11_video_decoder.cc b/media/gpu/windows/d3d11_video_decoder.cc
+index b09ce3452538b2650b5d205c25a8b209995b9214..0fd2ffb5971298cdbfc0233770588d0a235a422a 100644
+--- a/media/gpu/windows/d3d11_video_decoder.cc
++++ b/media/gpu/windows/d3d11_video_decoder.cc
+@@ -46,6 +46,22 @@
+ #include "ui/gl/gl_angle_util_win.h"
+ #include "ui/gl/gl_switches.h"
+ 
++#if defined(VENETIUM_W10M)
++#include <algorithm>
++#include <string>
++
++#include "base/command_line.h"
++#include "base/json/json_writer.h"
++#include "base/logging.h"
++#include "base/no_destructor.h"
++#include "base/strings/string_number_conversions.h"
++#include "base/threading/platform_thread.h"
++#include "base/time/time.h"
++#include "base/timer/timer.h"
++#include "media/base/media_serializers.h"
++#include "ui/gl/w10m_panel.h"
++#endif
++
+ namespace media {
+ 
+ namespace {
+@@ -101,6 +117,181 @@ bool ShouldUseDXVADeviceForHEVCRangeExtension(const VideoDecoderConfig& config,
+ BASE_FEATURE(kSetDefaultColorSpaceForVideoFrameAndSharedImage,
+              base::FEATURE_ENABLED_BY_DEFAULT);
+ 
++#if defined(VENETIUM_W10M)
++// Windows 10 Mobile. All of this runs on the GPU main thread -- the media
++// service has a thread of its own only with Graphite on Dawn
++// (content/gpu/gpu_service_factory.cc) -- in a process that is the whole
++// browser, on Adreno drivers that gecko-w10m has met:
++//  - with a second DXVA decoder beside the first, and with one made the
++//    moment another video's was dropped, the Adreno 530's driver recursed
++//    until its stack ran out. So one video at a time has the GPU's decoder
++//    (the others are refused in Initialize(), and the page's player goes on
++//    to the software decoder), one decoder of the driver's exists at a time,
++//    and another video's waits until the last has been gone a while
++//    (--vw-video-settle-ms, 1000; 0 is no wait);
++//  - a driver that ends the process when it is asked to decode would end
++//    every run that plays a video: the embedder is told when the driver is
++//    asked and when frames have come out for a while (ui/gl/w10m_panel.h),
++//    and counts the runs that ended in between.
++
++// The decoder that has the GPU's, or null.
++const void* g_w10m_owner = nullptr;
++// When the driver's decoder was last let go of.
++base::TimeTicks g_w10m_released;
++// When a decoder last failed after it had started decoding. For a while from
++// then no video is given the GPU's decoder: the player that starts again
++// after the failure (media/renderers/video_renderer_impl.cc) gets the
++// software one.
++base::TimeTicks g_w10m_failed;
++constexpr base::TimeDelta kW10mFailedHold = base::Seconds(10);
++// The embedder has been told kStarting, and nothing since.
++bool g_w10m_watched = false;
++// Frames out of the driver's present decoder, and when the first came.
++int g_w10m_frames = 0;
++base::TimeTicks g_w10m_first_frame;
++// Decoders that failed one after another with no frame out of any. After
++// three this run asks the driver for no more: on a phone whose driver cannot
++// do it, every video would otherwise start with a failure.
++int g_w10m_fruitless = 0;
++
++// --name=N among the switches (the shell's Engine switches), or |fallback|.
++int W10mSwitchInt(const char* name, int fallback) {
++  const std::string text =
++      base::CommandLine::ForCurrentProcess()->GetSwitchValueASCII(name);
++  int value = 0;
++  return !text.empty() && base::StringToInt(text, &value) && value >= 0
++             ? value
++             : fallback;
++}
++
++// The embedder hears kStarting and then one of the others, in turn.
++void W10mTell(gl::W10mVideoEvent event) {
++  const bool starting = event == gl::W10mVideoEvent::kStarting;
++  if (g_w10m_watched == starting) {
++    return;
++  }
++  g_w10m_watched = starting;
++  gl::W10mVideo(event);
++}
++
++// Ticks once a second while a video has the GPU's decoder
++// (ResetD3DVideoDecoder()).
++base::RepeatingTimer& W10mGlWatch() {
++  static base::NoDestructor<base::RepeatingTimer> timer;
++  return *timer;
++}
++
++// |decoder| has the GPU's decoder no longer.
++void W10mSessionGone(const void* decoder) {
++  if (g_w10m_owner != decoder) {
++    return;
++  }
++  g_w10m_owner = nullptr;
++  W10mGlWatch().Stop();
++  W10mTell(gl::W10mVideoEvent::kEnded);
++}
++
++// Waits, |ms| at most, until the GPU has done what it was given: the decode,
++// before anything reads the picture. Off unless --vw-video-sync-ms says how
++// long. It holds the one GPU thread (gecko-w10m measured 10 to 16 ms a frame
++// at 1080p on the Adreno 530, where it turned out not to be needed) and is
++// for a driver that shows a surface's earlier picture, as the Adreno 304's
++// did at feature level 9_3. A sleep is a whole 15 ms tick on these phones,
++// hence the yields first.
++void W10mWaitForGpu(ID3D11Device* device,
++                    ID3D11DeviceContext* context,
++                    int ms) {
++  D3D11_QUERY_DESC desc = {D3D11_QUERY_EVENT, 0};
++  Microsoft::WRL::ComPtr<ID3D11Query> query;
++  if (FAILED(device->CreateQuery(&desc, &query))) {
++    return;
++  }
++  context->End(query.Get());
++  context->Flush();
++  const base::TimeTicks start = base::TimeTicks::Now();
++  BOOL done = FALSE;
++  while (context->GetData(query.Get(), &done, sizeof(done),
++                          D3D11_ASYNC_GETDATA_DONOTFLUSH) != S_OK ||
++         !done) {
++    const base::TimeDelta waited = base::TimeTicks::Now() - start;
++    if (waited >= base::Milliseconds(ms)) {
++      break;
++    }
++    if (waited < base::Milliseconds(4)) {
++      base::PlatformThread::YieldCurrentThread();
++    } else {
++      base::PlatformThread::Sleep(base::Milliseconds(1));
++    }
++  }
++}
++
++// What the driver says of H.264 on ANGLE's device, for the log, and whether
++// this decoder can drive it: slices are sent in DXVA's short format only
++// (ConfigBitstreamRaw 2, d3d11_video_decoder_wrapper.cc), which a driver
++// need not take. gecko-w10m's own probe asks the same things.
++bool W10mH264Usable(ComD3D11Device device) {
++  ComD3D11VideoDevice video_device;
++  ComD3D11DeviceContext context;
++  ComD3D11VideoContext video_context;
++  device->GetImmediateContext(&context);
++  const HRESULT device_hr = device.As(&video_device);
++  const HRESULT context_hr = context.As(&video_context);
++  if (FAILED(device_hr) || FAILED(context_hr)) {
++    LOG(WARNING) << "video: decoded in software: ANGLE's device has no "
++                    "Direct3D 11 video interfaces (device 0x"
++                 << std::hex << device_hr << ", context 0x" << context_hr
++                 << ")";
++    return false;
++  }
++  bool listed = false;
++  const UINT profiles = video_device->GetVideoDecoderProfileCount();
++  for (UINT i = 0; i < profiles; ++i) {
++    GUID profile = {};
++    if (SUCCEEDED(video_device->GetVideoDecoderProfile(i, &profile)) &&
++        profile == D3D11_DECODER_PROFILE_H264_VLD_NOFGT) {
++      listed = true;
++    }
++  }
++  BOOL nv12 = FALSE;
++  UINT configs = 0;
++  unsigned slice_formats = 0;
++  unsigned single_textures = 0;
++  if (listed) {
++    video_device->CheckVideoDecoderFormat(
++        &D3D11_DECODER_PROFILE_H264_VLD_NOFGT, DXGI_FORMAT_NV12, &nv12);
++    const D3D11_VIDEO_DECODER_DESC desc = {
++        D3D11_DECODER_PROFILE_H264_VLD_NOFGT, 1920, 1088, DXGI_FORMAT_NV12};
++    if (FAILED(video_device->GetVideoDecoderConfigCount(&desc, &configs))) {
++      configs = 0;
++    }
++    for (UINT i = 0; i < configs; ++i) {
++      D3D11_VIDEO_DECODER_CONFIG decoder_config = {};
++      if (SUCCEEDED(
++              video_device->GetVideoDecoderConfig(&desc, i, &decoder_config))) {
++        slice_formats |= 1u << (decoder_config.ConfigBitstreamRaw & 7);
++        if (decoder_config.ConfigDecoderSpecific & (1 << 14)) {
++          ++single_textures;
++        }
++      }
++    }
++  }
++  const bool usable = listed && nv12 && (slice_formats & (1u << 2));
++  LOG(WARNING) << "video: "
++               << (usable ? "H.264 can go to the GPU's decoder"
++                          : "decoded in software")
++               << ": ANGLE's device (feature level 0x" << std::hex
++               << static_cast<unsigned>(device->GetFeatureLevel()) << std::dec
++               << ") lists " << profiles << " decoder profiles, H.264 "
++               << (listed ? "among them" : "not among them") << ", NV12 "
++               << (nv12 ? "yes" : "no") << ", " << configs
++               << " configurations at 1920x1088 (slice formats 0x" << std::hex
++               << slice_formats << std::dec
++               << ", of which 0x4 is the short one this decoder sends; "
++               << single_textures << " want single textures, not an array)";
++  return usable;
++}
++#endif  // defined(VENETIUM_W10M)
++
+ }  // namespace
+ 
+ std::unique_ptr<VideoDecoder> D3D11VideoDecoder::Create(
+@@ -166,6 +357,21 @@ D3D11VideoDecoder::~D3D11VideoDecoder() {
+ 
+   // Explicitly destroy the decoder, since it can reference picture buffers.
+   accelerated_video_decoder_.reset();
++
++#if defined(VENETIUM_W10M)
++  // The driver's decoder and its pictures go now, with a flush to carry the
++  // releases out (Direct3D 11 puts them off, and the flush above came before
++  // there was anything to carry): the next video's decoder must not find
++  // this one there.
++  const bool had_decoder = !!d3d_video_decoder_wrapper_;
++  picture_buffers_.clear();
++  d3d_video_decoder_wrapper_.reset();
++  if (had_decoder) {
++    device_context_->Flush();
++    g_w10m_released = base::TimeTicks::Now();
++  }
++  W10mSessionGone(this);
++#endif
+ }
+ 
+ VideoDecoderType D3D11VideoDecoder::GetDecoderType() const {
+@@ -210,6 +416,46 @@ bool D3D11VideoDecoder::InitializeAcceleratedDecoder(
+ }
+ 
+ bool D3D11VideoDecoder::ResetD3DVideoDecoder() {
++#if defined(VENETIUM_W10M)
++  // One video at a time has the GPU's decoder. Initialize() has refused the
++  // others; this is the net under it.
++  if (g_w10m_owner && g_w10m_owner != this) {
++    NotifyError({D3D11StatusCode::kDecoderCreationFailed,
++                 "another video has the GPU's decoder"},
++                DecoderStatus::Codes::kTooManyDecoders);
++    return false;
++  }
++  if (!g_w10m_owner) {
++    g_w10m_owner = this;
++    // The last video's frames are not this one's: NotifyError() tells a
++    // failure before the first frame from one after it by this count.
++    g_w10m_frames = 0;
++    // GL given up -- its context lost, a surface that could not be made --
++    // leaves this decoder with nobody to draw its frames, and those it has
++    // given out may never come back for it to notice anything by (their
++    // release waits for a sync token of the lost context). Whoever waits for
++    // a frame is told that the decoder failed, and the page's player starts
++    // again with the software one (media/renderers/video_renderer_impl.cc).
++    // A decoder nobody waits for says so at its next Decode() (DoDecode()).
++    W10mGlWatch().Start(
++        FROM_HERE, base::Seconds(1),
++        base::BindRepeating(
++            [](base::WeakPtr<D3D11VideoDecoder> self) {
++              if (self && gl::W10mGpuIsGivenUp() &&
++                  self->state_ == State::kRunning &&
++                  (self->current_decode_cb_ ||
++                   !self->input_buffer_queue_.empty())) {
++                self->NotifyError(
++                    {D3D11StatusCode::kDecoderFailedDecode,
++                     "GL has been given up"},
++                    DecoderStatus::Codes::kPlatformDecodeFailure);
++              }
++            },
++            weak_factory_.GetWeakPtr()));
++  }
++  // Before the driver is asked anything for this video.
++  W10mTell(gl::W10mVideoEvent::kStarting);
++#endif
+   // By default we assume outputs are 8-bit for SDR color spaces and 10 bit for
+   // HDR color spaces (or VP9.2, or HEVC Main10, or HEVC Rext) with HBD capable
+   // codecs (the decoder doesn't support H264PROFILE_HIGH10PROFILE). We'll get
+@@ -261,6 +507,45 @@ bool D3D11VideoDecoder::ResetD3DVideoDecoder() {
+     return false;
+   }
+ 
++#if defined(VENETIUM_W10M)
++  // Upstream makes the driver's decoder here from Initialize() and, at the
++  // first picture, usually another beside it before it drops the first: the
++  // picture's coded size and colour are seldom the container's. Here the
++  // one there is goes first, its pictures with it (those a page still shows
++  // live on until it lets go of them), and a flush carries the release out;
++  // and none is made from Initialize(): DoDecode() comes back here when the
++  // first picture's parameters are known (kConfigChange), and that decoder
++  // is the stream's one. When the parameters change later (another quality)
++  // the new one follows the old at once; --vw-video-remake-ms=N puts up to
++  // 500 ms between them, on this thread, should a driver need the time.
++  if (d3d_video_decoder_wrapper_) {
++    picture_buffers_.clear();
++    d3d_video_decoder_wrapper_.reset();
++    device_context_->Flush();
++    g_w10m_released = base::TimeTicks::Now();
++  }
++  if (state_ == State::kInitializing) {
++    bit_depth_ = bit_depth;
++    decoder_configurator_ = std::move(decoder_configurator);
++    texture_selector_ = std::move(texture_selector);
++    return true;
++  }
++  std::string w10m_after = "the first of this run";
++  if (!g_w10m_released.is_null()) {
++    const base::TimeDelta wait =
++        base::Milliseconds(
++            std::min(W10mSwitchInt("vw-video-remake-ms", 0), 500)) -
++        (base::TimeTicks::Now() - g_w10m_released);
++    if (wait.is_positive()) {
++      base::PlatformThread::Sleep(wait);
++    }
++    w10m_after =
++        base::NumberToString(
++            (base::TimeTicks::Now() - g_w10m_released).InMilliseconds()) +
++        " ms after the last one went";
++  }
++#endif
++
+   auto video_decoder_wrapper =
+       CreateD3DVideoDecoderWrapper(decoder_configurator.get(), bit_depth);
+   if (!video_decoder_wrapper) {
+@@ -273,6 +558,20 @@ bool D3D11VideoDecoder::ResetD3DVideoDecoder() {
+   texture_selector_ = std::move(texture_selector);
+   d3d_video_decoder_wrapper_ = std::move(video_decoder_wrapper);
+ 
++#if defined(VENETIUM_W10M)
++  g_w10m_frames = 0;
++  LOG(WARNING) << "video: the GPU's decoder made for "
++               << GetProfileName(config_.profile()) << " "
++               << config_.coded_size().ToString() << ", "
++               << (use_single_video_decoder_texture_ ? "single textures"
++                                                     : "a texture array")
++               << ", frames "
++               << (texture_selector_->WillCopyForTesting()
++                       ? "copied out by the video processor"
++                       : "sampled where they are decoded")
++               << "; " << w10m_after;
++#endif
++
+   return true;
+ }
+ 
+@@ -322,7 +621,18 @@ D3D11VideoDecoder::CreateD3DVideoDecoderWrapper(
+   } else {
+     MEDIA_LOG(INFO, media_log_) << "D3D11VideoDecoder is using D3D11 backend";
+     ComD3D11VideoContext video_context;
++#if defined(VENETIUM_W10M)
++    // Not fatal: this process is the whole browser.
++    HRESULT context_hr = device_context_.As(&video_context);
++    if (FAILED(context_hr)) {
++      NotifyError({D3D11StatusCode::kQueryVideoContextFailed,
++                   "The device context has no ID3D11VideoContext",
++                   context_hr});
++      return nullptr;
++    }
++#else
+     CHECK_EQ(device_context_.As(&video_context), S_OK);
++#endif
+     video_decoder_wrapper = D3D11VideoDecoderWrapper::Create(
+         media_log_.get(), video_device_, std::move(video_context),
+         decoder_configurator, usable_feature_level_, config_);
+@@ -395,6 +705,61 @@ void D3D11VideoDecoder::Initialize(const VideoDecoderConfig& config,
+     return PostDecoderStatus(DecoderStatus::Codes::kUnsupportedEncryptionMode);
+   }
+ 
++#if defined(VENETIUM_W10M)
++  // Refused here, a video goes on to the next decoder in its player's list,
++  // the software one (DecoderSelector), and stays with it.
++  const char* w10m_refused = nullptr;
++  if (gl::W10mGpuIsGivenUp()) {
++    w10m_refused = "GL has been given up, and software compositing cannot "
++                   "draw this decoder's frames";
++  } else if (g_w10m_owner && g_w10m_owner != this) {
++    w10m_refused = "another video has the GPU's decoder";
++  } else if (!g_w10m_failed.is_null() &&
++             base::TimeTicks::Now() - g_w10m_failed < kW10mFailedHold) {
++    w10m_refused = "the GPU's decoder failed a moment ago";
++  } else if (g_w10m_fruitless >= 3) {
++    w10m_refused = "the GPU's decoder has failed three times in a row "
++                   "without a frame";
++  }
++  if (w10m_refused) {
++    LOG(WARNING) << "video: " << GetProfileName(config.profile()) << " "
++                 << config.coded_size().ToString()
++                 << " is decoded in software: " << w10m_refused;
++    return NotifyError({D3D11StatusCode::kDecoderCreationFailed, w10m_refused},
++                       DecoderStatus::Codes::kTooManyDecoders);
++  }
++  // A video that comes the moment another's decoder was dropped waits until
++  // the driver has had --vw-video-settle-ms (1000; 0 is no wait) to let go
++  // of that one: gecko-w10m's measure, and by its own account a guess. The
++  // GPU thread is not held: this is asked again later.
++  if (g_w10m_owner != this && !g_w10m_released.is_null()) {
++    const base::TimeDelta wait =
++        base::Milliseconds(W10mSwitchInt("vw-video-settle-ms", 1000)) -
++        (base::TimeTicks::Now() - g_w10m_released);
++    if (wait.is_positive()) {
++      LOG(WARNING) << "video: the GPU's last decoder went a moment ago; "
++                      "this video's is asked for in "
++                   << wait.InMilliseconds() << " ms";
++      base::SequencedTaskRunner::GetCurrentDefault()->PostDelayedTask(
++          FROM_HERE,
++          base::BindOnce(
++              [](base::WeakPtr<D3D11VideoDecoder> self,
++                 const VideoDecoderConfig& config, bool low_delay,
++                 InitCB init_cb, const OutputCB& output_cb) {
++                if (self) {
++                  self->Initialize(config, low_delay, nullptr,
++                                   std::move(init_cb), output_cb,
++                                   base::DoNothing());
++                }
++              },
++              weak_factory_.GetWeakPtr(), config, low_delay,
++              std::move(init_cb_), output_cb),
++          wait);
++      return;
++    }
++  }
++#endif
++
+   // Initialize the video decoder.
+ 
+   // Note that we assume that this is the ANGLE device, since we don't implement
+@@ -536,7 +901,15 @@ void D3D11VideoDecoder::Decode(scoped_refptr<DecoderBuffer> buffer,
+ 
+   if (state_ == State::kError) {
+     // TODO(liberato): consider posting, though it likely doesn't matter.
++#if defined(VENETIUM_W10M)
++    // The failure itself may have reached nobody: it came with no decode
++    // waiting (GL given up under a paused video), or the stream dropped it
++    // because a seek was under way (DecoderStream::OnDecodeDone). Said again
++    // with the code VideoRendererImpl starts the player again for.
++    std::move(decode_cb).Run(DecoderStatus::Codes::kPlatformDecodeFailure);
++#else
+     std::move(decode_cb).Run(DecoderStatus::Codes::kInterrupted);
++#endif
+     return;
+   }
+ 
+@@ -570,6 +943,15 @@ void D3D11VideoDecoder::DoDecode() {
+     return;
+   }
+ 
++#if defined(VENETIUM_W10M)
++  if (gl::W10mGpuIsGivenUp()) {
++    // See ResetD3DVideoDecoder(): nobody can draw what this would decode.
++    return NotifyError(
++        {D3D11StatusCode::kDecoderFailedDecode, "GL has been given up"},
++        DecoderStatus::Codes::kPlatformDecodeFailure);
++  }
++#endif
++
+   // Periodically measure picture buffer usage.  We could do this on every free,
+   // but it's not that important that we should run it so often.
+   if (picture_buffers_.size() > 0) {
+@@ -675,7 +1057,13 @@ void D3D11VideoDecoder::DoDecode() {
+           accelerated_video_decoder_->GetChromaSampling();
+       const auto new_color_space =
+           accelerated_video_decoder_->GetVideoColorSpace();
+-      if (new_profile == config_.profile() &&
++      if (
++#if defined(VENETIUM_W10M)
++          // No decoder of the driver's yet: it is made below, not in
++          // Initialize() (see ResetD3DVideoDecoder()).
++          d3d_video_decoder_wrapper_ &&
++#endif
++          new_profile == config_.profile() &&
+           new_coded_size == config_.coded_size() &&
+           new_bit_depth == bit_depth_ && !picture_buffers_.size() &&
+           new_chroma_sampling == chroma_sampling_ &&
+@@ -916,6 +1304,13 @@ bool D3D11VideoDecoder::OutputResult(const CodecPicture* picture,
+   gfx::Size natural_size = config_.aspect_ratio().GetNaturalSize(visible_rect);
+   base::TimeDelta timestamp = picture_buffer->timestamp_;
+ 
++#if defined(VENETIUM_W10M)
++  static const int w10m_sync_ms = W10mSwitchInt("vw-video-sync-ms", 0);
++  if (w10m_sync_ms > 0) {
++    W10mWaitForGpu(device_.Get(), device_context_.Get(), w10m_sync_ms);
++  }
++#endif
++
+   scoped_refptr<gpu::ClientSharedImage> shared_image;
+   result = picture_buffer->ProcessTexture(shared_image);
+   if (!result.is_ok()) {
+@@ -984,6 +1379,19 @@ bool D3D11VideoDecoder::OutputResult(const CodecPicture* picture,
+         output_si_format == viz::MultiPlaneFormat::kNV12) &&
+       use_shared_handle_;
+ 
++#if defined(VENETIUM_W10M)
++  if (++g_w10m_frames == 1) {
++    g_w10m_first_frame = base::TimeTicks::Now();
++    g_w10m_fruitless = 0;
++    LOG(WARNING) << "video: the GPU's decoder gave its first frame, "
++                 << visible_rect.size().ToString() << " of "
++                 << picture_buffer->size().ToString();
++  } else if (g_w10m_watched && g_w10m_frames >= 60 &&
++             base::TimeTicks::Now() - g_w10m_first_frame >= base::Seconds(3)) {
++    W10mTell(gl::W10mVideoEvent::kWorked);
++  }
++#endif
++
+   output_cb_.Run(frame);
+   return true;
+ }
+@@ -1000,6 +1408,36 @@ void D3D11VideoDecoder::NotifyError(D3D11Status reason,
+     MEDIA_LOG(ERROR, media_log_) << "D3D11VideoDecoder: " << reason.message();
+   }
+ 
++#if defined(VENETIUM_W10M)
++  // MediaLog goes to the page; this, to the embedder's log, with the HRESULT
++  // and the place that the status carries. (A video refused the GPU's
++  // decoder has had its line in Initialize().)
++  if (opt_decoder_code != DecoderStatus::Codes::kTooManyDecoders) {
++    LOG(WARNING) << "video: the GPU's decoder failed "
++                 << (state_ != State::kRunning
++                         ? "to start"
++                         : g_w10m_owner == this && g_w10m_frames
++                               ? "while decoding"
++                               : "before its first frame")
++                 << ": "
++                 << base::WriteJson(
++                        internal::MediaSerializerDebug<D3D11Status>::Serialize(
++                            reason))
++                        .value_or(std::string());
++    if (g_w10m_owner != this || !g_w10m_frames) {
++      ++g_w10m_fruitless;
++    }
++  }
++  if (state_ == State::kRunning) {
++    g_w10m_failed = base::TimeTicks::Now();
++    // The code VideoRendererImpl takes for a failure of the decoder and not
++    // of the stream: it has the player start again.
++    if (opt_decoder_code == DecoderStatus::Codes::kFailed) {
++      opt_decoder_code = DecoderStatus::Codes::kPlatformDecodeFailure;
++    }
++  }
++#endif
++
+   PostDecoderStatus(
+       DecoderStatus(opt_decoder_code).AddCause(std::move(reason)));
+ }
+@@ -1024,6 +1462,27 @@ void D3D11VideoDecoder::PostDecoderStatus(DecoderStatus status) {
+ 
+   // Also clear |input_buffer_queue_| since the callbacks have been consumed.
+   input_buffer_queue_.clear();
++
++#if defined(VENETIUM_W10M)
++  // A decoder that has failed is of no more use, and may stay where it is
++  // for as long as the page keeps its player: the GPU's decoder is let go
++  // of, for the next video. Not from here -- this may be the accelerated
++  // decoder calling, with the driver's decoder in its hands.
++  base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
++      FROM_HERE, base::BindOnce(
++                     [](base::WeakPtr<D3D11VideoDecoder> self) {
++                       if (!self || self->state_ != State::kError) {
++                         return;
++                       }
++                       if (self->d3d_video_decoder_wrapper_) {
++                         self->d3d_video_decoder_wrapper_.reset();
++                         self->device_context_->Flush();
++                         g_w10m_released = base::TimeTicks::Now();
++                       }
++                       W10mSessionGone(self.get());
++                     },
++                     weak_factory_.GetWeakPtr()));
++#endif
+ }
+ 
+ void D3D11VideoDecoder::MeasurePictureBufferUsage() {
+@@ -1159,8 +1618,27 @@ D3D11VideoDecoder::GetSupportedVideoDecoderConfigs(
+       return {};
+     }
+ 
++#if defined(VENETIUM_W10M)
++    // The first time in a run that the driver is asked about video decoding
++    // (the caller keeps the answer): the embedder is told before, and after
++    // if the process is still here.
++    const bool w10m_watched = g_w10m_watched;
++    W10mTell(gl::W10mVideoEvent::kStarting);
++    const bool w10m_usable = W10mH264Usable(d3d11_device);
++    if (w10m_usable) {
++      supported_resolutions = GetSupportedD3D11VideoDecoderResolutions(
++          d3d11_device, gpu_workarounds);
++    }
++    if (!w10m_watched) {
++      W10mTell(gl::W10mVideoEvent::kEnded);
++    }
++    if (!w10m_usable) {
++      return {};
++    }
++#else
+     supported_resolutions =
+         GetSupportedD3D11VideoDecoderResolutions(d3d11_device, gpu_workarounds);
++#endif
+   }
+ 
+   std::vector<SupportedVideoDecoderConfig> configs;
+@@ -1183,6 +1661,17 @@ D3D11VideoDecoder::GetSupportedVideoDecoderConfigs(
+     }
+   }
+ 
++#if defined(VENETIUM_W10M)
++  // Once a run. Baseline and Main are given the same sizes.
++  for (const auto& config : configs) {
++    if (config.profile_min == H264PROFILE_HIGH) {
++      LOG(WARNING) << "video: H.264 from " << config.coded_size_min.ToString()
++                   << " to " << config.coded_size_max.ToString()
++                   << " is given to the GPU's decoder";
++    }
++  }
++#endif
++
+   return configs;
+ }
+ 
+diff --git a/media/gpu/windows/d3d11_video_decoder_wrapper.cc b/media/gpu/windows/d3d11_video_decoder_wrapper.cc
+index 76f0eb2edcb9e280423646cf44959376a605d8aa..7b91082fce953cc749d310345893aab35bf9e8f9 100644
+--- a/media/gpu/windows/d3d11_video_decoder_wrapper.cc
++++ b/media/gpu/windows/d3d11_video_decoder_wrapper.cc
+@@ -8,6 +8,12 @@
+ 
+ #include "base/check_op.h"
+ #include "base/compiler_specific.h"
++#if defined(VENETIUM_W10M)
++#include <tuple>
++
++#include "base/threading/platform_thread.h"
++#include "base/time/time.h"
++#endif
+ #include "media/gpu/windows/d3d11_picture_buffer.h"
+ #include "third_party/abseil-cpp/absl/container/inlined_vector.h"
+ 
+@@ -83,7 +89,15 @@ class D3D11VideoDecoderWrapperImpl : public D3D11VideoDecoderWrapper {
+ 
+   void Reset() override {
+     if (bitstream_buffer_) {
++#if defined(VENETIUM_W10M)
++      // A buffer the driver did not give (the decode failed there, and a
++      // seek came before the player heard of it), or will not take back
++      // because the device is gone, is dropped: this process is the whole
++      // browser.
++      std::ignore = bitstream_buffer_->Commit();
++#else
+       CHECK(bitstream_buffer_->Commit());
++#endif
+       bitstream_buffer_.reset();
+     }
+   }
+@@ -101,10 +115,20 @@ class D3D11VideoDecoderWrapperImpl : public D3D11VideoDecoderWrapper {
+     }
+     ID3D11VideoDecoderOutputView* output_view = std::move(result).value();
+     HRESULT hr;
++#if defined(VENETIUM_W10M)
++    // This is the one GPU thread, the compositor's too: a driver that stays
++    // busy fails the decode after two seconds, it does not stop the browser.
++    const base::TimeTicks give_up = base::TimeTicks::Now() + base::Seconds(2);
++#endif
+     do {
+       hr = video_context_->DecoderBeginFrame(video_decoder_.Get(), output_view,
+                                              0, nullptr);
+       if (hr == E_PENDING || hr == D3DERR_WASSTILLDRAWING) {
++#if defined(VENETIUM_W10M)
++        if (base::TimeTicks::Now() >= give_up) {
++          break;
++        }
++#endif
+         // Hardware is busy.  We should make the call again.
+         base::PlatformThread::YieldCurrentThread();
+       }
+@@ -396,7 +420,20 @@ std::unique_ptr<D3D11VideoDecoderWrapper> D3D11VideoDecoderWrapper::Create(
+   if (supported_d3d11_version >= D3D_FEATURE_LEVEL_11_1) {
+     ComD3D11VideoContext1 video_context1;
+     hr = video_context.As(&video_context1);
++#if defined(VENETIUM_W10M)
++    // Not fatal: this process is the whole browser. A context without the
++    // newer interface is driven through the older one, as at 11_0. (Not
++    // reached while limit_d3d11_video_decoder_to_11_0 is in force, which
++    // Chromium's own list sets for Qualcomm and the embedder sets again.)
++    if (FAILED(hr)) {
++      return std::make_unique<D3D11VideoDecoderWrapperImpl<
++          ID3D11VideoContext, D3D11_VIDEO_DECODER_BUFFER_DESC>>(
++          media_log, std::move(video_device), std::move(video_context),
++          std::move(video_decoder));
++    }
++#else
+     CHECK_EQ(hr, S_OK);
++#endif
+     return std::make_unique<D3D11VideoDecoderWrapperImpl<
+         ID3D11VideoContext1, D3D11_VIDEO_DECODER_BUFFER_DESC1>>(
+         media_log, std::move(video_device), std::move(video_context1),
+diff --git a/media/gpu/windows/d3d11_video_processor_proxy.cc b/media/gpu/windows/d3d11_video_processor_proxy.cc
+index f529e2a2bd3fc6571a6133e3c4e28750f5fc0c2c..b9f9b0b0a65114580d8700668d8a95c1553bf07a 100644
+--- a/media/gpu/windows/d3d11_video_processor_proxy.cc
++++ b/media/gpu/windows/d3d11_video_processor_proxy.cc
+@@ -66,6 +66,19 @@ VideoProcessorProxy::VideoProcessorProxy(
+     : video_device_(video_device), device_context_(d3d11_device_context) {}
+ 
+ D3D11Status VideoProcessorProxy::Init(uint32_t width, uint32_t height) {
++#if defined(VENETIUM_W10M)
++  // One processor serves all of a decoder's pictures, and this is called for
++  // each of them (d3d11_copying_texture_wrapper.cc): upstream drops the
++  // processor and makes it again every time, a dozen and more in a row when
++  // a video starts. The one there is kept if it is of this size.
++  if (processor_enumerator_ && video_processor_ && video_context_) {
++    D3D11_VIDEO_PROCESSOR_CONTENT_DESC had = {};
++    if (SUCCEEDED(processor_enumerator_->GetVideoProcessorContentDesc(&had)) &&
++        had.InputWidth == width && had.InputHeight == height) {
++      return D3D11Status::Codes::kOk;
++    }
++  }
++#endif
+   processor_enumerator_.Reset();
+   video_processor_.Reset();
+ 
+diff --git a/media/gpu/windows/supported_profile_helpers.cc b/media/gpu/windows/supported_profile_helpers.cc
+index c51ff53b178596030fc4f660eef91accba43e604..04fbbf10cdab94ffe21d4cc1c26486c4aa31476d 100644
+--- a/media/gpu/windows/supported_profile_helpers.cc
++++ b/media/gpu/windows/supported_profile_helpers.cc
+@@ -226,6 +226,14 @@ std::optional<SupportedResolutionRange> GetResolutionsForGUID(
+ 
+   std::optional<gfx::Size> max_landscape_resolution;
+   for (const auto& res : kModernResolutions) {
++#if defined(VENETIUM_W10M)
++    // The driver is not asked about more than 3840x2160: gecko-w10m asked
++    // the Adreno 530's that much and no more, and a phone has neither the
++    // screen nor the memory for more.
++    if (res.width() > 3840 || res.height() > 2160) {
++      break;
++    }
++#endif
+     if (!video_device_wrapper->IsResolutionSupported(decoder_guid, res,
+                                                      format)) {
+       break;
+diff --git a/media/renderers/video_renderer_impl.cc b/media/renderers/video_renderer_impl.cc
+index b2fe3d73471d0f192ef898f5e1bd0628675e516d..fa971e92adb1cd44cd73d78329a54d814e317631 100644
+--- a/media/renderers/video_renderer_impl.cc
++++ b/media/renderers/video_renderer_impl.cc
+@@ -604,6 +604,21 @@ void VideoRendererImpl::FrameReady(VideoDecoderStream::ReadResult result) {
+         case DecoderStatus::Codes::kOutOfMemory:
+           status = {PIPELINE_ERROR_OUT_OF_MEMORY, std::move(result).error()};
+           break;
++#if defined(VENETIUM_W10M)
++        // The GPU's decoder failed after frames had come out of it, or GL
++        // was given up under it (media/gpu/windows/d3d11_video_decoder.cc
++        // says both with this code): not the stream's fault. As for a
++        // hardware context reset, the player starts its pipeline again
++        // where it is (WebMediaPlayerImpl::OnError), and the GPU side gives
++        // that video the software decoder. A second failure soon after the
++        // first is an error, as there. Upstream has no such way back:
++        // there the GPU process is started again and the page reloads its
++        // player.
++        case DecoderStatus::Codes::kPlatformDecodeFailure:
++          status = {PIPELINE_ERROR_HARDWARE_CONTEXT_RESET,
++                    std::move(result).error()};
++          break;
++#endif
+         default:
+           status = {PIPELINE_ERROR_DECODE, std::move(result).error()};
+           break;
+diff --git a/ui/gl/w10m_panel.h b/ui/gl/w10m_panel.h
+index a4c2d72bc0ad608dfcf635cfe4229b5abadd85f7..8f87fecea6d6c1d9053138dad061cab77b900b27 100644
+--- a/ui/gl/w10m_panel.h
++++ b/ui/gl/w10m_panel.h
+@@ -61,12 +61,49 @@ inline void SetW10mGpuGivenUpHandler(W10mGpuGivenUpHandler handler) {
+   g_w10m_gpu_given_up_handler.store(handler);
+ }
+ 
++// Set by W10mGpuGivenUp() and never cleared, for whoever on the GPU side has
++// to stop when GL goes: the hardware video decoder
++// (media/gpu/windows/d3d11_video_decoder.cc), whose frames are textures that
++// software compositing cannot draw.
++inline std::atomic<bool> g_w10m_gpu_given_up{false};
++
++inline bool W10mGpuIsGivenUp() {
++  return g_w10m_gpu_given_up.load();
++}
++
+ inline void W10mGpuGivenUp(const char* reason, bool for_good) {
++  g_w10m_gpu_given_up.store(true);
+   if (W10mGpuGivenUpHandler handler = g_w10m_gpu_given_up_handler.load()) {
+     handler(reason, for_good);
+   }
+ }
+ 
++// Hardware video decoding (d3d11_video_decoder.cc), told to the embedder so
++// that it can remember between runs a driver that ends the process -- which
++// here is the whole browser. On the GPU thread, in this order:
++//   kStarting  the driver is about to be asked about video decoding, or for
++//              a decoder (told before the first such call); then
++//   kWorked    a decoder has given frames for a few seconds; or
++//   kEnded     what kStarting announced is over -- the answers are in, the
++//              video has gone, the decoder failed and the page's player went
++//              on without it -- and the process is still here.
++// The handler is set before the GPU thread starts.
++enum class W10mVideoEvent { kStarting, kWorked, kEnded };
++
++using W10mVideoHandler = void (*)(W10mVideoEvent event);
++
++inline std::atomic<W10mVideoHandler> g_w10m_video_handler{nullptr};
++
++inline void SetW10mVideoHandler(W10mVideoHandler handler) {
++  g_w10m_video_handler.store(handler);
++}
++
++inline void W10mVideo(W10mVideoEvent event) {
++  if (W10mVideoHandler handler = g_w10m_video_handler.load()) {
++    handler(event);
++  }
++}
++
+ }  // namespace gl
+ 
+ #endif  // UI_GL_W10M_PANEL_H_

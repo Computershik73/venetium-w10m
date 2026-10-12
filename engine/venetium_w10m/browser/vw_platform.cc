@@ -354,6 +354,10 @@ void VwPlatform::OnVSync(base::TimeTicks timebase, base::TimeDelta interval) {
 }
 
 void VwPlatform::SetActive(bool active) {
+  // Suspended with a video only just started on the GPU's decoder: the run
+  // did not die of that, and the phone may end a suspended app without
+  // another word. Resumed with it still there: it counts again.
+  PresentGuard::Get()->VideoSuspended(!active);
   if (!active && !VwEngine::Get()->gpu_compositing_failed()) {
     // Suspended by the user with GPU compositing on screen: the run did not
     // die of it, however short it was.

@@ -46,6 +46,10 @@ struct EngineConfig {
   // The compositor itself runs on the GPU (ANGLE on Direct3D 11) and
   // presents into the panel; the two above are what it falls back to.
   bool gpu_compositing = false;
+  // H.264 goes to the GPU's own decoder (Chromium's D3D11VideoDecoder, on
+  // ANGLE's device); only with gpu_compositing, whose compositor takes the
+  // decoded frames as textures.
+  bool hardware_video = false;
   // A file that exists while a hardware run has not shown a frame yet.
   base::FilePath present_guard;
 };

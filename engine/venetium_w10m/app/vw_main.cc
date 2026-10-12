@@ -33,6 +33,7 @@
 #include "sandbox/win/src/sandbox_types.h"
 #include "third_party/blink/public/common/switches.h"
 #include "ui/gl/gl_switches.h"
+#include "ui/gl/w10m_panel.h"
 #include "venetium_w10m/app/vw_main_delegate.h"
 #include "venetium_w10m/browser/vw_engine.h"
 #include "venetium_w10m/browser/vw_panel.h"
@@ -99,6 +100,32 @@ unsigned ProbeD3D11() {
   return static_cast<unsigned>(level);
 }
 
+// Chromium's hardware video decoder saying where it is (ui/gl/w10m_panel.h),
+// on the GPU thread: a run that ends between kStarting and what follows it
+// is counted against hardware video decoding (vw_present_guard.h).
+void VideoDecoding(gl::W10mVideoEvent event) {
+  switch (event) {
+    case gl::W10mVideoEvent::kStarting:
+      // And from here it is not also counted against GPU compositing, which
+      // has drawn the page this video is on: a launch that opens a video at
+      // once (within the five seconds GPU compositing is given to prove
+      // itself) would otherwise charge a driver that only cannot decode
+      // to both, and two such launches would leave both alone. Nothing
+      // unless GPU compositing has shown a frame.
+      if (!VwEngine::Get()->gpu_compositing_failed()) {
+        PresentGuard::Get()->Proven(PresentKind::kAngle);
+      }
+      PresentGuard::Get()->VideoTrying();
+      break;
+    case gl::W10mVideoEvent::kWorked:
+      PresentGuard::Get()->VideoWorked();
+      break;
+    case gl::W10mVideoEvent::kEnded:
+      PresentGuard::Get()->VideoEnded();
+      break;
+  }
+}
+
 bool HasSwitch(const std::string& switches, const char* name) {
   return switches.find(name) != std::string::npos;
 }
@@ -127,8 +154,11 @@ void ChoosePresentation(EngineConfig* config, uint64_t ram_mb) {
   for (const std::string& token :
        base::SplitString(config->switches, " ", base::TRIM_WHITESPACE,
                          base::SPLIT_WANT_NONEMPTY)) {
+    // Nor is the one that keeps video decoding on the CPU: switching that
+    // off must not have a way of presenting tried again.
     if (token != "--vw-gpu=retry" && token != "--vw-present=bitmap" &&
-        token != "--vw-codecs=all" && token != "--vw-discard=off") {
+        token != "--vw-codecs=all" && token != "--vw-discard=off" &&
+        token != "--vw-video=software") {
       made_of += ' ';
       made_of += token;
     }
@@ -160,6 +190,31 @@ void ChoosePresentation(EngineConfig* config, uint64_t ram_mb) {
           "(count %d; a new build, other engine switches, or Hardware "
           "graphics off and on, tries again)",
           guard->Failures(PresentKind::kAngle));
+  }
+  // H.264 on the GPU's own decoder (Chromium's D3D11VideoDecoder), where the
+  // compositor is on the GPU too: the decoder works on ANGLE's device and
+  // hands its frames on as textures, which a software compositor cannot
+  // take. Counted like a way of presenting, but from when a page first plays
+  // a video, not from here (vw_present_guard.h); what the driver says of
+  // H.264 is in the log from then.
+  if (!config->gpu_compositing) {
+    Note("video: decoded in software (the GPU's decoder needs GPU "
+         "compositing to draw its frames)");
+  } else if (HasSwitch(config->switches, "--vw-video=software") ||
+             HasSwitch(config->switches,
+                       "--disable-accelerated-video-decode")) {
+    Note("video: decoded in software (the engine switches ask for it)");
+  } else if (!guard->VideoAllowed()) {
+    NoteF("video: decoded in software: %d runs ended while the GPU's decoder "
+          "was first at work (a new build, other engine switches, or "
+          "Hardware graphics off and on, tries again)",
+          guard->VideoFailures());
+  } else {
+    config->hardware_video = true;
+    gl::SetW10mVideoHandler(&VideoDecoding);
+    Note("video: H.264 goes to the GPU's decoder when a page plays one "
+         "(--vw-video=software among the engine switches keeps it on the "
+         "CPU)");
   }
   // GPU compositing falls back to presenting through Direct3D 11 within the
   // run, so a run counts against the one it starts with.
@@ -211,14 +266,38 @@ void SetUpCommandLine(const EngineConfig& config) {
   if (config.gpu_compositing) {
     // The compositor on the GPU: SkiaRenderer on ANGLE's Direct3D 11,
     // presenting into the shell's panel. Raster stays on the CPU for now,
-    // and video decode, video encode and 2D canvas off the GPU: one thing at
-    // a time. (Video encode left on has the GPU thread enumerate and
-    // activate the phone's hardware encoder transforms for the first page
-    // with a media element, only to list their profiles.)
+    // and video encode and 2D canvas off the GPU: one thing at a time.
+    // (Video encode left on has the GPU thread enumerate and activate the
+    // phone's hardware encoder transforms for the first page with a media
+    // element, only to list their profiles.)
     command_line->AppendSwitchASCII(switches::kUseGL, "angle");
     command_line->AppendSwitchASCII(switches::kUseANGLE, "d3d11");
     command_line->AppendSwitch(switches::kDisableGpuRasterization);
-    command_line->AppendSwitch(switches::kDisableAcceleratedVideoDecode);
+    if (config.hardware_video) {
+      // H.264 on the GPU's decoder, and nothing else of video there. These
+      // are Chromium's own driver workarounds, taken as switches
+      // (gpu/config/gpu_workaround_list.txt); "=0" after one among the
+      // engine switches takes it back.
+      //  - ID3D11VideoContext, not ID3D11VideoContext1: Chromium's entry for
+      //    Qualcomm (SubmitDecoderBuffers1 fails on its chipsets), said
+      //    again in case the vendor id is not matched.
+      //  - Frames are copied out of the decoder's textures by the video
+      //    processor, and the compositor samples the copies: gecko-w10m's
+      //    way at feature level 9_3 (at 11 it copies with the 3D engine).
+      //    The decoder's textures are then made for decoding only. Sampled
+      //    where they are decoded ("=0") there is no copy to make or to
+      //    keep, and nothing known about it: gecko-w10m never samples a
+      //    decoder's texture on an Adreno.
+      //  - No VP9, AV1 or HEVC on the GPU: pages are not offered them, and
+      //    one thing at a time.
+      command_line->AppendSwitch("limit_d3d11_video_decoder_to_11_0");
+      command_line->AppendSwitch("disable_dxgi_zero_copy_video");
+      command_line->AppendSwitch("disable_accelerated_vp9_decode");
+      command_line->AppendSwitch("disable_accelerated_av1_decode");
+      command_line->AppendSwitch("disable_accelerated_hevc_decode");
+    } else {
+      command_line->AppendSwitch(switches::kDisableAcceleratedVideoDecode);
+    }
     command_line->AppendSwitch(switches::kDisableAcceleratedVideoEncode);
     command_line->AppendSwitch(switches::kDisableAccelerated2dCanvas);
   } else {
@@ -295,6 +374,16 @@ void SetUpCommandLine(const EngineConfig& config) {
     // app container without the codeGeneration capability allows.
     command_line->AppendSwitchASCII(blink::switches::kJavaScriptFlags,
                                     "--jitless");
+  }
+  if (config.hardware_video) {
+    // With video on the GPU's decoder, a call's stays on the CPU (the
+    // feature's name is spelt this way): the driver has one decoder to give,
+    // and a call would take it from a video or be refused it. Added to the
+    // features turned off above; a switch given twice keeps its last value.
+    command_line->AppendSwitchASCII(
+        switches::kDisableFeatures,
+        command_line->GetSwitchValueASCII(switches::kDisableFeatures) +
+            ",webrtc-hw-decoding");
   }
 
   // The shell's extras, "--name[=value]" separated by spaces.

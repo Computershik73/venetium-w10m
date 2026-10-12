@@ -427,10 +427,13 @@ std::unique_ptr<viz::SoftwareOutputDevice> MakeDevice(gpu::SurfaceHandle) {
   // In a run that set out to composite on the GPU, viz asks for a software
   // surface only once the browser has turned GPU compositing off, whatever
   // told it to. Whoever knew why has said so already; this is the net under
-  // them, and it is here before these frames can count as a success.
+  // them, and it is here before these frames can count as a success. Said
+  // through Chromium's own call (it comes back to GpuGivenUp above), which
+  // its hardware video decoder goes by too: its frames are textures, and
+  // nobody is left to draw them.
   if (VwEngine::Get()->config().gpu_compositing) {
-    VwEngine::Get()->GpuCompositingFailed(
-        "the browser turned GPU compositing off", /*for_good=*/false);
+    gl::W10mGpuGivenUp("the browser turned GPU compositing off",
+                       /*for_good=*/false);
   }
   return std::make_unique<VwSoftwareOutputDevice>();
 }

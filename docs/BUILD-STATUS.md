@@ -24,6 +24,7 @@ The device the port is brought up on: HP Elite x3 class, Windows 10 Mobile
 | Video codecs: pages and calls are told H.264 and VP8 only (VP9, AV1 and HEVC refused: canPlayType, MediaSource, MediaCapabilities, WebCodecs, WebRTC), so a site that asks sends H.264; a file whose only picture is VP9 or AV1 does not play | built (222.20), untested |
 | Memory pressure, arranged as gecko-w10m has it: the shell measures the address space (largest free piece, all that is free) and the app's memory against the phone's limit every 2 s; one arbiter in the engine (`browser/vw_memory`) trims at level 1, unloads background tabs least recently seen first at level 2 (all of them at 3) and collects the JavaScript heaps in full; an unloaded tab keeps its place, title and history and loads again when selected | built (222.21), untested. gecko-w10m itself does not unload tabs: that half is new |
 | Before an allocation fails for good: PartitionAlloc's 96 MB reserve as a canary, V8's near-heap-limit callback (the limit is raised only while there is a tab to unload), Chromium's own RAM-based pressure watcher put to sleep, discardable memory capped at 64 MB | built (222.21), untested |
+| H.264 on the GPU's decoder (Chromium's `D3D11VideoDecoder` on ANGLE's device, so only with GPU compositing, feature level 11): one video at a time has it and the others decode in software; the driver is asked whether it takes short slices before any H.264 is offered; frames are copied out by the video processor (gecko-w10m's way at 9_3) and drawn by GL; failures before a frame fall back to ffmpeg, later ones restart the player in software; runs that end while a decoder is unproven are counted in `present-guard-video` | built (222.22), untested. gecko-w10m drives the same driver through Media Foundation's decoder, not through DXVA calls of its own: whether the Adreno driver takes Chromium's is what the first run says |
 | Feature level 9_3 phones: frames through Direct3D 11 (the row above); a Direct3D 11 compositor of our own for them | the first is built and is what such a phone gets today; the second is designed, not written |
 
 What the log says about graphics, in order: `gpu: Direct3D 11 feature
@@ -41,7 +42,14 @@ Chromium's and the engine's own switches for the next start:
 `--vw-vsync=eager` (a frame made up at once when an animation starts),
 `--disable_post_sub_buffers_for_onscreen_surfaces` (whole-frame presents),
 `--vw-codecs=all` (VP9 and AV1 offered to pages and calls again),
-`--vw-discard=off` (background tabs stay loaded whatever is short).
+`--vw-discard=off` (background tabs stay loaded whatever is short),
+`--vw-video=software` (H.264 on the CPU), `--disable_dxgi_zero_copy_video=0`
+(the compositor samples the decoder's own textures: no copy, untried on an
+Adreno), `--vw-video-settle-ms=N` (the wait between two videos' decoders,
+1000), `--vw-video-sync-ms=N` (wait for the GPU after each decode, off).
+A video's lines in the log begin `video:`; a file played by `src=` under
+360 pixels of height tries the software decoder first by Chromium's own
+rule, so test with a 720p file or a site that streams.
 
 ## Toolchain and tree — built/checked
 

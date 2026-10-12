@@ -942,6 +942,7 @@ void MainPage::ShowEngineSwitches() {
               L"--vw-vsync=timer  (frames from a timer)\n"
               L"--vw-present-buffers=2\n"
               L"--vw-codecs=all  (VP9 and AV1 video offered again)\n"
+              L"--vw-video=software  (H.264 decoded on the CPU)\n"
               L"--vw-discard=off  (background tabs stay loaded when memory "
               L"is short)");
     note.FontSize(12);
