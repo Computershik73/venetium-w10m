@@ -92,11 +92,26 @@ bool Settings::HardwareGraphics() {
 }
 
 void Settings::SetHardwareGraphics(bool on) {
+  if (on && !HardwareGraphics()) WriteInt(L"graphics_retry", 1);
   WriteInt(L"hardware_graphics", on ? 1 : 0);
+}
+
+bool Settings::TakeGraphicsRetry() {
+  if (ReadInt(L"graphics_retry", 0) == 0) return false;
+  WriteInt(L"graphics_retry", 0);
+  return true;
 }
 
 std::wstring Settings::EngineSwitches() {
   return ReadString(L"engine_switches", L"");
+}
+
+void Settings::SetEngineSwitches(std::wstring const& switches) {
+  try {
+    Values().Insert(L"engine_switches",
+                    winrt::box_value(winrt::hstring(switches)));
+  } catch (...) {
+  }
 }
 
 }  // namespace venetium_w10m::client

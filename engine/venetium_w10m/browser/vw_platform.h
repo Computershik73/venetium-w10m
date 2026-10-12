@@ -38,6 +38,10 @@ class WindowParentingClient;
 }  // namespace client
 }  // namespace aura
 
+namespace viz {
+class FrameTimingDetails;
+}  // namespace viz
+
 namespace wm {
 class DefaultScreenPositionClient;
 }  // namespace wm
@@ -157,6 +161,12 @@ class VwPlatform {
   gfx::Vector2dF wheel_remainder_;
   // Event times never go backwards.
   base::TimeTicks last_event_time_;
+
+  // GPU compositing: hears of the next frame the compositor puts on screen,
+  // and asks again until one of ANGLE's has been counted.
+  void WatchCompositorFrame();
+  void OnCompositorFrame(const viz::FrameTimingDetails& details);
+  int compositor_frame_asks_ = 0;
 
   void OnVSync(base::TimeTicks timebase, base::TimeDelta interval);
   std::unique_ptr<VwVsync> vsync_;

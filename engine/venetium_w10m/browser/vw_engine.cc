@@ -9,6 +9,7 @@
 #include "base/functional/bind.h"
 #include "base/location.h"
 #include "venetium_w10m/browser/vw_browser.h"
+#include "venetium_w10m/browser/vw_present_guard.h"
 #include "venetium_w10m/common/vw_log.h"
 
 namespace venetium_w10m {
@@ -127,16 +128,23 @@ void VwEngine::EngineExited() {
   dropped.swap(pending_);
 }
 
-void VwEngine::HardwarePresentWorked() {
-  base::FilePath guard;
-  {
-    base::AutoLock hold(lock_);
-    guard = config_.present_guard;
+void VwEngine::HardwarePresentWorked(PresentKind kind) {
+  if (PresentGuard::Get()->Worked(kind)) {
+    NoteF("gpu: first frame on screen through %s",
+          kind == PresentKind::kAngle ? "GPU compositing (ANGLE)"
+                                      : "Direct3D 11");
   }
-  if (!guard.empty()) {
-    ::DeleteFileW(guard.value().c_str());
+}
+
+void VwEngine::GpuCompositingFailed(const char* reason, bool for_good) {
+  if (for_good) {
+    PresentGuard::Get()->GaveUp(PresentKind::kAngle);
   }
-  Note("d3d11: first frame presented; the crash guard is cleared");
+  if (gpu_failed_.exchange(true)) {
+    return;
+  }
+  NoteF("gpu: GPU compositing given up, software compositing from here: %s",
+        reason ? reason : "no reason given");
 }
 
 void VwEngine::SetSearchTemplate(std::string url_template) {

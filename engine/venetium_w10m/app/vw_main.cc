@@ -34,6 +34,7 @@
 #include "venetium_w10m/app/vw_main_delegate.h"
 #include "venetium_w10m/browser/vw_engine.h"
 #include "venetium_w10m/browser/vw_panel.h"
+#include "venetium_w10m/browser/vw_present_guard.h"
 #include "venetium_w10m/capi/venetium_w10m_capi.h"
 #include "venetium_w10m/common/vw_log.h"
 
@@ -106,12 +107,15 @@ bool HasSwitch(const std::string& switches, const char* name) {
 //   D3D11 present    the software compositor's frames, shown by the GPU
 //                    through the panel (any feature level from 9_3);
 //   the bitmap       frames copied out to the shell.
-// The shell can ask for less. And each run that dies before its first frame
-// steps the next one down a mode: a driver that cannot do one of these would
-// otherwise end every launch.
+// The shell can ask for less. And what a run died of before its first frame
+// is remembered (vw_present_guard.h): a driver that cannot do one of these
+// would otherwise end every launch.
 void ChoosePresentation(EngineConfig* config, uint64_t ram_mb) {
   const unsigned level = ProbeD3D11();
   config->present_guard = config->profile_dir.Append(L"present-guard");
+  PresentGuard* guard = PresentGuard::Get();
+  guard->Load(config->present_guard,
+              HasSwitch(config->switches, "--vw-gpu=retry"));
   if (HasSwitch(config->switches, "--vw-present=bitmap")) {
     Note("gpu: frames through the bitmap (the shell asked for it)");
     return;
@@ -120,40 +124,28 @@ void ChoosePresentation(EngineConfig* config, uint64_t ram_mb) {
     Note("gpu: frames through the bitmap (no Direct3D 11)");
     return;
   }
-  int deaths = 0;
-  const std::wstring guard = config->present_guard.value();
-  HANDLE file = ::CreateFileW(guard.c_str(), GENERIC_READ, FILE_SHARE_READ,
-                              nullptr, OPEN_EXISTING, 0, nullptr);
-  if (file != INVALID_HANDLE_VALUE) {
-    char count = 0;
-    DWORD got = 0;
-    if (::ReadFile(file, &count, 1, &got, nullptr) && got == 1) {
-      deaths = count - '0';
-    }
-    ::CloseHandle(file);
+  if (!guard->Allowed(PresentKind::kD3D11)) {
+    NoteF("gpu: frames through the bitmap: %d runs presenting through "
+          "Direct3D 11 ended before their first frame (a new build, or "
+          "Hardware graphics off and on, tries again)",
+          guard->Failures(PresentKind::kD3D11));
+    return;
   }
   const bool angle_capable =
       level >= 0xb000 && PanelHost::Get()->has_panel() &&
       !HasSwitch(config->switches, "--vw-gpu=off");
-  // The best mode has one try; the one below it has one more.
-  if (deaths >= 2) {
-    Note("gpu: frames through the bitmap: the last hardware runs ended "
-         "before their first frame (delete present-guard to try again)");
-    return;
+  config->gpu_compositing =
+      angle_capable && guard->Allowed(PresentKind::kAngle);
+  if (angle_capable && !config->gpu_compositing) {
+    NoteF("gpu: no GPU compositing: it did not get to a frame in earlier "
+          "runs (count %d; a new build, or Hardware graphics off and on, "
+          "tries again)",
+          guard->Failures(PresentKind::kAngle));
   }
-  config->gpu_compositing = angle_capable && deaths == 0;
-  if (angle_capable && deaths > 0) {
-    Note("gpu: no GPU compositing this run: the last one ended before its "
-         "first frame");
-  }
-  file = ::CreateFileW(guard.c_str(), GENERIC_WRITE, 0, nullptr,
-                       CREATE_ALWAYS, 0, nullptr);
-  if (file != INVALID_HANDLE_VALUE) {
-    const char count = static_cast<char>('0' + deaths + 1);
-    DWORD written = 0;
-    ::WriteFile(file, &count, 1, &written, nullptr);
-    ::CloseHandle(file);
-  }
+  // GPU compositing falls back to presenting through Direct3D 11 within the
+  // run, so a run counts against the one it starts with.
+  guard->Trying(config->gpu_compositing ? PresentKind::kAngle
+                                        : PresentKind::kD3D11);
   config->hardware_present = true;
   // A frame that takes a little more than a refresh costs two with two
   // buffers (gecko-w10m); a third is 14 MB at this size, which phones with
@@ -189,11 +181,15 @@ void SetUpCommandLine(const EngineConfig& config) {
   if (config.gpu_compositing) {
     // The compositor on the GPU: SkiaRenderer on ANGLE's Direct3D 11,
     // presenting into the shell's panel. Raster stays on the CPU for now,
-    // and video decode and 2D canvas off the GPU: one thing at a time.
+    // and video decode, video encode and 2D canvas off the GPU: one thing at
+    // a time. (Video encode left on has the GPU thread enumerate and
+    // activate the phone's hardware encoder transforms for the first page
+    // with a media element, only to list their profiles.)
     command_line->AppendSwitchASCII(switches::kUseGL, "angle");
     command_line->AppendSwitchASCII(switches::kUseANGLE, "d3d11");
     command_line->AppendSwitch(switches::kDisableGpuRasterization);
     command_line->AppendSwitch(switches::kDisableAcceleratedVideoDecode);
+    command_line->AppendSwitch(switches::kDisableAcceleratedVideoEncode);
     command_line->AppendSwitch(switches::kDisableAccelerated2dCanvas);
   } else {
     // Software raster and compositing; the frames go to the panel through
@@ -214,6 +210,15 @@ void SetUpCommandLine(const EngineConfig& config) {
   const uint64_t ram_mb = PhysicalMemoryMb();
   command_line->AppendSwitchASCII(blink::switches::kForceGpuMemAvailableMb,
                                   ram_mb && ram_mb <= 1536 ? "64" : "128");
+  // Chromium rasters 256-pixel tiles on Windows whatever the density: at
+  // 350% that is 54 tiles a screen, each a raster task, a shared image and
+  // a quad of its own. Chrome for Android goes to 384 and 512 on dense
+  // screens (blink's GenerateLayerTreeSettings); the same here, by scale.
+  if (config.scale >= 2.5) {
+    const char* tile = config.scale >= 3.0 ? "512" : "384";
+    command_line->AppendSwitchASCII(blink::switches::kDefaultTileWidth, tile);
+    command_line->AppendSwitchASCII(blink::switches::kDefaultTileHeight, tile);
+  }
   // RenderWidgetHostViewAura's child HWND for accessibility and legacy
   // input: no HWNDs here.
   command_line->AppendSwitch(switches::kDisableLegacyIntermediateWindow);
@@ -226,8 +231,12 @@ void SetUpCommandLine(const EngineConfig& config) {
   command_line->AppendSwitchASCII(switches::kTouchEventFeatureDetection,
                                   "enabled");
   // Pages kept alive for back/forward cost memory a phone does not have.
-  command_line->AppendSwitchASCII(switches::kDisableFeatures,
-                                  "BackForwardCache");
+  // And a GPU channel that could not be made is not answered by shutting
+  // "the GPU process" down and starting it again: in this one process that
+  // is a second GPU thread beside the first.
+  command_line->AppendSwitchASCII(
+      switches::kDisableFeatures,
+      "BackForwardCache,ShutdownForFailedChannelCreation");
   if (!config.jit) {
     // V8 without a JIT: no executable memory needed at all, which is all an
     // app container without the codeGeneration capability allows.

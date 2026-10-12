@@ -65,6 +65,8 @@ shared_library("venetium_engine") {
     "browser/vw_input_method.h",
     "browser/vw_panel.cc",
     "browser/vw_panel.h",
+    "browser/vw_present_guard.cc",
+    "browser/vw_present_guard.h",
     "browser/vw_permission_manager.cc",
     "browser/vw_permission_manager.h",
     "browser/vw_platform.cc",

@@ -1,0 +1,32 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Mon, 12 Oct 2026 10:58:04 +0400
+Subject: [PATCH] Windows 10 Mobile: which server a TLS handshake failed with
+
+The log is all there is to go by on a phone.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ net/socket/ssl_client_socket_impl.cc | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/net/socket/ssl_client_socket_impl.cc b/net/socket/ssl_client_socket_impl.cc
+index b3d4cb912fb446a1a568f5fb75a26858d4136dcc..9126032555e673123ef6e04fb3f874b7a859f079 100644
+--- a/net/socket/ssl_client_socket_impl.cc
++++ b/net/socket/ssl_client_socket_impl.cc
+@@ -960,8 +960,15 @@ int SSLClientSocketImpl::DoHandshake() {
+       return ERR_IO_PENDING;
+     }
+ 
++#if defined(VENETIUM_W10M)
++    // The log is all there is to go by on a phone: which server it was.
++    LOG(ERROR) << "handshake with " << host_and_port_.ToString()
++               << " failed; returned " << rv << ", SSL error code "
++               << ssl_error << ", net_error " << net_error;
++#else
+     LOG(ERROR) << "handshake failed; returned " << rv << ", SSL error code "
+                << ssl_error << ", net_error " << net_error;
++#endif
+     NetLogOpenSSLError(net_log_, NetLogEventType::SSL_HANDSHAKE_ERROR,
+                        net_error, ssl_error, error_info);
+   }

@@ -1,0 +1,173 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Mon, 12 Oct 2026 10:58:03 +0400
+Subject: [PATCH] ANGLE on Windows 10 Mobile: the default display, and what it
+ says in the log
+
+The first run of GPU compositing on a phone ended before a frame: ANGLE
+refused the native display. Chromium names the display by GetDC(NULL),
+which on the phone is not null, and the Windows 10 Mobile branch of
+Display::isValidNativeDisplay took nothing but the default display (there
+are no windows to tell a real device context by). Now the default display
+is what is passed, and whatever is passed is taken.
+
+None of that was in the log: a refused display sets no EGL error, and
+ANGLE's own messages go to stderr until a display has installed its
+annotator. A refused display is now said, ANGLE's errors and warnings reach
+Chromium's log from the first EGL call through a sink set when the library
+is loaded (ANGLEW10mSetLogSink), and a failed D3D11CreateDevice gives its
+HRESULT.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ third_party/angle/src/common/debug.cpp        | 29 +++++++++++++++++++
+ third_party/angle/src/libANGLE/Display.cpp    |  4 ++-
+ .../renderer/d3d/d3d11/Renderer11.cpp         |  5 ++++
+ ui/gl/gl_display.cc                           |  9 ++++++
+ ui/gl/init/gl_initializer_win.cc              | 28 +++++++++++++++++-
+ 5 files changed, 73 insertions(+), 2 deletions(-)
+
+diff --git a/third_party/angle/src/common/debug.cpp b/third_party/angle/src/common/debug.cpp
+index 2c7f18b509f77805f2a200c3077931a5347b8548..061ee46b97cf0af8074d4e2c4af13b10cfe76c54 100644
+--- a/third_party/angle/src/common/debug.cpp
++++ b/third_party/angle/src/common/debug.cpp
+@@ -40,6 +40,26 @@
+ #include "common/entry_points_enum_autogen.h"
+ #include "common/system_utils.h"
+ 
++#if defined(VENETIUM_W10M)
++#    include <atomic>
++
++namespace
++{
++// Windows 10 Mobile (Venetium): where ERR() and WARN() go while no display
++// has installed a debug annotator -- before the first eglInitialize, after
++// eglTerminate, and while a lost device is being made again. Otherwise that
++// is stderr, which an app does not have. The embedder sets it through
++// ANGLEW10mSetLogSink as soon as it has loaded this library.
++std::atomic<void (*)(int, const char *)> g_w10mLogSink{nullptr};
++}  // namespace
++
++extern "C" __declspec(dllexport) void ANGLEW10mSetLogSink(void (*sink)(int, const char *));
++extern "C" __declspec(dllexport) void ANGLEW10mSetLogSink(void (*sink)(int, const char *))
++{
++    g_w10mLogSink = sink;
++}
++#endif  // defined(VENETIUM_W10M)
++
+ namespace gl
+ {
+ 
+@@ -201,6 +221,15 @@ LogMessage::~LogMessage()
+         }
+         else
+         {
++#if defined(VENETIUM_W10M)
++            if (mSeverity > LOG_INFO)
++            {
++                if (auto sink = g_w10mLogSink.load())
++                {
++                    sink(mSeverity, getMessage().c_str());
++                }
++            }
++#endif
+             Trace(getSeverity(), getMessage().c_str());
+         }
+     }
+diff --git a/third_party/angle/src/libANGLE/Display.cpp b/third_party/angle/src/libANGLE/Display.cpp
+index a0b8fdc770a76ad368c7d3a765d36ad21eb843e8..d06be89d41f494e103c4d7a862c97cdfdd1afd5a 100644
+--- a/third_party/angle/src/libANGLE/Display.cpp
++++ b/third_party/angle/src/libANGLE/Display.cpp
+@@ -2411,7 +2411,9 @@ bool Display::isValidNativeDisplay(EGLNativeDisplayType display)
+         return true;
+     }
+ #    if defined(VENETIUM_W10M)
+-    return false;  // no device contexts on Windows 10 Mobile
++    // No windows on Windows 10 Mobile to tell a real device context by, and
++    // the display is not used for anything: whatever the caller has will do.
++    return true;
+ #    else
+     return (WindowFromDC(display) != nullptr);
+ #    endif
+diff --git a/third_party/angle/src/libANGLE/renderer/d3d/d3d11/Renderer11.cpp b/third_party/angle/src/libANGLE/renderer/d3d/d3d11/Renderer11.cpp
+index 0d874a48a982c911ba570ba527c1b88b9ff7f366..433a771f8f2ebdcdd6b4312c86bebceffd0a8630 100644
+--- a/third_party/angle/src/libANGLE/renderer/d3d/d3d11/Renderer11.cpp
++++ b/third_party/angle/src/libANGLE/renderer/d3d/d3d11/Renderer11.cpp
+@@ -1046,6 +1046,11 @@ egl::Error Renderer11::initializeD3DDevice()
+             {
+                 ANGLE_HISTOGRAM_SPARSE_SLOWLY("GPU.ANGLE.D3D11CreateDeviceError",
+                                               static_cast<int>(result));
++#if defined(VENETIUM_W10M)
++                // The histogram is all that would keep the reason.
++                ERR() << "D3D11CreateDevice failed, " << gl::FmtHR(result) << ", "
++                      << mAvailableFeatureLevels.size() << " feature levels asked for";
++#endif
+                 return egl::Error(EGL_NOT_INITIALIZED, D3D11_INIT_CREATEDEVICE_ERROR,
+                                   "Could not create D3D11 device.");
+             }
+diff --git a/ui/gl/gl_display.cc b/ui/gl/gl_display.cc
+index 06f8b6cab6e653d9b7d5c1e5434b641e0de5260e..72ddfb3bdc68e46ab5b03bbe65a6094da3b1f5a1 100644
+--- a/ui/gl/gl_display.cc
++++ b/ui/gl/gl_display.cc
+@@ -604,6 +604,15 @@ bool GLDisplayEGL::InitializeDisplay(bool supports_angle,
+         display_type, native_display, enabled_angle_features,
+         disabled_angle_features, system_device_id_, display_key_);
+     if (display == EGL_NO_DISPLAY) {
++#if defined(VENETIUM_W10M)
++      // There is one display type here and nothing to fall back to, and
++      // ANGLE refuses a native display without setting an error or saying
++      // anything: say it.
++      LOG(ERROR) << "eglGetPlatformDisplay " << DisplayTypeString(display_type)
++                 << " gave no display for native display "
++                 << static_cast<const void*>(native_display.GetDisplay())
++                 << ", EGL error " << GetLastEGLErrorString();
++#endif
+       // Assume this is not an error, so don't verbosely report it;
+       // simply try the next display type.
+       continue;
+diff --git a/ui/gl/init/gl_initializer_win.cc b/ui/gl/init/gl_initializer_win.cc
+index 9824b147746246117d558141603b4358423c175a..5e8668d8c4f660d22c45fe68cc1378994ed375dc 100644
+--- a/ui/gl/init/gl_initializer_win.cc
++++ b/ui/gl/init/gl_initializer_win.cc
+@@ -79,6 +79,24 @@ bool InitializeStaticEGLInternalFromLibrary() {
+     DVLOG(1) << "libglesv2.dll not found";
+     return false;
+   }
++#if defined(VENETIUM_W10M)
++  // What ANGLE says while it has no display to hang its platform on (until
++  // then its errors go to stderr, which an app does not have): into the log,
++  // before the first EGL call.
++  using AngleSetLogSink = void (*)(void (*)(int, const char*));
++  if (auto set_log_sink = reinterpret_cast<AngleSetLogSink>(
++          base::GetFunctionPointerFromNativeLibrary(gles_library,
++                                                    "ANGLEW10mSetLogSink"))) {
++    set_log_sink([](int severity, const char* message) {
++      // ANGLE's gl::LOG_WARN is 2, LOG_ERR 3, LOG_FATAL 4.
++      if (severity >= 3) {
++        LOG(ERROR) << "ANGLE: " << message;
++      } else {
++        LOG(WARNING) << "ANGLE: " << message;
++      }
++    });
++  }
++#endif
+ 
+   // When using EGL, first try eglGetProcAddress and then Windows
+   // GetProcAddress on both the EGL and GLES2 DLLs.
+@@ -151,7 +169,15 @@ GLDisplay* InitializeGLOneOffPlatform(gl::GpuPreference gpu_preference) {
+   GLDisplayEGL* display = GetDisplayEGL(gpu_preference);
+   switch (GetGLImplementation()) {
+     case kGLImplementationEGLANGLE: {
+-      if (!InitializeDisplay(display, EGLDisplayPlatform(GetDC(nullptr)))) {
++#if defined(VENETIUM_W10M)
++      // Windows 10 Mobile has no screen to take a device context of: the
++      // default display. (Its GetDC(nullptr) does return something, which
++      // ANGLE then cannot match to a window.)
++      const EGLDisplayPlatform native_display(EGL_DEFAULT_DISPLAY);
++#else
++      const EGLDisplayPlatform native_display(GetDC(nullptr));
++#endif
++      if (!InitializeDisplay(display, native_display)) {
+         LOG(ERROR) << "GLDisplayEGL::Initialize failed.";
+         return nullptr;
+       }

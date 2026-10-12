@@ -49,6 +49,14 @@ int64_t QpcFrequency() {
   return frequency;
 }
 
+// The performance counter's value at a PointerPoint::Timestamp()
+// (microseconds since boot). Split so that the product cannot overflow.
+int64_t QpcAt(uint64_t microseconds) {
+  const uint64_t f = static_cast<uint64_t>(QpcFrequency());
+  return static_cast<int64_t>(microseconds / 1000000 * f +
+                              microseconds % 1000000 * f / 1000000);
+}
+
 }  // namespace
 
 EngineView::EngineView(double rawPerView) : rawPerView_(rawPerView) {
@@ -131,6 +139,38 @@ EngineView::EngineView(double rawPerView) : rawPerView_(rawPerView) {
   });
 }
 
+// The engine is started knowing the room: a browser window made at a guessed
+// size is made again a moment later, swap chain and all. A layout that does
+// not come (the app started out of sight) does not hold the engine back for
+// long.
+void EngineView::WhenRoomKnown(std::function<void()> then) {
+  roomWidth_ = roomHeight_ = 0;  // told again: the engine may be new
+  PushSize();
+  if (roomWidth_ > 0) {
+    then();
+    return;
+  }
+  whenRoom_ = std::move(then);
+  roomTimer_ = DispatcherTimer();
+  roomTimer_.Interval(std::chrono::milliseconds(1500));
+  roomTimer_.Tick([this](auto&&, auto&&) {
+    Log::Write(L"view: no layout yet; the engine starts without the room");
+    RoomKnown();
+  });
+  roomTimer_.Start();
+}
+
+void EngineView::RoomKnown() {
+  if (roomTimer_) {
+    roomTimer_.Stop();
+    roomTimer_ = nullptr;
+  }
+  if (!whenRoom_) return;
+  auto then = std::move(whenRoom_);
+  whenRoom_ = nullptr;
+  then();
+}
+
 void EngineView::Start() {
   if (tick_) return;
   tick_ = CompositionTarget::Rendering(
@@ -172,6 +212,7 @@ void EngineView::PushSize() {
   Log::Write(L"view: room " + std::to_wstring(width) + L"x" +
              std::to_wstring(height) + L" px");
   if (Api().resize) Api().resize(width, height);
+  RoomKnown();
 }
 
 void EngineView::EnsureBitmap(int32_t width, int32_t height) {
@@ -330,10 +371,31 @@ void EngineView::OnPointer(PointerRoutedEventArgs const& args, int32_t state) {
   }
   // Straight to the engine, from inside the event, as gecko-w10m does: a
   // touch that waits for the dispatcher to be idle arrives late and in
-  // bursts, and a scroll made of bursts jerks. The time is the performance
-  // counter now; points the system coalesced into this one are sent first,
-  // each earlier by the gap between their own timestamps.
-  const int64_t now = Qpc();
+  // bursts, and a scroll made of bursts jerks. Points the system coalesced
+  // into this one are sent first, each earlier by the gap between their own
+  // timestamps.
+  int64_t now = Qpc();
+  {
+    // When the digitizer saw the finger, where its clock is the performance
+    // counter's: this handler runs some milliseconds later, and not the same
+    // few each time, which Chromium -- it resamples a scroll to the frame's
+    // time from these -- shows as judder. A timestamp that is not a recent
+    // moment on that clock is not used.
+    const int64_t seen = QpcAt(point.Timestamp());
+    const bool usable = seen <= now && now - seen < QpcFrequency() / 4;
+    static bool noted = false;
+    if (!noted) {
+      noted = true;
+      Log::Write(usable
+                     ? L"touch: times from the digitizer; the handler ran " +
+                           std::to_wstring((now - seen) * 1000 /
+                                           QpcFrequency()) +
+                           L" ms later"
+                     : L"touch: the digitizer's clock is not the performance "
+                       L"counter's; times taken in the handler");
+    }
+    if (usable) now = seen;
+  }
   if (state == 1) {
     // A digitizer reports a resting finger over and over; a page (a video
     // player reading touches itself) takes any touchmove for a drag. Three

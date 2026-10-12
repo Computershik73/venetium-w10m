@@ -1,0 +1,796 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Mon, 12 Oct 2026 10:58:04 +0400
+Subject: [PATCH] viz: BeginFrames from the display's vertical blank on Windows
+ 10 Mobile
+
+Without DirectComposition, Windows gets BeginFrames from a timer whose
+phase and interval are steered from outside. On a phone that timer sits on
+the system's interrupt grid (8 ms on battery), and nothing can keep it in
+step with a panel that refreshes every 16.98 ms.
+
+ExternalBeginFrameSourceW10m ticks from a thread that waits in
+IDXGIOutput::WaitForVBlank, as gecko-w10m does: one pending tick at most,
+tick times on a steady grid one measured interval apart, asleep while
+nobody wants frames, a timer's ticks while the display is off or the wait
+hangs. Every ten seconds of animation the log says how the ticks went.
+--vw-vsync=timer keeps the timer. And the output surface does not write
+vsync parameters of its own over what is measured.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ components/viz/service/BUILD.gn               |   2 +
+ .../external_begin_frame_source_w10m.cc       | 585 ++++++++++++++++++
+ .../external_begin_frame_source_w10m.h        |  97 +++
+ .../root_compositor_frame_sink_impl.cc        |  35 +-
+ 4 files changed, 717 insertions(+), 2 deletions(-)
+ create mode 100644 components/viz/service/frame_sinks/external_begin_frame_source_w10m.cc
+ create mode 100644 components/viz/service/frame_sinks/external_begin_frame_source_w10m.h
+
+diff --git a/components/viz/service/BUILD.gn b/components/viz/service/BUILD.gn
+index f3d928a48b6b3dc73153dd1eb797b68fe757f932..d95e3895e699c2d19bc5309e74218685fd8b44e2 100644
+--- a/components/viz/service/BUILD.gn
++++ b/components/viz/service/BUILD.gn
+@@ -500,6 +500,8 @@ viz_component("service") {
+       "display_embedder/software_output_device_win_base.h",
+       "display_embedder/software_output_device_win_swapchain.cc",
+       "display_embedder/software_output_device_win_swapchain.h",
++      "frame_sinks/external_begin_frame_source_w10m.cc",
++      "frame_sinks/external_begin_frame_source_w10m.h",
+       "frame_sinks/external_begin_frame_source_win.cc",
+       "frame_sinks/external_begin_frame_source_win.h",
+       "gl/info_collection_gpu_service_impl.cc",
+diff --git a/components/viz/service/frame_sinks/external_begin_frame_source_w10m.cc b/components/viz/service/frame_sinks/external_begin_frame_source_w10m.cc
+new file mode 100644
+index 0000000000000000000000000000000000000000..d7094a77e560abf32522286c77b488bc3a26bbf2
+--- /dev/null
++++ b/components/viz/service/frame_sinks/external_begin_frame_source_w10m.cc
+@@ -0,0 +1,585 @@
++// Copyright 2026 The Venetium-W10M Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "components/viz/service/frame_sinks/external_begin_frame_source_w10m.h"
++
++#include <windows.h>
++
++#include <dxgi.h>
++#include <wrl/client.h>
++
++#include <algorithm>
++#include <utility>
++
++#include "base/check.h"
++#include "base/functional/bind.h"
++#include "base/location.h"
++#include "base/logging.h"
++#include "base/memory/ptr_util.h"
++#include "base/memory/ref_counted.h"
++#include "base/numerics/safe_conversions.h"
++#include "base/strings/stringprintf.h"
++#include "base/synchronization/lock.h"
++#include "base/synchronization/waitable_event.h"
++#include "base/task/delay_policy.h"
++#include "base/thread_annotations.h"
++#include "base/threading/platform_thread.h"
++
++namespace viz {
++
++namespace {
++
++using Microsoft::WRL::ComPtr;
++
++// A wait for the vertical blank that was over sooner than this was no wait:
++// the display is off, or the output is stale. ui/gl/vsync_thread_win.cc and
++// gecko's VBlankLoop draw the line at the same millisecond.
++constexpr base::TimeDelta kNoWait = base::Milliseconds(1);
++
++// Tick times are kept on a grid one interval apart: a steady step is what
++// animations want, and the thread's wake-ups are noisy. The grid is moved to
++// the wake itself when it has run ahead of it (a wake is never before its
++// blank) or has fallen this far behind (gecko's VBlankLoop: 2 ms).
++constexpr base::TimeDelta kMaxBehind = base::Milliseconds(2);
++
++// The interval given out changes only when the measured one has moved by
++// more than this: cc tells its clients of every change.
++constexpr base::TimeDelta kIntervalStep = base::Microseconds(50);
++
++// A BeginFrame begun this long after its blank has lost a quarter of its
++// frame: counted, for the log.
++constexpr base::TimeDelta kLate = base::Milliseconds(4);
++
++constexpr base::TimeDelta kStatsEvery = base::Seconds(10);
++constexpr base::TimeDelta kWatchdogPeriod = base::Milliseconds(250);
++
++// The adapter's first output: on a phone, the panel.
++ComPtr<IDXGIOutput> FirstOutput() {
++  ComPtr<IDXGIFactory1> factory;
++  ComPtr<IDXGIAdapter> adapter;
++  ComPtr<IDXGIOutput> output;
++  if (FAILED(::CreateDXGIFactory1(IID_PPV_ARGS(&factory))) ||
++      FAILED(factory->EnumAdapters(0, &adapter)) ||
++      FAILED(adapter->EnumOutputs(0, &output))) {
++    return nullptr;
++  }
++  return output;
++}
++
++}  // namespace
++
++// The vblank thread and what it shares with the source. The thread is not
++// joined: a wait for a blank that never comes (a display that is off) must
++// not hold up the viz thread when the source goes away. It holds a reference
++// instead and ends by itself when its wait is over.
++class ExternalBeginFrameSourceW10m::Core
++    : public base::RefCountedThreadSafe<Core>,
++      public base::PlatformThread::Delegate {
++ public:
++  Core(scoped_refptr<base::SequencedTaskRunner> client_runner,
++       base::RepeatingClosure on_tick)
++      : client_runner_(std::move(client_runner)),
++        on_tick_(std::move(on_tick)) {}
++
++  Core(const Core&) = delete;
++  Core& operator=(const Core&) = delete;
++
++  // Client sequence. False if there is no thread to be had.
++  bool Start() {
++    AddRef();  // The thread's own, given back when ThreadMain() ends.
++    // As Chromium's own vsync thread: above the raster and script threads,
++    // which are busy just when a page scrolls.
++    if (base::PlatformThread::CreateNonJoinableWithType(
++            0, this, base::ThreadType::kPresentation)) {
++      return true;
++    }
++    Release();
++    return false;
++  }
++
++  // Client sequence. The thread sleeps while nothing is wanted.
++  void SetWanted(bool wanted) {
++    {
++      base::AutoLock hold(lock_);
++      if (wanted_ == wanted) {
++        return;
++      }
++      wanted_ = wanted;
++    }
++    if (wanted) {
++      wake_.Signal();
++    }
++  }
++
++  // Client sequence: the source is going away.
++  void Abandon() {
++    {
++      base::AutoLock hold(lock_);
++      wanted_ = false;
++      abandoned_ = true;
++    }
++    wake_.Signal();
++  }
++
++  // Client sequence: is a tick waiting to be taken?
++  bool TickPending() {
++    base::AutoLock hold(lock_);
++    return tick_pending_;
++  }
++
++  // Client sequence. The newest tick not taken yet; false if there is none.
++  bool TakeTick(base::TimeTicks* vblank_time, base::TimeDelta* interval) {
++    const base::TimeTicks now = base::TimeTicks::Now();
++    base::AutoLock hold(lock_);
++    if (!tick_pending_) {
++      return false;
++    }
++    tick_pending_ = false;
++    *vblank_time = tick_vblank_;
++    *interval = tick_interval_;
++    const base::TimeDelta behind = now - tick_wake_;
++    if (behind > kLate) {
++      ++late_;
++    }
++    worst_ = std::max(worst_, behind);
++    return true;
++  }
++
++ private:
++  friend class base::RefCountedThreadSafe<Core>;
++  ~Core() override = default;
++
++  // base::PlatformThread::Delegate:
++  void ThreadMain() override;
++
++  // Vblank thread. Sleeps while nobody wants ticks (|slept| says if it did);
++  // false when the source is gone.
++  bool WaitUntilWanted(bool* slept) {
++    *slept = false;
++    for (;;) {
++      {
++        base::AutoLock hold(lock_);
++        if (abandoned_) {
++          return false;
++        }
++        if (wanted_) {
++          return true;
++        }
++      }
++      *slept = true;
++      wake_.Wait();
++    }
++  }
++
++  // Vblank thread. One task per tick the client has not taken: when viz is
++  // busy for longer than a frame the newest blank replaces the one waiting,
++  // and no queue of stale BeginFrames builds up.
++  void Publish(base::TimeTicks vblank_time,
++               base::TimeTicks wake_time,
++               base::TimeDelta interval) {
++    {
++      base::AutoLock hold(lock_);
++      if (!wanted_) {
++        return;
++      }
++      tick_vblank_ = vblank_time;
++      tick_wake_ = wake_time;
++      tick_interval_ = interval;
++      if (tick_pending_) {
++        ++not_taken_;
++        return;
++      }
++      tick_pending_ = true;
++    }
++    client_runner_->PostTask(FROM_HERE, on_tick_);
++  }
++
++  // Vblank thread, for the log.
++  void TakeCounts(int* not_taken, int* late, base::TimeDelta* worst) {
++    base::AutoLock hold(lock_);
++    *not_taken = not_taken_;
++    *late = late_;
++    *worst = worst_;
++    not_taken_ = 0;
++    late_ = 0;
++    worst_ = base::TimeDelta();
++  }
++
++  const scoped_refptr<base::SequencedTaskRunner> client_runner_;
++  const base::RepeatingClosure on_tick_;
++  base::WaitableEvent wake_{base::WaitableEvent::ResetPolicy::AUTOMATIC,
++                            base::WaitableEvent::InitialState::NOT_SIGNALED};
++
++  base::Lock lock_;
++  bool wanted_ GUARDED_BY(lock_) = false;
++  bool abandoned_ GUARDED_BY(lock_) = false;
++  bool tick_pending_ GUARDED_BY(lock_) = false;
++  base::TimeTicks tick_vblank_ GUARDED_BY(lock_);
++  base::TimeTicks tick_wake_ GUARDED_BY(lock_);
++  base::TimeDelta tick_interval_ GUARDED_BY(lock_);
++  // Since the last note in the log: ticks replaced before viz took them,
++  // BeginFrames begun late, and the latest of those.
++  int not_taken_ GUARDED_BY(lock_) = 0;
++  int late_ GUARDED_BY(lock_) = 0;
++  base::TimeDelta worst_ GUARDED_BY(lock_);
++};
++
++void ExternalBeginFrameSourceW10m::Core::ThreadMain() {
++  base::PlatformThread::SetName("VwVBlank");
++
++  ComPtr<IDXGIOutput> output = FirstOutput();
++  if (output) {
++    DXGI_OUTPUT_DESC desc = {};
++    output->GetDesc(&desc);
++    LOG(WARNING) << base::StringPrintf(
++        "vsync: waiting on the vertical blank of the adapter's first output "
++        "(%ldx%ld)",
++        desc.DesktopCoordinates.right - desc.DesktopCoordinates.left,
++        desc.DesktopCoordinates.bottom - desc.DesktopCoordinates.top);
++  } else {
++    LOG(WARNING) << "vsync: no display output to wait on; ticks from a timer";
++  }
++
++  // The interval between two blanks: the one given out with every tick, and
++  // the finer estimate the grid of tick times is kept with.
++  base::TimeDelta interval = BeginFrameArgs::DefaultInterval();
++  base::TimeDelta estimate = interval;
++  bool measured = false;
++  // Gaps between wakes that are a whole number of blanks by the estimate,
++  // with the blanks in them (a wake that slept through one counts as two,
++  // not as one long interval), and gaps that are not.
++  base::TimeDelta fit_sum;
++  int fit_blanks = 0;
++  base::TimeDelta odd_sum;
++  int odd_gaps = 0;
++
++  // The last tick; null when there has been none since the thread slept.
++  base::TimeTicks last_wake;
++  base::TimeTicks last_vblank;
++  bool last_from_display = false;
++  int timer_streak = 0;
++  int notes_left = 20;
++
++  // For a note every ten seconds of ticking, as gecko-w10m's.
++  base::TimeTicks stats_last;
++  base::TimeDelta stats_time;
++  int display_ticks = 0;
++  int timer_ticks = 0;
++
++  for (;;) {
++    bool slept = false;
++    if (!WaitUntilWanted(&slept)) {
++      break;
++    }
++    if (slept) {
++      last_wake = base::TimeTicks();
++      last_vblank = base::TimeTicks();
++      last_from_display = false;
++      stats_last = base::TimeTicks();
++    }
++
++    const base::TimeTicks before = base::TimeTicks::Now();
++    const HRESULT hr = output ? output->WaitForVBlank() : E_FAIL;
++    base::TimeTicks now = base::TimeTicks::Now();
++    const base::TimeDelta waited = now - before;
++
++    // No blank to wait for (the call failed), or a wait that was none (it
++    // succeeds at once while the display is off): the rest of an interval is
++    // slept instead, so that ticks go on at about the display's rate and the
++    // thread never spins. A wait that was short because a whole interval had
++    // gone by already needs no sleep, and is a blank like any other.
++    bool from_display = SUCCEEDED(hr);
++    if (FAILED(hr) || waited < kNoWait) {
++      base::TimeDelta rest;
++      if (!last_wake.is_null()) {
++        rest = interval - (now - last_wake);
++      } else if (FAILED(hr)) {
++        rest = interval;
++      }
++      if (rest >= kNoWait) {
++        base::Time::ActivateHighResolutionTimer(true);
++        ::Sleep(static_cast<DWORD>(
++            std::min<int64_t>(rest.InMillisecondsRoundedUp(), 100)));
++        base::Time::ActivateHighResolutionTimer(false);
++        now = base::TimeTicks::Now();
++        from_display = false;
++      }
++    }
++
++    // Blanks that come several times faster than the display refreshes are
++    // not its refreshes: one right behind a tick that woke very late, or a
++    // wait that does not wait for long. No tick for those.
++    if (from_display && !last_wake.is_null() &&
++        now - last_wake < estimate / 4) {
++      last_from_display = false;
++      continue;
++    }
++
++    // The interval, from the gaps between blanks the display itself gave.
++    if (from_display && last_from_display && !last_wake.is_null()) {
++      const base::TimeDelta gap = now - last_wake;
++      const int blanks = base::ClampRound(gap / estimate);
++      if (blanks >= 1 && blanks <= 3 &&
++          (gap - estimate * blanks).magnitude() <= estimate / 8) {
++        fit_sum += gap;
++        fit_blanks += blanks;
++        odd_sum = base::TimeDelta();
++        odd_gaps = 0;
++      } else if (gap >= base::Milliseconds(4) &&
++                 gap <= base::Milliseconds(50)) {
++        // Thirty of these in a row and the estimate is what is wrong (a
++        // display that does not refresh near 60 times a second).
++        odd_sum += gap;
++        ++odd_gaps;
++      }
++      base::TimeDelta fresh;
++      if (fit_blanks >= (measured ? 120 : 30)) {
++        fresh = fit_sum / fit_blanks;
++      } else if (odd_gaps >= 30) {
++        fresh = odd_sum / odd_gaps;
++      }
++      if (fresh.is_positive()) {
++        estimate = fresh;
++        measured = true;
++        fit_sum = base::TimeDelta();
++        fit_blanks = 0;
++        odd_sum = base::TimeDelta();
++        odd_gaps = 0;
++        if ((estimate - interval).magnitude() > kIntervalStep) {
++          interval = estimate;
++          if (notes_left > 0) {
++            --notes_left;
++            LOG(WARNING) << base::StringPrintf(
++                "vsync: the display refreshes every %.2f ms",
++                interval.InMillisecondsF());
++          }
++        }
++      }
++    }
++
++    // The tick's time: the next point of the grid, or the wake itself.
++    base::TimeTicks vblank = now;
++    if (from_display && last_from_display && !last_vblank.is_null()) {
++      const int blanks =
++          std::max(1, base::ClampRound((now - last_vblank) / estimate));
++      const base::TimeTicks expected = last_vblank + estimate * blanks;
++      if (expected <= now && now - expected <= kMaxBehind) {
++        vblank = expected;
++      }
++    }
++
++    last_wake = now;
++    last_vblank = vblank;
++    last_from_display = from_display;
++    Publish(vblank, now, interval);
++
++    // Notes for the log, after the tick has gone out.
++    if (from_display) {
++      if (timer_streak >= 3 && notes_left > 0) {
++        --notes_left;
++        LOG(WARNING) << "vsync: the vertical blank is back after "
++                     << timer_streak << " ticks from a timer";
++      }
++      timer_streak = 0;
++      ++display_ticks;
++    } else {
++      ++timer_ticks;
++      if (++timer_streak == 3 && notes_left > 0) {
++        --notes_left;
++        LOG(WARNING) << base::StringPrintf(
++            "vsync: no vertical blank to wait for (WaitForVBlank 0x%08lx, "
++            "back in %.2f ms); ticks from a timer",
++            static_cast<unsigned long>(hr), waited.InMillisecondsF());
++      }
++      // The output may have been replaced (a display mode change).
++      if (timer_streak % 120 == 0) {
++        output = FirstOutput();
++      }
++    }
++    if (!stats_last.is_null()) {
++      stats_time += std::min(now - stats_last, base::Milliseconds(100));
++    }
++    stats_last = now;
++    if (stats_time >= kStatsEvery) {
++      int not_taken = 0;
++      int late = 0;
++      base::TimeDelta worst;
++      TakeCounts(&not_taken, &late, &worst);
++      const int ticks = display_ticks + timer_ticks;
++      LOG(WARNING) << base::StringPrintf(
++          "vsync: %d ticks in %.1f s (%.1f a second): %d from the display's "
++          "vertical blank, %d from a timer; %d not taken before the next, "
++          "%d begun over 4 ms late (worst %.1f ms); interval %.2f ms",
++          ticks, stats_time.InSecondsF(), ticks / stats_time.InSecondsF(),
++          display_ticks, timer_ticks, not_taken, late,
++          worst.InMillisecondsF(), interval.InMillisecondsF());
++      stats_time = base::TimeDelta();
++      display_ticks = 0;
++      timer_ticks = 0;
++    }
++  }
++
++  output.Reset();
++  Release();  // May delete |this|.
++}
++
++// static
++std::unique_ptr<ExternalBeginFrameSourceW10m>
++ExternalBeginFrameSourceW10m::Create(
++    uint32_t restart_id,
++    scoped_refptr<base::SequencedTaskRunner> task_runner) {
++  auto source = base::WrapUnique(
++      new ExternalBeginFrameSourceW10m(restart_id, std::move(task_runner)));
++  if (!source->core_->Start()) {
++    LOG(WARNING) << "vsync: no thread to wait for the vertical blank on";
++    return nullptr;
++  }
++  return source;
++}
++
++ExternalBeginFrameSourceW10m::ExternalBeginFrameSourceW10m(
++    uint32_t restart_id,
++    scoped_refptr<base::SequencedTaskRunner> task_runner)
++    : ExternalBeginFrameSource(this, restart_id),
++      task_runner_(std::move(task_runner)) {
++  core_ = base::MakeRefCounted<Core>(
++      task_runner_,
++      base::BindRepeating(&ExternalBeginFrameSourceW10m::OnTick,
++                          weak_factory_.GetWeakPtr()));
++}
++
++ExternalBeginFrameSourceW10m::~ExternalBeginFrameSourceW10m() {
++  core_->Abandon();
++}
++
++BeginFrameArgs ExternalBeginFrameSourceW10m::GetMissedBeginFrameArgs(
++    BeginFrameObserver* obs) {
++  // As ExternalBeginFrameSourceWin, an observer that comes when there has
++  // been no BeginFrame for a while (the vblank thread was asleep) gets one
++  // made up for now and need not wait for the next blank. Only then, though.
++  // While blanks are coming the one that is due is about to be begun for
++  // everybody: a time made up here first, on the same grid, would be at or
++  // after that tick's own, and the tick would be thrown away as out of
++  // order -- for every other observer too, which then get no BeginFrame for
++  // that blank at all. Such an observer gets the last BeginFrame instead
++  // (the base class's answer) and the real one a moment later.
++  const base::TimeTicks now = base::TimeTicks::Now();
++  const bool silent = !last_begin_frame_args_.IsValid() ||
++                      now - last_begin_frame_args_.frame_time >=
++                          last_begin_frame_args_.interval * 2;
++  if (silent && !core_->TickPending()) {
++    base::TimeTicks frame_time = now;
++    base::TimeDelta interval = interval_;
++    if (last_begin_frame_args_.IsValid()) {
++      interval = last_begin_frame_args_.interval;
++      frame_time =
++          now.SnappedToNextTick(last_begin_frame_args_.frame_time, interval) -
++          interval;
++    }
++    last_begin_frame_args_ =
++        begin_frame_args_generator_.GenerateBeginFrameArgs(
++            source_id(), frame_time, frame_time + interval, interval,
++            interval);
++  }
++
++  return ExternalBeginFrameSource::GetMissedBeginFrameArgs(obs);
++}
++
++void ExternalBeginFrameSourceW10m::OnNeedsBeginFrames(bool needs_begin_frames) {
++  if (needs_begin_frames_ == needs_begin_frames) {
++    return;
++  }
++  needs_begin_frames_ = needs_begin_frames;
++  core_->SetWanted(needs_begin_frames);
++  if (needs_begin_frames) {
++    ticked_ = false;
++    ArmWatchdog();
++  } else {
++    watchdog_.Stop();
++  }
++}
++
++void ExternalBeginFrameSourceW10m::OnTick() {
++  DCHECK(task_runner_->RunsTasksInCurrentSequence());
++  base::TimeTicks vblank_time;
++  base::TimeDelta interval;
++  if (!core_->TakeTick(&vblank_time, &interval)) {
++    return;
++  }
++  ticked_ = true;
++  interval_ = interval;
++  if (stalled_) {
++    stalled_ = false;
++    if (stall_noted_) {
++      stall_noted_ = false;
++      LOG(WARNING) << "vsync: ticks from the vblank thread again";
++    }
++    if (needs_begin_frames_) {
++      ArmWatchdog();
++    }
++  }
++  if (needs_begin_frames_) {
++    IssueBeginFrame(vblank_time, interval);
++  }
++}
++
++void ExternalBeginFrameSourceW10m::IssueBeginFrame(base::TimeTicks frame_time,
++                                                   base::TimeDelta interval) {
++  // Never back in time: a tick from before a pause, or one that a MISSED
++  // frame or the watchdog has covered already.
++  if (last_begin_frame_args_.IsValid() &&
++      frame_time <= last_begin_frame_args_.frame_time) {
++    return;
++  }
++  OnBeginFrame(begin_frame_args_generator_.GenerateBeginFrameArgs(
++      source_id(), frame_time, frame_time + interval, interval, interval));
++}
++
++void ExternalBeginFrameSourceW10m::ArmWatchdog() {
++  // While the vblank thread is silent this is the frame timer, at the
++  // display's rate and as precise as a timer gets; otherwise a look four
++  // times a second.
++  watchdog_period_ = stalled_ ? interval_ : kWatchdogPeriod;
++  watchdog_armed_ = base::TimeTicks::Now();
++  watchdog_.Start(FROM_HERE, watchdog_armed_ + watchdog_period_, this,
++                  &ExternalBeginFrameSourceW10m::OnWatchdog,
++                  stalled_ ? base::subtle::DelayPolicy::kPrecise
++                           : base::subtle::DelayPolicy::kFlexibleNoSooner);
++}
++
++void ExternalBeginFrameSourceW10m::OnWatchdog() {
++  if (!needs_begin_frames_) {
++    return;
++  }
++  // A tick waiting behind this task counts.
++  OnTick();
++  const base::TimeTicks now = base::TimeTicks::Now();
++  // Far too late itself (the app was suspended, or viz was busy): no
++  // telling what the vblank thread did meanwhile.
++  const bool fair = now - watchdog_armed_ < watchdog_period_ * 2 ||
++                    stalled_;
++  if (!ticked_ && fair) {
++    // WaitForVBlank neither returned nor failed for a quarter of a second,
++    // or the thread did not get to run. Frames go on from here until it
++    // ticks again.
++    if (!stalled_) {
++      stalled_ = true;
++      if (stall_notes_left_ > 0) {
++        --stall_notes_left_;
++        stall_noted_ = true;
++        LOG(WARNING) << "vsync: no tick from the vblank thread for "
++                     << (now - watchdog_armed_).InMilliseconds()
++                     << " ms; BeginFrames from a timer until it is back";
++      }
++    }
++    IssueBeginFrame(now, interval_);
++  }
++  ticked_ = false;
++  // Either BeginFrame above may have been the last anyone wanted.
++  if (needs_begin_frames_) {
++    ArmWatchdog();
++  }
++}
++
++}  // namespace viz
+diff --git a/components/viz/service/frame_sinks/external_begin_frame_source_w10m.h b/components/viz/service/frame_sinks/external_begin_frame_source_w10m.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..d5ec2b169c4f1789c19030b87948bde3b9eee1b9
+--- /dev/null
++++ b/components/viz/service/frame_sinks/external_begin_frame_source_w10m.h
+@@ -0,0 +1,97 @@
++// Copyright 2026 The Venetium-W10M Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef COMPONENTS_VIZ_SERVICE_FRAME_SINKS_EXTERNAL_BEGIN_FRAME_SOURCE_W10M_H_
++#define COMPONENTS_VIZ_SERVICE_FRAME_SINKS_EXTERNAL_BEGIN_FRAME_SOURCE_W10M_H_
++
++#include <memory>
++
++#include "base/memory/scoped_refptr.h"
++#include "base/memory/weak_ptr.h"
++#include "base/task/sequenced_task_runner.h"
++#include "base/time/time.h"
++#include "base/timer/timer.h"
++#include "components/viz/common/frame_sinks/begin_frame_source.h"
++#include "components/viz/service/viz_service_export.h"
++
++namespace viz {
++
++// Windows 10 Mobile (Venetium): BeginFrames from the display's own vertical
++// blank.
++//
++// Without DirectComposition viz on Windows ticks from a millisecond timer
++// (DelayBasedBeginFrameSource). On a phone that timer is coarse -- base asks
++// for an 8 ms timer period on battery -- and steering its timebase cannot
++// put frames in step with the panel. ExternalBeginFrameSourceWin, which
++// would do it, finds its output through MonitorFromWindow and its interval
++// through DWM, and a phone has neither.
++//
++// So a thread here waits on the adapter's first output (the phone's panel)
++// with IDXGIOutput::WaitForVBlank, as gecko-w10m's vsync source does, and
++// every blank is a BeginFrame on the viz sequence: its time a steady grid
++// kept to the blank, its interval the measured one. The thread sleeps while
++// nobody wants frames. Where the display gives no blank to wait for (it is
++// off, or the output went away) the thread ticks from a timer instead, and
++// if the wait itself never returns a watchdog here does, so frames never
++// stop for good.
++class VIZ_SERVICE_EXPORT ExternalBeginFrameSourceW10m
++    : public ExternalBeginFrameSource,
++      public ExternalBeginFrameSourceClient {
++ public:
++  // Null if the thread cannot be started: the caller keeps its timer then.
++  static std::unique_ptr<ExternalBeginFrameSourceW10m> Create(
++      uint32_t restart_id,
++      scoped_refptr<base::SequencedTaskRunner> task_runner);
++
++  ExternalBeginFrameSourceW10m(const ExternalBeginFrameSourceW10m&) = delete;
++  ExternalBeginFrameSourceW10m& operator=(const ExternalBeginFrameSourceW10m&) =
++      delete;
++
++  ~ExternalBeginFrameSourceW10m() override;
++
++  // ExternalBeginFrameSource implementation.
++  BeginFrameArgs GetMissedBeginFrameArgs(BeginFrameObserver* obs) override;
++
++  // ExternalBeginFrameSourceClient implementation.
++  void OnNeedsBeginFrames(bool needs_begin_frames) override;
++
++ private:
++  // What this and the vblank thread share; the thread keeps it alive.
++  class Core;
++
++  ExternalBeginFrameSourceW10m(
++      uint32_t restart_id,
++      scoped_refptr<base::SequencedTaskRunner> task_runner);
++
++  // The vblank thread has a tick (posted from it).
++  void OnTick();
++  void IssueBeginFrame(base::TimeTicks frame_time, base::TimeDelta interval);
++
++  // Every quarter of a second while frames are wanted: has there been a
++  // tick? While there is none, this is the tick.
++  void ArmWatchdog();
++  void OnWatchdog();
++
++  scoped_refptr<base::SequencedTaskRunner> task_runner_;
++  scoped_refptr<Core> core_;
++
++  BeginFrameArgsGenerator begin_frame_args_generator_;
++
++  bool needs_begin_frames_ = false;
++  base::TimeDelta interval_ = BeginFrameArgs::DefaultInterval();
++
++  base::DeadlineTimer watchdog_;
++  base::TimeTicks watchdog_armed_;
++  base::TimeDelta watchdog_period_;
++  bool ticked_ = false;
++  bool stalled_ = false;
++  bool stall_noted_ = false;
++  int stall_notes_left_ = 6;
++
++  base::WeakPtrFactory<ExternalBeginFrameSourceW10m> weak_factory_{this};
++};
++
++}  // namespace viz
++
++#endif  // COMPONENTS_VIZ_SERVICE_FRAME_SINKS_EXTERNAL_BEGIN_FRAME_SOURCE_W10M_H_
+diff --git a/components/viz/service/frame_sinks/root_compositor_frame_sink_impl.cc b/components/viz/service/frame_sinks/root_compositor_frame_sink_impl.cc
+index d1d17ebdd272771e291cfd071dedd28284718d84..c4d385e144f705aba5616a1d5e10877fb015991a 100644
+--- a/components/viz/service/frame_sinks/root_compositor_frame_sink_impl.cc
++++ b/components/viz/service/frame_sinks/root_compositor_frame_sink_impl.cc
+@@ -54,6 +54,11 @@
+ #include "components/viz/service/frame_sinks/external_begin_frame_source_win.h"
+ #endif
+ 
++#if defined(VENETIUM_W10M)
++#include "base/command_line.h"
++#include "components/viz/service/frame_sinks/external_begin_frame_source_w10m.h"
++#endif
++
+ namespace viz {
+ 
+ namespace {
+@@ -205,7 +210,23 @@ RootCompositorFrameSinkImpl::Create(
+               std::make_unique<DelayBasedTimeSource>(
+                   base::SingleThreadTaskRunner::GetCurrentDefault().get()));
+     } else {
+-#if BUILDFLAG(IS_WIN)
++#if defined(VENETIUM_W10M)
++      // Windows 10 Mobile has no DirectComposition, no DWM and no HWND for
++      // ExternalBeginFrameSourceWin to find its monitor with, and the timer
++      // below is too coarse on a phone to keep step with the panel:
++      // BeginFrames come from the wait for the display's vertical blank
++      // itself. "--vw-vsync=timer" keeps the timer, for comparing on a
++      // device.
++      if (base::CommandLine::ForCurrentProcess()->GetSwitchValueASCII(
++              "vw-vsync") != "timer") {
++        external_begin_frame_source = ExternalBeginFrameSourceW10m::Create(
++            restart_id, base::SingleThreadTaskRunner::GetCurrentDefault());
++      }
++      LOG(WARNING) << "vsync: BeginFrames from "
++                   << (external_begin_frame_source
++                           ? "the display's vertical blank"
++                           : "a timer");
++#elif BUILDFLAG(IS_WIN)
+       // ExternalBeginFrameSourceWin also uses the D3D11 device used by dcomp.
+       if (output_surface->capabilities().dc_support_level !=
+           OutputSurface::DCSupportLevel::kNone) {
+@@ -287,7 +308,17 @@ RootCompositorFrameSinkImpl::Create(
+   // Set up the callback for updating VSyncParameters.
+ #if !BUILDFLAG(IS_APPLE)
+   // On Mac vsync parameter updates does not come from OutputSurface.
+-  if (wants_vsync_updates || impl->synthetic_begin_frame_source_) {
++#if defined(VENETIUM_W10M)
++  // Nor on Windows 10 Mobile. The GL surface there has a made-up 60 Hz
++  // provider (image_transport_surface_win.cc), and every presented frame
++  // would put the timer back on its grid, undoing what the embedder set
++  // through DisplayPrivate::SetDisplayVSyncParameters.
++  const bool output_surface_knows_vsync = false;
++#else
++  const bool output_surface_knows_vsync = true;
++#endif
++  if (output_surface_knows_vsync &&
++      (wants_vsync_updates || impl->synthetic_begin_frame_source_)) {
+     // |impl| owns and outlives display, and display owns the output surface so
+     // unretained is safe.
+     output_surface_ptr->SetUpdateVSyncParametersCallback(base::BindRepeating(

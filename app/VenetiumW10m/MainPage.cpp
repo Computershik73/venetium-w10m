@@ -445,6 +445,7 @@ void MainPage::BuildMenu() {
   });
   menu_.Items().Append(hardware);
   item(L"Log", [this]() { ShowLog(); });
+  item(L"Engine switches (restart)", [this]() { ShowEngineSwitches(); });
   item(L"About", [this]() { ShowAbout(); });
   item(L"Copy logs to Pictures", [this]() {
     std::thread([]() { Log::Mirror(); }).detach();
@@ -562,22 +563,33 @@ void MainPage::Start(std::wstring initialUrl) {
   params.scale = rawPerView_;
   params.jit = Settings::Jit();
   params.switches = Narrow(Settings::EngineSwitches());
-  if (!Settings::HardwareGraphics()) params.switches += " --vw-present=bitmap";
+  if (!Settings::HardwareGraphics()) {
+    params.switches += " --vw-present=bitmap";
+  } else if (Settings::TakeGraphicsRetry()) {
+    params.switches += " --vw-gpu=retry";
+  }
   // The panel the engine presents into, before it starts.
   if (Api().set_panel) Api().set_panel(winrt::get_abi(engineView_->Panel()));
   params.initialUrl =
       Narrow(initialUrl.empty() ? Settings::HomePage() : initialUrl);
   ::CreateDirectoryW(params.profileDir.c_str(), nullptr);
 
-  if (!host.Start(params)) {
-    splashText_.Text(L"The engine could not be started.\nMenu \u2192 Log.");
-    return;
-  }
-  engineView_->OnFirstFrame([this]() {
-    splash_.Visibility(Visibility::Collapsed);
-    Log::Write(L"page: first frame on screen");
+  engineView_->WhenRoomKnown([this, params]() {
+    if (!EngineHost::Get().Start(params)) {
+      splashText_.Text(L"The engine could not be started.\nMenu \u2192 Log.");
+      return;
+    }
+    engineView_->OnFirstFrame([this]() {
+      splash_.Visibility(Visibility::Collapsed);
+      Log::Write(L"page: first frame on screen");
+    });
+    engineView_->Start();
+    if (!pendingUrl_.empty()) {
+      const std::wstring url = std::move(pendingUrl_);
+      pendingUrl_.clear();
+      OpenExternalUrl(url);
+    }
   });
-  engineView_->Start();
 
   try {
     MemoryManager::AppMemoryUsageIncreased([](auto&&, auto&&) {
@@ -906,6 +918,44 @@ void MainPage::SendPhoneClipboard() {
 }
 
 // About the port and its authors, as gecko-w10m's Settings has it.
+// Chromium's and the engine's own command-line switches, for trying one
+// thing against another on a phone without a new build. Taken at the next
+// start.
+void MainPage::ShowEngineSwitches() {
+  [](MainPage*) -> winrt::fire_and_forget {
+    ContentDialog dialog;
+    dialog.Title(box_value(L"Engine switches"));
+    StackPanel panel;
+    TextBlock note;
+    note.Text(L"Extra command-line switches for the engine, separated by "
+              L"spaces; used from the next start. For example:\n"
+              L"--vw-gpu=off  (no GPU compositing)\n"
+              L"--vw-vsync=timer  (frames from a timer)\n"
+              L"--vw-present-buffers=2");
+    note.FontSize(12);
+    note.Opacity(0.7);
+    note.TextWrapping(TextWrapping::Wrap);
+    note.Margin(ThicknessHelper::FromLengths(0, 0, 0, 8));
+    panel.Children().Append(note);
+    TextBox box;
+    box.Text(hstring(Settings::EngineSwitches()));
+    box.AcceptsReturn(false);
+    box.IsSpellCheckEnabled(false);
+    box.TextWrapping(TextWrapping::Wrap);
+    panel.Children().Append(box);
+    dialog.Content(panel);
+    dialog.PrimaryButtonText(L"Save");
+    dialog.SecondaryButtonText(L"Cancel");
+    try {
+      if (co_await dialog.ShowAsync() == ContentDialogResult::Primary) {
+        Settings::SetEngineSwitches(std::wstring(box.Text()));
+        Log::Write(L"settings: engine switches", std::wstring(box.Text()));
+      }
+    } catch (winrt::hresult_error const&) {
+    }
+  }(this);
+}
+
 void MainPage::ShowAbout() {
   [](MainPage* self) -> winrt::fire_and_forget {
     ContentDialog dialog;

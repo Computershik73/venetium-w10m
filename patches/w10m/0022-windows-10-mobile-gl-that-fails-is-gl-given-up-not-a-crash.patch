@@ -1,0 +1,311 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Mon, 12 Oct 2026 10:58:04 +0400
+Subject: [PATCH] Windows 10 Mobile: GL that fails is GL given up, not a crash
+
+Everything runs in one process there, for good: there is no GPU process
+to start again in another mode. GL that did not start left the GL
+implementation at none, and the first thing to ask for a context was
+fatal (gl_factory_win.cc); made non-fatal alone, no GPU channel could ever
+be established and the browser asked for one for ever.
+
+So GL that does not start, cannot make a context or an offscreen surface
+(GpuInit::InitializeInProcess), or cannot make the shared context for a
+channel (GpuServiceImpl::EstablishGpuChannel) is GL disabled, as with
+--use-gl=disabled: the GPU service comes up, its channels need no context,
+and the browser composites in software, whose frames the embedder presents
+itself. The embedder is told why, and whether it is proof that GL cannot
+work on this phone (ui/gl/w10m_panel.h).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../output_surface_provider_impl.cc           |  7 +++
+ components/viz/service/gl/gpu_service_impl.cc | 41 ++++++++++++++++
+ gpu/ipc/service/gpu_init.cc                   | 48 +++++++++++++++++++
+ ui/gl/gl_context.cc                           |  6 +++
+ ui/gl/init/gl_factory_win.cc                  | 18 +++++++
+ ui/gl/w10m_panel.h                            | 24 ++++++++++
+ 6 files changed, 144 insertions(+)
+
+diff --git a/components/viz/service/display_embedder/output_surface_provider_impl.cc b/components/viz/service/display_embedder/output_surface_provider_impl.cc
+index 8c3c3e496173d8ff9388058b22aa2a5b9e03df41..24d3452d145242cbf80154b57c0f9e4cef70e427 100644
+--- a/components/viz/service/display_embedder/output_surface_provider_impl.cc
++++ b/components/viz/service/display_embedder/output_surface_provider_impl.cc
+@@ -37,6 +37,7 @@
+ #include <atomic>
+ 
+ #include "components/viz/service/display_embedder/w10m_software_output_device.h"
++#include "ui/gl/w10m_panel.h"
+ #endif
+ 
+ #if BUILDFLAG(IS_WIN)
+@@ -151,6 +152,12 @@ std::unique_ptr<OutputSurface> OutputSurfaceProviderImpl::CreateOutputSurface(
+       // be an unrecoverable hardware error or a bug.
+       LOG(FATAL) << "Unexpected fatal context error";
+ #elif !BUILDFLAG(IS_ANDROID)
++#if defined(VENETIUM_W10M)
++      // The embedder first: it remembers what this phone could not do.
++      gl::W10mGpuGivenUp("the GPU output surface could not be made (context "
++                         "or panel surface; see the lines above)",
++                         /*for_good=*/false);
++#endif
+       gpu_service_impl_->DisableGpuCompositing();
+ #endif
+     }
+diff --git a/components/viz/service/gl/gpu_service_impl.cc b/components/viz/service/gl/gpu_service_impl.cc
+index 393ba3e0e0e7e74c27ddc98fd7114d0374074a1d..f87bd3333c70dfed12158c42ed2fd253be619e52 100644
+--- a/components/viz/service/gl/gpu_service_impl.cc
++++ b/components/viz/service/gl/gpu_service_impl.cc
+@@ -103,6 +103,19 @@
+ #include "ui/gl/direct_composition_support.h"
+ #endif
+ 
++#if defined(VENETIUM_W10M)
++#include <atomic>
++
++#include "base/logging.h"
++#include "ui/gl/w10m_panel.h"
++
++namespace {
++// A GL context was lost in this run: one that cannot be made after that is
++// not proof that GL cannot work on this phone.
++std::atomic<bool> g_w10m_context_lost{false};
++}  // namespace
++#endif
++
+ #if BUILDFLAG(IS_APPLE)
+ #include "ui/base/cocoa/quartz_util.h"
+ #endif
+@@ -853,6 +866,8 @@ void GpuServiceImpl::MaybeExitOnContextLost(
+     // GPU process to restart there is nothing to recover with, and the
+     // compositor would ask for a context for ever. Software compositing
+     // takes over (the embedder still presents its frames through the GPU).
++    g_w10m_context_lost.store(true);
++    gl::W10mGpuGivenUp("the GL context was lost", /*for_good=*/false);
+     DisableGpuCompositing();
+ #endif
+     // We can't restart the GPU process when running in the host process;
+@@ -905,6 +920,32 @@ void GpuServiceImpl::EstablishGpuChannel(
+       enable_extra_handles_validation, gpu_extra_info_, gpu_info_,
+       gpu_feature_info_);
+ 
++#if defined(VENETIUM_W10M)
++  // A channel is refused only when the shared GL context cannot be made (its
++  // SharedImageStub wants one unless GL is disabled). Elsewhere the host
++  // starts the GPU process again in another mode; Windows 10 Mobile has only
++  // this process, and its host would ask for a channel for ever with nothing
++  // on screen. So GL is given up for the run: channels and shared images
++  // then need no context, and the browser composites in software. The
++  // display and its bindings are left as they are: objects made before a
++  // context loss are still being destroyed through them.
++  if (!gpu_channel && in_host_process() &&
++      gl::GetGLImplementation() != gl::kGLImplementationDisabled) {
++    LOG(ERROR) << "No GL context for a GPU channel: GL is off from here on.";
++    gl::W10mGpuGivenUp("the shared GL context could not be made",
++                       /*for_good=*/!g_w10m_context_lost.load());
++    gl::SetGLImplementation(gl::kGLImplementationDisabled);
++    gpu_info_.gl_implementation_parts = gl::GetGLImplementationParts();
++    gpu_info_.skia_backend_type = gpu::SkiaBackendType::kNone;
++    gpu_host_->DidUpdateGPUInfo(gpu_info_);
++    DisableGpuCompositing();
++    gpu_channel = gpu_channel_manager_->EstablishChannel(
++        channel_token, client_id, client_tracing_id, is_gpu_host,
++        enable_extra_handles_validation, gpu_extra_info_, gpu_info_,
++        gpu_feature_info_);
++  }
++#endif
++
+   if (!gpu_channel) {
+     std::move(callback).Run(/*success=*/false, gpu::GPUInfo(),
+                             gpu::GpuFeatureInfo(),
+diff --git a/gpu/ipc/service/gpu_init.cc b/gpu/ipc/service/gpu_init.cc
+index a556afa8571333e07d8357fabdecd588cc8fa4e1..b3d10a5070211b03b976e420236f265e9e70d0a8 100644
+--- a/gpu/ipc/service/gpu_init.cc
++++ b/gpu/ipc/service/gpu_init.cc
+@@ -52,6 +52,10 @@
+ #include "ui/gl/gl_utils.h"
+ #include "ui/gl/init/gl_factory.h"
+ 
++#if defined(VENETIUM_W10M)
++#include "ui/gl/w10m_panel.h"
++#endif
++
+ #if BUILDFLAG(IS_MAC)
+ #include <GLES2/gl2.h>
+ #endif
+@@ -1103,10 +1107,38 @@ void GpuInit::InitializeInProcess(base::CommandLine* command_line,
+   gl_display = gl::init::InitializeGLNoExtensionsOneOff(
+       /*init_bindings=*/true,
+       /*gpu_preference=*/gl::GpuPreference::kDefault);
++#if defined(VENETIUM_W10M)
++  // Windows 10 Mobile runs everything in this one process, for good: there
++  // is no GPU process to start again in another mode. GL that does not start
++  // is GL that is disabled, as with --use-gl=disabled: the GPU service still
++  // comes up, its channels need no GL context, and the browser composites in
++  // software (frames the embedder presents itself). Left at "no
++  // implementation", the first thing to ask for a context is fatal and no
++  // GPU channel can ever be established.
++  bool gl_context_made = true;
++  auto give_up_gl = [&](const char* reason) {
++    LOG(ERROR) << "GL is off for this run: " << reason;
++    default_offscreen_surface_ = nullptr;
++    if (gl::GetGLImplementation() != gl::kGLImplementationNone) {
++      gl::init::ShutdownGL(gl_display, /*due_to_fallback=*/false);
++    }
++    gl_display = nullptr;
++    gl::SetGLImplementation(gl::kGLImplementationDisabled);
++    gl_use_swiftshader_ = false;
++    gpu_feature_info_ = ComputeGpuFeatureInfoWithNoGpu();
++    gpu_preferences_.gr_context_type = GrContextType::kNone;
++    gpu_info_.gl_implementation_parts = gl::GetGLImplementationParts();
++    gl::W10mGpuGivenUp(reason, /*for_good=*/true);
++  };
++  if (!gl_display) {
++    give_up_gl("ANGLE did not start (no EGL display)");
++  }
++#else
+   if (!gl_display) {
+     VLOG(1) << "gl::init::InitializeGLNoExtensionsOneOff failed";
+     return;
+   }
++#endif
+   bool gl_disabled = gl::GetGLImplementation() == gl::kGLImplementationDisabled;
+ 
+ #if BUILDFLAG(IS_LINUX) || \
+@@ -1122,7 +1154,11 @@ void GpuInit::InitializeInProcess(base::CommandLine* command_line,
+   gpu_info_.gl_implementation_parts = gl::GetGLImplementationParts();
+ 
+   if (!gl_disabled && !gl_use_swiftshader_) {
++#if defined(VENETIUM_W10M)
++    gl_context_made = CollectContextGraphicsInfo(&gpu_info_);
++#else
+     CollectContextGraphicsInfo(&gpu_info_);
++#endif
+     gpu_feature_info_ = ComputeGpuFeatureInfo(gpu_info_, gpu_preferences_,
+                                               command_line, nullptr);
+     gl_use_swiftshader_ = EnableSwiftShaderIfNeeded(
+@@ -1157,6 +1193,18 @@ void GpuInit::InitializeInProcess(base::CommandLine* command_line,
+     }
+   }
+ 
++#if defined(VENETIUM_W10M)
++  // GL that starts but cannot make a context, or the surface to make one
++  // current on, is no more use than GL that does not start (a GPU process
++  // proper ends its launch over either), and the shared context would be
++  // made on a null surface.
++  if (!gl_disabled && (!gl_context_made || !default_offscreen_surface_)) {
++    give_up_gl(!gl_context_made ? "no GL context could be made"
++                                : "no offscreen GL surface could be made");
++    gl_disabled = true;
++  }
++#endif
++
+   InitializePlatformOverlaySettings(&gpu_info_, gpu_feature_info_);
+ 
+   if (!gl_disabled) {
+diff --git a/ui/gl/gl_context.cc b/ui/gl/gl_context.cc
+index e4655ff3e4fe9957ddfdbb4d05083170b9746b7c..390a2ff21500be6cb2b1e2c0c5f5223b79920b96 100644
+--- a/ui/gl/gl_context.cc
++++ b/ui/gl/gl_context.cc
+@@ -309,6 +309,12 @@ bool GLContext::LosesAllContextsOnContextLost() {
+     case kGLImplementationMockGL:
+     case kGLImplementationStubGL:
+       return false;
++#if defined(VENETIUM_W10M)
++    case kGLImplementationDisabled:
++      // GL given up while the process runs (Windows 10 Mobile): no context
++      // is left to lose.
++      return false;
++#endif
+     default:
+       NOTREACHED();
+   }
+diff --git a/ui/gl/init/gl_factory_win.cc b/ui/gl/init/gl_factory_win.cc
+index 8e0cd3ab19158412957996675da7705ff18eafd7..2a0836b014ad76998dca6e713a1bab3f0ed12698 100644
+--- a/ui/gl/init/gl_factory_win.cc
++++ b/ui/gl/init/gl_factory_win.cc
+@@ -60,8 +60,15 @@ scoped_refptr<GLContext> CreateGLContext(GLShareGroup* share_group,
+     case kGLImplementationDisabled:
+       return nullptr;
+     default:
++#if defined(VENETIUM_W10M)
++      // GL that never started is not a crash where there is one process and
++      // no other (Windows 10 Mobile): the caller carries on without a
++      // context, and the browser composites in software.
++      return nullptr;
++#else
+       DUMP_WILL_BE_NOTREACHED();
+       return nullptr;
++#endif
+   }
+ }
+ 
+@@ -79,7 +86,13 @@ scoped_refptr<GLSurface> CreateViewGLSurface(GLDisplay* display,
+     case kGLImplementationStubGL:
+       return InitializeGLSurface(new GLSurfaceStub());
+     default:
++#if defined(VENETIUM_W10M)
++      // GL disabled or never started (Windows 10 Mobile carries on without
++      // it): no surface, not a crash.
++      return nullptr;
++#else
+       NOTREACHED();
++#endif
+   }
+ }
+ 
+@@ -100,7 +113,12 @@ scoped_refptr<GLSurface> CreateOffscreenGLSurface(GLDisplay* display,
+     case kGLImplementationStubGL:
+       return InitializeGLSurface(new GLSurfaceStub());
+     default:
++#if defined(VENETIUM_W10M)
++      // As above: no surface, not a crash.
++      return nullptr;
++#else
+       NOTREACHED();
++#endif
+   }
+ }
+ 
+diff --git a/ui/gl/w10m_panel.h b/ui/gl/w10m_panel.h
+index 926695491e9fdd0169bf4e194419b9cb436914a8..a4c2d72bc0ad608dfcf635cfe4229b5abadd85f7 100644
+--- a/ui/gl/w10m_panel.h
++++ b/ui/gl/w10m_panel.h
+@@ -19,6 +19,8 @@
+ 
+ #include <stdint.h>
+ 
++#include <atomic>
++
+ struct IDXGISwapChain1;
+ 
+ namespace gl {
+@@ -43,6 +45,28 @@ inline W10mPanelWindow* W10mPanelFromWindow(HWND window) {
+   return panel && panel->magic == kW10mPanelMagic ? panel : nullptr;
+ }
+ 
++// GL has been given up for this run -- it did not start, no context or
++// surface could be made, or the context was lost -- and the browser carries
++// on with software compositing, whose frames the embedder presents itself.
++// The embedder is told why, at once and on whatever thread found out (the
++// GPU thread or the compositor's), and whether it is |for_good|: GL that
++// cannot start on this phone, as against GL that failed this time (a lost
++// context, a surface the panel did not take in time). The handler is set
++// before the GPU thread starts, and may be called more than once.
++using W10mGpuGivenUpHandler = void (*)(const char* reason, bool for_good);
++
++inline std::atomic<W10mGpuGivenUpHandler> g_w10m_gpu_given_up_handler{nullptr};
++
++inline void SetW10mGpuGivenUpHandler(W10mGpuGivenUpHandler handler) {
++  g_w10m_gpu_given_up_handler.store(handler);
++}
++
++inline void W10mGpuGivenUp(const char* reason, bool for_good) {
++  if (W10mGpuGivenUpHandler handler = g_w10m_gpu_given_up_handler.load()) {
++    handler(reason, for_good);
++  }
++}
++
+ }  // namespace gl
+ 
+ #endif  // UI_GL_W10M_PANEL_H_

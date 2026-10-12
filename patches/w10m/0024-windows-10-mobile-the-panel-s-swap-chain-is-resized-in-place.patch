@@ -1,0 +1,283 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Mon, 12 Oct 2026 10:58:04 +0400
+Subject: [PATCH] Windows 10 Mobile: the panel's swap chain is resized in place
+
+The room changes every time the keyboard or a system bar comes or goes.
+Chromium makes its GL surface again for a new size: a second swap chain of
+three 12 MB buffers while the panel still shows the first, and an empty
+panel until the new one has a frame. The surface is a fixed-size one, so
+it is told its new size and eglWaitNative has ANGLE resize the buffers of
+the chain it has. SwapChain11::resize can be called between frames, tries
+a refused ResizeBuffers once more after a flush (gecko-w10m found the
+second try taken on an HP Elite x3), and a refused chain is likewise asked
+for once more; only then is the surface made again.
+
+Also: no "several windows" heuristic (it presents the first sixty frames
+of the only surface there is with sync interval 0); a frame's feedback
+does not wait for a GPU timer query or a fence, which have not run on
+these drivers and which the embedder's first-frame signal hangs on; the
+first present of a chain and presents that stood are said in the log.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../display_embedder/skia_output_device_gl.cc |   5 +-
+ .../renderer/d3d/d3d11/SwapChain11.cpp        | 101 ++++++++++++++++++
+ .../d3d/d3d11/win32/NativeWindow11Win32.cpp   |  19 ++++
+ ui/gl/gl_surface_egl.cc                       |  28 +++++
+ ui/gl/gl_surface_presentation_helper.cc       |   8 ++
+ 5 files changed, 160 insertions(+), 1 deletion(-)
+
+diff --git a/components/viz/service/display_embedder/skia_output_device_gl.cc b/components/viz/service/display_embedder/skia_output_device_gl.cc
+index 5000ec1f374a0e7ac789e6bd5737d36d4c6bd3e1..fdcc48812e12557f3c2ee4b0f8eeeb6ffc37904f 100644
+--- a/components/viz/service/display_embedder/skia_output_device_gl.cc
++++ b/components/viz/service/display_embedder/skia_output_device_gl.cc
+@@ -175,7 +175,10 @@ SkiaOutputDeviceGL::SkiaOutputDeviceGL(
+     // use-case to have multiple active windows there. On other platforms we
+     // disable GLSurface's VSync if we're swapping multiple surfaces per frame
+     // to prevent SwapBuffers from blocking and slowing down other windows.
+-#if !BUILDFLAG(IS_ANDROID)
++#if !BUILDFLAG(IS_ANDROID) && !defined(VENETIUM_W10M)
++    // (Windows 10 Mobile: one surface, ever. The tracker counts its first
++    // sixty swaps as "several windows" and turns vsync off for them: sync
++    // interval 0 on the panel's flip-model chain, then back to 1.)
+     multisurface_swapbuffers_tracker_ =
+         std::make_unique<MultiSurfaceSwapBuffersTracker>();
+ #endif
+diff --git a/third_party/angle/src/libANGLE/renderer/d3d/d3d11/SwapChain11.cpp b/third_party/angle/src/libANGLE/renderer/d3d/d3d11/SwapChain11.cpp
+index 517e6fde6f5cad47f8d966e870a420f934331a88..6f397f346ea2189944fcf70dcc4cbd244bed410b 100644
+--- a/third_party/angle/src/libANGLE/renderer/d3d/d3d11/SwapChain11.cpp
++++ b/third_party/angle/src/libANGLE/renderer/d3d/d3d11/SwapChain11.cpp
+@@ -494,6 +494,26 @@ EGLint SwapChain11::resize(DisplayD3D *displayD3D, EGLint backbufferWidth, EGLin
+         return EGL_SUCCESS;
+     }
+ 
++#if defined(VENETIUM_W10M)
++    // Windows 10 Mobile (Venetium). Chromium has the buffers resized when the
++    // panel's room changes -- the keyboard, a system bar -- and does so
++    // between two frames, not only right after a present as a window's own
++    // resize is noticed (NativeViewGLSurfaceEGL::Resize: the fixed size,
++    // then eglWaitNative).
++    if (mSwapChain == nullptr)
++    {
++        // Given up after a resize that failed, below. What follows would read
++        // through it; the caller makes the surface again.
++        return EGL_BAD_ALLOC;
++    }
++    // Nothing may hold a buffer while they are resized. A present takes the
++    // back buffer off the device, but a frame that was drawn and never
++    // presented leaves its view bound, and ResizeBuffers then fails with
++    // DXGI_ERROR_INVALID_CALL.
++    mRenderer->getStateManager()->setRenderTarget(nullptr, nullptr);
++    mRenderer->getStateManager()->invalidateRenderTarget();
++#endif
++
+     // Can only call resize if we have already created our swap buffer and resources
+     ASSERT(mSwapChain && mBackBufferTexture.valid() && mBackBufferRTView.valid() &&
+            mBackBufferSRView.valid());
+@@ -515,6 +535,22 @@ EGLint SwapChain11::resize(DisplayD3D *displayD3D, EGLint backbufferWidth, EGLin
+     hr = mSwapChain->ResizeBuffers(desc.BufferCount, backbufferWidth, backbufferHeight,
+                                    getSwapChainNativeFormat(), 0);
+ 
++#if defined(VENETIUM_W10M)
++    if (FAILED(hr) && !d3d11::isDeviceLostError(hr))
++    {
++        // Refused. On a phone that is mostly address space: three buffers of
++        // 12 MB, each wanted in one piece, in a 32-bit process. gecko-w10m
++        // met exactly this on an HP Elite x3 and found the second try taken,
++        // the old buffers having gone with the first. What Direct3D 11 has
++        // yet to destroy goes with the flush.
++        ERR() << "Swap chain resize to " << backbufferWidth << "x" << backbufferHeight
++              << " failed, " << gl::FmtHR(hr) << "; trying once more.";
++        mRenderer->getDeviceContext()->Flush();
++        hr = mSwapChain->ResizeBuffers(desc.BufferCount, backbufferWidth, backbufferHeight,
++                                       getSwapChainNativeFormat(), 0);
++    }
++#endif
++
+     if (FAILED(hr))
+     {
+         ERR() << "Error resizing swap chain buffers, " << gl::FmtHR(hr);
+@@ -555,6 +591,18 @@ EGLint SwapChain11::resize(DisplayD3D *displayD3D, EGLint backbufferWidth, EGLin
+         mBackBufferSRView.setInternalName("BackBufferSRV");
+     }
+ 
++#if defined(VENETIUM_W10M)
++    if (!mBackBufferRTView.valid())
++    {
++        // Resized, and no buffer to be had from the chain, or no view of it:
++        // the next clear would hand Direct3D a null view. As good as not
++        // resized; the caller makes the surface again.
++        ERR() << "No back buffer after the swap chain resize, " << gl::FmtHR(hr);
++        release();
++        return EGL_BAD_ALLOC;
++    }
++#endif
++
+     mFirstSwap = true;
+ 
+     return resetOffscreenBuffers(displayD3D, backbufferWidth, backbufferHeight);
+@@ -907,6 +955,11 @@ EGLint SwapChain11::present(DisplayD3D *displayD3D, EGLint x, EGLint y, EGLint w
+ 
+     HRESULT result = S_OK;
+ 
++#if defined(VENETIUM_W10M)
++    LARGE_INTEGER presentStart = {};
++    QueryPerformanceCounter(&presentStart);
++#endif
++
+     // Use IDXGISwapChain1::Present1 with a dirty rect if DXGI 1.2 is available.
+     // Dirty rect present is not supported with a multisampled swapchain.
+     if (mSwapChain1 != nullptr && mEGLSamples <= 1)
+@@ -930,8 +983,56 @@ EGLint SwapChain11::present(DisplayD3D *displayD3D, EGLint x, EGLint y, EGLint w
+         result = mSwapChain->Present(swapInterval, 0);
+     }
+ 
++#if defined(VENETIUM_W10M)
++    // Whether a frame ever reached the chain, and into what, is the first
++    // thing to know when the panel stays empty: said once per chain. A back
++    // buffer view that could not be made is otherwise silent (its result is
++    // only asserted on), and DXGI_STATUS_OCCLUDED (0x087A0001) is a success.
++    if (mFirstSwap)
++    {
++        WARN() << "first present of the " << mWidth << "x" << mHeight
++               << " swap chain: interval " << swapInterval << ", back buffer views "
++               << mBackBufferRTView.valid() << "/" << mBackBufferSRView.valid() << ", "
++               << gl::FmtHR(result);
++    }
++#endif
++
+     mFirstSwap = false;
+ 
++#if defined(VENETIUM_W10M)
++    {
++        // How often a present stood, and for how long: it waits for the
++        // display once the frames queued reach the device's limit (DXGI's
++        // default, three), and this thread is Chromium's GPU thread, which
++        // also uploads the page's tiles. A line every 600 presents at most,
++        // and only if any of them waited.
++        static int sPresents       = 0;
++        static int sWaited         = 0;
++        static LONGLONG sLongestMs = 0;
++        LARGE_INTEGER presentEnd   = {};
++        QueryPerformanceCounter(&presentEnd);
++        const LONGLONG ms = (presentEnd.QuadPart - presentStart.QuadPart) * 1000 /
++                            std::max<LONGLONG>(mQPCFrequency, 1);
++        ++sPresents;
++        if (ms >= 8)
++        {
++            ++sWaited;
++            sLongestMs = std::max(sLongestMs, ms);
++        }
++        if (sPresents >= 600)
++        {
++            if (sWaited > 0)
++            {
++                WARN() << "Present waited 8 ms or more in " << sWaited << " of the last "
++                       << sPresents << " frames, " << sLongestMs << " ms at most.";
++            }
++            sPresents  = 0;
++            sWaited    = 0;
++            sLongestMs = 0;
++        }
++    }
++#endif
++
+     // Some swapping mechanisms such as DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL unbind the current render
+     // target. Mark it dirty. Use the proxy context in display since there is none available.
+     mRenderer->getStateManager()->invalidateRenderTarget();
+diff --git a/third_party/angle/src/libANGLE/renderer/d3d/d3d11/win32/NativeWindow11Win32.cpp b/third_party/angle/src/libANGLE/renderer/d3d/d3d11/win32/NativeWindow11Win32.cpp
+index 31fa61afcf52e617a583e7c3fd31ecdc8149fbca..d5834085894b3bdcf1e2c2fcb1db7ed828652f69 100644
+--- a/third_party/angle/src/libANGLE/renderer/d3d/d3d11/win32/NativeWindow11Win32.cpp
++++ b/third_party/angle/src/libANGLE/renderer/d3d/d3d11/win32/NativeWindow11Win32.cpp
+@@ -150,6 +150,25 @@ HRESULT NativeWindow11Win32::createSwapChain(ID3D11Device *device,
+         IDXGISwapChain1 *swapChain1 = nullptr;
+         HRESULT result =
+             factory2->CreateSwapChainForComposition(device, &swapChainDesc, nullptr, &swapChain1);
++        if (FAILED(result) && !d3d11::isDeviceLostError(result))
++        {
++            // Refused, on a phone mostly for want of address space: three
++            // buffers, each in one piece. This is also where a surface is
++            // made again after its chain would not be resized, when room is
++            // at its shortest; what the chain before this one still holds
++            // goes with a flush (Direct3D 11 destroys late). Then once more.
++            ERR() << "Creating the panel's swap chain failed, " << gl::FmtHR(result)
++                  << "; trying once more.";
++            ID3D11DeviceContext *context = nullptr;
++            device->GetImmediateContext(&context);
++            if (context != nullptr)
++            {
++                context->Flush();
++                SafeRelease(context);
++            }
++            result = factory2->CreateSwapChainForComposition(device, &swapChainDesc, nullptr,
++                                                             &swapChain1);
++        }
+         SafeRelease(factory2);
+         if (SUCCEEDED(result))
+         {
+diff --git a/ui/gl/gl_surface_egl.cc b/ui/gl/gl_surface_egl.cc
+index 82ef4b16ca04ca731f1bb19f3786e9a0193de7a1..3108b71fa67a9c5302c0e0542a808b640381253e 100644
+--- a/ui/gl/gl_surface_egl.cc
++++ b/ui/gl/gl_surface_egl.cc
+@@ -760,6 +760,34 @@ bool NativeViewGLSurfaceEGL::Resize(const gfx::Size& size,
+   // Current surface may not be |this| if it is wrapped, but it should point to
+   // the same handle.
+   DCHECK_EQ(surface->GetHandle(), GetHandle());
++#if defined(VENETIUM_W10M)
++  // Windows 10 Mobile: the room changes every time the keyboard or a system
++  // bar comes or goes. Making the surface again makes a second swap chain --
++  // three more buffers of 12 MB, each wanted in one piece of a 2 GB address
++  // space -- while the panel still shows the first, and leaves the panel
++  // empty until the new chain has a frame. The surface is a fixed-size one
++  // (EGL_ANGLE_window_fixed_size), so it is told its new size instead, and
++  // eglWaitNative has ANGLE resize the buffers of the chain it has, now
++  // (SurfaceD3D::checkForOutOfDateSwapChain) and not after the next swap,
++  // which would be a frame drawn for the new size into the old buffers. If
++  // the buffers cannot be resized ANGLE has let go of the chain, and the
++  // surface is made again below, as upstream does.
++  if (surface_ && W10mPanelFromWindow(window_) && enable_fixed_size_angle_ &&
++      display_->ext->b_EGL_ANGLE_window_fixed_size && context && surface &&
++      surface->GetHandle() == GetHandle() &&
++      eglGetCurrentSurface(EGL_DRAW) == surface_) {
++    const EGLDisplay egl_display = display_->GetDisplay();
++    if (eglSurfaceAttrib(egl_display, surface_, EGL_WIDTH, size.width()) &&
++        eglSurfaceAttrib(egl_display, surface_, EGL_HEIGHT, size.height()) &&
++        eglWaitNative(EGL_CORE_NATIVE_ENGINE)) {
++      LOG(WARNING) << "Swap chain resized in place to " << size.ToString();
++      return true;
++    }
++    LOG(ERROR) << "Resizing the swap chain to " << size.ToString()
++               << " failed with error " << GetLastEGLErrorString()
++               << "; making the surface again.";
++  }
++#endif
+   context->ReleaseCurrent(surface);
+   Destroy();
+   if (!Initialize(format_)) {
+diff --git a/ui/gl/gl_surface_presentation_helper.cc b/ui/gl/gl_surface_presentation_helper.cc
+index 45c4da55f1f165784b2a090b19d74476173d13cf..abfa3275b33c92db684d7a90f57dd0384fb5e7f9 100644
+--- a/ui/gl/gl_surface_presentation_helper.cc
++++ b/ui/gl/gl_surface_presentation_helper.cc
+@@ -209,6 +209,13 @@ void GLSurfacePresentationHelper::OnMakeCurrent(GLContext* context,
+       egl_timestamp_client_ = nullptr;
+   }
+ 
++#if !defined(VENETIUM_W10M)
++  // Windows 10 Mobile: a frame's feedback does not wait for a GPU timer or a
++  // fence. Neither has run on these phones' Direct3D drivers (gecko-w10m
++  // found a wait on either to cost 10-16 ms a frame on an Adreno 530), and
++  // the embedder takes its first-frame signal from this feedback. Without
++  // them CheckPendingFrames() answers every swapped frame at once, with the
++  // time of the next vsync.
+   gpu_timing_client_ = context->CreateGPUTimingClient();
+   if (!gpu_timing_client_->IsAvailable())
+     gpu_timing_client_ = nullptr;
+@@ -218,6 +225,7 @@ void GLSurfacePresentationHelper::OnMakeCurrent(GLContext* context,
+ #if !BUILDFLAG(IS_ANDROID)
+   gl_fence_supported_ = GLFence::IsSupported();
+ #endif
++#endif  // !defined(VENETIUM_W10M)
+ }
+ 
+ void GLSurfacePresentationHelper::PreSwapBuffers(

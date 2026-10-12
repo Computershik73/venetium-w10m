@@ -141,25 +141,45 @@ std::wstring Registers(const CONTEXT& c) {
   return buf;
 }
 
-// How much address space is left, and its largest free piece: a 32-bit
-// process runs out of the latter long before the phone's memory limit.
-void AddressSpace(unsigned* free_mb, unsigned* largest_mb) {
+// How much address space is left, its largest free piece, and what took the
+// rest: a 32-bit process runs out of address space long before the phone's
+// memory limit, and mostly to memory that is reserved or mapped rather than
+// used.
+struct AddressSpaceUse {
+  uint64_t free = 0;
+  uint64_t largest_free = 0;
+  uint64_t image = 0;     // DLLs
+  uint64_t mapped = 0;    // files and shared memory
+  uint64_t committed = 0; // private, in use
+  uint64_t reserved = 0;  // private, set aside
+};
+
+AddressSpaceUse AddressSpace() {
+  AddressSpaceUse use;
   uintptr_t at = 0x10000;
-  uint64_t total = 0, largest = 0;
   MEMORY_BASIC_INFORMATION region{};
   while (at < 0x80000000u &&
          ::VirtualQuery(reinterpret_cast<void*>(at), &region, sizeof(region))) {
     if (region.State == MEM_FREE) {
-      total += region.RegionSize;
-      if (region.RegionSize > largest) largest = region.RegionSize;
+      use.free += region.RegionSize;
+      if (region.RegionSize > use.largest_free) {
+        use.largest_free = region.RegionSize;
+      }
+    } else if (region.Type == MEM_IMAGE) {
+      use.image += region.RegionSize;
+    } else if (region.Type == MEM_MAPPED) {
+      use.mapped += region.RegionSize;
+    } else if (region.State == MEM_COMMIT) {
+      use.committed += region.RegionSize;
+    } else {
+      use.reserved += region.RegionSize;
     }
     const uintptr_t next = reinterpret_cast<uintptr_t>(region.BaseAddress) +
                            region.RegionSize;
     if (next <= at) break;
     at = next;
   }
-  *free_mb = static_cast<unsigned>(total >> 20);
-  *largest_mb = static_cast<unsigned>(largest >> 20);
+  return use;
 }
 
 std::wstring MemoryLine() {
@@ -172,10 +192,12 @@ std::wstring MemoryLine() {
             L" MB";
   } catch (...) {
   }
-  unsigned free_mb = 0, largest_mb = 0;
-  AddressSpace(&free_mb, &largest_mb);
-  line += L", address space free " + std::to_wstring(free_mb) +
-          L" MB (largest " + std::to_wstring(largest_mb) + L" MB)";
+  const AddressSpaceUse use = AddressSpace();
+  const auto mb = [](uint64_t bytes) { return std::to_wstring(bytes >> 20); };
+  line += L", address space free " + mb(use.free) + L" MB (largest " +
+          mb(use.largest_free) + L" MB); taken: DLLs " + mb(use.image) +
+          L", mapped " + mb(use.mapped) + L", private " + mb(use.committed) +
+          L" + " + mb(use.reserved) + L" reserved";
   return line;
 }
 

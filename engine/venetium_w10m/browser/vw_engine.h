@@ -21,6 +21,7 @@
 #include "base/synchronization/lock.h"
 #include "base/task/single_thread_task_runner.h"
 #include "ui/gfx/geometry/size.h"
+#include "venetium_w10m/browser/vw_panel.h"
 #include "venetium_w10m/capi/venetium_w10m_capi.h"
 
 namespace venetium_w10m {
@@ -91,9 +92,18 @@ class VwEngine {
   // started or not.
   void EngineExited();
 
-  // Viz thread: the first hardware-presented frame is on screen; the crash
-  // guard is cleared.
-  void HardwarePresentWorked();
+  // Any thread: |kind| (PresentKind::kD3D11 or kAngle) put a frame on
+  // screen; it is no longer counted against (vw_present_guard.h).
+  void HardwarePresentWorked(PresentKind kind);
+
+  // Any thread: GPU compositing cannot go on in this run (GL did not start,
+  // its surface could not be made, its context is lost); the browser
+  // carries on with software compositing. Logged. |for_good| is proof that
+  // it cannot work on this phone: later runs leave it alone, unless it had
+  // shown a frame in this one. Otherwise the run only counts against it, as
+  // one that died would.
+  void GpuCompositingFailed(const char* reason, bool for_good);
+  bool gpu_compositing_failed() const { return gpu_failed_.load(); }
 
   // Tab ids are handed out here so that venetium_w10m_tab_create can return
   // one at once, before the tab exists. Never reused within a run.
@@ -125,6 +135,7 @@ class VwEngine {
   std::string search_template_ = "https://www.google.com/search?q=%s";
   std::atomic<bool> running_{false};
   std::atomic<bool> stopping_{false};
+  std::atomic<bool> gpu_failed_{false};
   // No more tasks are taken (the browser is going or the engine has ended).
   bool stopped_ = false;  // under lock_
   std::atomic<int32_t> next_tab_id_{1};

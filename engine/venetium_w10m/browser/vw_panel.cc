@@ -21,6 +21,7 @@
 
 #include "base/no_destructor.h"
 #include "base/synchronization/lock.h"
+#include "base/time/time.h"
 #include "ui/gl/w10m_panel.h"
 #include "venetium_w10m/common/vw_log.h"
 
@@ -35,6 +36,21 @@ namespace Controls = ABI::Windows::UI::Xaml::Controls;
 // How long an engine thread waits for the XAML thread. It never waits on
 // the engine, so this only runs out if the app is being torn down.
 constexpr DWORD kUiTripTimeoutMs = 2000;
+
+// How long one waits for the XAML thread to take a chain out when another is
+// made right after it. Shorter than the wait to put one in: nothing is lost
+// if the panel lets go a little late, and at the end of a run the XAML
+// thread may not come back at all.
+constexpr DWORD kUiDetachTimeoutMs = 500;
+
+// How long the panel may be without a chain while one of the same kind is
+// made to replace it, and still be said to show that kind.
+constexpr int64_t kReplaceGraceMs = 1000;
+
+// Milliseconds on TimeTicks' clock, and never 0.
+int64_t NowMs() {
+  return (base::TimeTicks::Now() - base::TimeTicks()).InMilliseconds() | 1;
+}
 
 struct State {
   base::Lock lock;
@@ -148,7 +164,12 @@ HRESULT __stdcall SetAngleSwapChain(void* context, IDXGISwapChain1* chain) {
       generation = state.angle_generation;
       state.angle_generation = 0;
     }
-    host->Detach(generation);
+    // ANGLE's surface is going. When Chromium makes the surface again (its
+    // swap chain would not be resized, or the context was lost) the next
+    // chain is made at once, on this thread: this one has to be out of the
+    // panel by then, and the shell is not told the bitmap is back for the
+    // moment in between.
+    host->DetachToReplace(generation);
     return S_OK;
   }
   const uint32_t generation = host->Attach(chain, PresentKind::kAngle);
@@ -263,6 +284,12 @@ uint32_t PanelHost::Attach(IDXGISwapChain1* chain, PresentKind kind) {
       if (state.generation == generation) {
         ++state.generation;  // a trip that still runs later finds it stale
       }
+      if (!state.current) {
+        // Nothing is in the panel: the chain this one was to replace has
+        // been taken out (DetachToReplace). The shell shows its bitmap.
+        replacing_since_.store(0);
+        presenting_.store(static_cast<int32_t>(PresentKind::kBitmap));
+      }
     }
     NoteF("panel: the swap chain was not taken (0x%08lx)",
           static_cast<unsigned long>(hr));
@@ -278,8 +305,11 @@ uint32_t PanelHost::Attach(IDXGISwapChain1* chain, PresentKind kind) {
     state.current = chain2;
     state.scale_x = scale->first;
     state.scale_y = scale->second;
+    // With the lock held, like every other change of what is on screen:
+    // presenting() may be giving up on a replacement at this very moment.
+    replacing_since_.store(0);
+    presenting_.store(static_cast<int32_t>(kind));
   }
-  presenting_.store(static_cast<int32_t>(kind));
   NoteF("panel: chain %u shows %s, scale %.3fx%.3f, inverse transform 0x%08lx",
         generation, KindName(kind), scale->first, scale->second,
         static_cast<unsigned long>(scaled));
@@ -300,8 +330,9 @@ void PanelHost::Detach(uint32_t generation) {
     state.current.Reset();
     native = state.native;
     dispatcher = state.dispatcher;
+    replacing_since_.store(0);
+    presenting_.store(static_cast<int32_t>(PresentKind::kBitmap));
   }
-  presenting_.store(static_cast<int32_t>(PresentKind::kBitmap));
   NoteF("panel: chain %u taken out", generation);
   if (!dispatcher) {
     return;
@@ -328,6 +359,78 @@ void PanelHost::Detach(uint32_t generation) {
       &action);
 }
 
+void PanelHost::DetachToReplace(uint32_t generation) {
+  State& state = GetState();
+  ComPtr<ISwapChainPanelNative> native;
+  ComPtr<Core::ICoreDispatcher> dispatcher;
+  uint32_t cleared = 0;
+  {
+    base::AutoLock hold(state.lock);
+    if (!generation || state.generation != generation) {
+      return;
+    }
+    cleared = ++state.generation;
+    state.current.Reset();
+    native = state.native;
+    dispatcher = state.dispatcher;
+    replacing_since_.store(NowMs());
+  }
+  NoteF("panel: chain %u taken out, another is to replace it", generation);
+  if (!dispatcher) {
+    return;
+  }
+  EnsureMta();
+  const HRESULT hr = RunOnUiThread(
+      dispatcher.Get(),
+      [native, cleared]() -> HRESULT {
+        {
+          State& state = GetState();
+          base::AutoLock hold(state.lock);
+          if (state.generation != cleared) {
+            return S_OK;  // a newer chain is in the panel by now
+          }
+        }
+        return native->SetSwapChain(nullptr);
+      },
+      kUiDetachTimeoutMs);
+  if (FAILED(hr)) {
+    NoteF("panel: chain %u was not out of the panel in time (0x%08lx)",
+          generation, static_cast<unsigned long>(hr));
+  }
+}
+
+void PanelHost::NotReplaced() {
+  State& state = GetState();
+  base::AutoLock hold(state.lock);
+  if (replacing_since_.load() && !state.current) {
+    replacing_since_.store(0);
+    presenting_.store(static_cast<int32_t>(PresentKind::kBitmap));
+  }
+}
+
+PresentKind PanelHost::presenting() {
+  if (replacing_since_.load()) {
+    bool gave_up = false;
+    {
+      State& state = GetState();
+      base::AutoLock hold(state.lock);
+      const int64_t since = replacing_since_.load();
+      if (since && NowMs() - since > kReplaceGraceMs) {
+        // Nothing came to replace the chain that was taken out: whoever made
+        // it has given up (GPU compositing has ended, say). Frames are the
+        // bitmap's from here, and the shell is to show it.
+        replacing_since_.store(0);
+        presenting_.store(static_cast<int32_t>(PresentKind::kBitmap));
+        gave_up = true;
+      }
+    }
+    if (gave_up) {
+      Note("panel: no chain replaced the one taken out: the bitmap from here");
+    }
+  }
+  return static_cast<PresentKind>(presenting_.load());
+}
+
 gfx::AcceleratedWidget PanelHost::angle_window() {
   return reinterpret_cast<gfx::AcceleratedWidget>(&g_angle_window);
 }
@@ -337,10 +440,20 @@ void PanelHost::SetSize(const gfx::Size& pixels) {
   ::InterlockedExchange(&g_angle_window.height, pixels.height());
 }
 
-void PanelHost::CompositorPresented() {
-  if (presenting() == PresentKind::kAngle) {
-    presented_frames_.fetch_add(1);
+bool PanelHost::CompositorPresented() {
+  State& state = GetState();
+  {
+    base::AutoLock hold(state.lock);
+    // ANGLE's frame only if ANGLE's chain is the one in the panel. While its
+    // surface is being made again it is not, nor once the software path has
+    // put its own chain there; the caller asks again.
+    if (!state.angle_generation ||
+        state.generation != state.angle_generation) {
+      return false;
+    }
   }
+  presented_frames_.fetch_add(1);
+  return true;
 }
 
 void PanelHost::Presented(uint32_t generation) {

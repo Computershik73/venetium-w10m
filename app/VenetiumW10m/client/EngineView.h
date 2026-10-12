@@ -37,6 +37,9 @@ class EngineView {
   // Starts copying frames and reporting the room. Call once the engine has
   // been asked to start.
   void Start();
+  // Runs |then| once the room's size is known and the engine has been told
+  // (at once if it is, and after a moment regardless).
+  void WhenRoomKnown(std::function<void()> then);
   // Stops copying frames (the engine has ended).
   void Stop();
   // The display's scale (raw pixels per view pixel) changed.
@@ -86,6 +89,9 @@ class EngineView {
   double rawPerView_ = 1.0;
   int32_t width_ = 0;    // the bitmap
   int32_t height_ = 0;
+  void RoomKnown();
+  std::function<void()> whenRoom_;
+  winrt::Windows::UI::Xaml::DispatcherTimer roomTimer_{nullptr};
   int32_t roomWidth_ = 0;  // the content area, raw pixels
   int32_t roomHeight_ = 0;
   uint64_t seen_ = 0;

@@ -10,6 +10,11 @@
 // adapter's first output for each vertical blank (as gecko-w10m does) and
 // tells the compositor when the last one was and how far apart they are;
 // viz's timer then ticks in step with the display.
+//
+// Only with "--vw-vsync=timer" among the shell's switches now. By default
+// viz takes its BeginFrames from the vertical blank itself
+// (components/viz/service/frame_sinks/external_begin_frame_source_w10m.h),
+// and this stays as the way back to the timer, for comparing on a device.
 
 #ifndef VENETIUM_W10M_BROWSER_VW_VSYNC_H_
 #define VENETIUM_W10M_BROWSER_VW_VSYNC_H_

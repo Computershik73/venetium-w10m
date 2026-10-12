@@ -1,0 +1,51 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Mon, 12 Oct 2026 10:58:04 +0400
+Subject: [PATCH] Windows 10 Mobile: touch flings with the curve Chrome for
+ Android uses
+
+On Windows the fling curve is built from the display's pixels per inch,
+taken from ScreenWin. The embedder's screen is not one, so the fallback
+answered (0, 0): the curve was NaN from start to end, no scroll was sent
+after the finger lifted, and the page stopped dead. A phone flings with
+the mobile curve, which needs nothing from the display.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../renderer_host/input/fling_scheduler.cc       | 16 ++++++++++++++--
+ 1 file changed, 14 insertions(+), 2 deletions(-)
+
+diff --git a/content/browser/renderer_host/input/fling_scheduler.cc b/content/browser/renderer_host/input/fling_scheduler.cc
+index 79df9203ec3b63fbfb30ceb0c402d7cd4595c628..e318c8c84c18a04b67080ce75323d41cca866c69 100644
+--- a/content/browser/renderer_host/input/fling_scheduler.cc
++++ b/content/browser/renderer_host/input/fling_scheduler.cc
+@@ -64,7 +64,11 @@ bool FlingScheduler::ProgressFlingOnFlingStart() {
+ }
+ 
+ bool FlingScheduler::ShouldUseMobileFlingCurve() {
+-#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_IOS)
++#if defined(VENETIUM_W10M)
++  // Windows 10 Mobile is a phone: the curve Chrome for Android flings with.
++  // It needs nothing from the display either (see GetPixelsPerInch below).
++  return true;
++#elif BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_IOS)
+   return true;
+ #elif BUILDFLAG(IS_CHROMEOS)
+   CHECK(display::Screen::Get());
+@@ -76,7 +80,15 @@ bool FlingScheduler::ShouldUseMobileFlingCurve() {
+ 
+ gfx::Vector2dF FlingScheduler::GetPixelsPerInch(
+     const gfx::PointF& position_in_screen) {
+-#if BUILDFLAG(IS_WIN)
++#if defined(VENETIUM_W10M)
++  // The embedder's display::Screen is not a ScreenWin, so GetScreenWin()
++  // would hand out its fallback, whose one display has (0, 0) pixels per
++  // inch. PhysicsBasedFlingCurve divides by that: every offset of the fling
++  // is NaN, FlingController sends no scroll for a NaN delta, and the page
++  // stops dead under a lifted finger.
++  return gfx::Vector2dF(input::kDefaultPixelsPerInch,
++                        input::kDefaultPixelsPerInch);
++#elif BUILDFLAG(IS_WIN)
+   return display::win::GetScreenWin()->GetPixelsPerInch(position_in_screen);
+ #else
+   return gfx::Vector2dF(input::kDefaultPixelsPerInch,

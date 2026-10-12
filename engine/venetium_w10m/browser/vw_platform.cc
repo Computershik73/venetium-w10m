@@ -42,6 +42,10 @@ namespace {
 
 constexpr int64_t kDisplayId = 1;
 
+// How many frames that were not ANGLE's the compositor may show before it
+// is no longer asked about them (GPU compositing has ended, then).
+constexpr int kMaxCompositorFrameAsks = 120;
+
 // Like //headless's focus client: one focused window, observers told.
 class VwFocusClient : public aura::client::FocusClient,
                       public aura::WindowObserver {
@@ -281,18 +285,48 @@ VwPlatform::VwPlatform(const gfx::Size& content_pixels,
   host_->Show();
   NoteF("platform: browser window %dx%d px", bounds.width(), bounds.height());
 
-  vsync_ = std::make_unique<VwVsync>(base::BindRepeating(
-      &VwPlatform::OnVSync, weak_factory_.GetWeakPtr()));
+  // BeginFrames come from the display's vertical blank inside viz
+  // (components/viz/service/frame_sinks/external_begin_frame_source_w10m.cc):
+  // one thread waiting on the display is enough. "--vw-vsync=timer" among
+  // the shell's switches puts viz back on its timer, and only then is that
+  // timer steered from here, as it was before.
+  if (VwEngine::Get()->config().switches.find("--vw-vsync=timer") !=
+      std::string::npos) {
+    vsync_ = std::make_unique<VwVsync>(base::BindRepeating(
+        &VwPlatform::OnVSync, weak_factory_.GetWeakPtr()));
+  }
 
   // The first frame the compositor itself puts on screen (GPU compositing;
   // the software paths count their own presents).
+  if (VwEngine::Get()->config().gpu_compositing) {
+    WatchCompositorFrame();
+  }
+}
+
+void VwPlatform::WatchCompositorFrame() {
   host_->compositor()->RequestSuccessfulPresentationTimeForNextFrame(
-      base::BindOnce([](const viz::FrameTimingDetails&) {
-        PanelHost::Get()->CompositorPresented();
-        if (PanelHost::Get()->presenting() == PresentKind::kAngle) {
-          VwEngine::Get()->HardwarePresentWorked();
-        }
-      }));
+      base::BindOnce(&VwPlatform::OnCompositorFrame,
+                     weak_factory_.GetWeakPtr()));
+}
+
+void VwPlatform::OnCompositorFrame(const viz::FrameTimingDetails&) {
+  // Counted only if ANGLE's chain is the one in the panel at this moment. It
+  // is not while its surface is being made again (a swap chain that would
+  // not be resized), nor once software compositing has taken over.
+  if (PanelHost::Get()->CompositorPresented()) {
+    VwEngine::Get()->HardwarePresentWorked(PresentKind::kAngle);
+    return;
+  }
+  if (PanelHost::Get()->presenting() == PresentKind::kD3D11 ||
+      ++compositor_frame_asks_ > kMaxCompositorFrameAsks) {
+    // Software frames, which count themselves; or frames keep arriving that
+    // are not ANGLE's.
+    return;
+  }
+  // Asked again, and a frame asked for with it: a page that stands still
+  // draws no other, and asking alone does not make one.
+  WatchCompositorFrame();
+  host_->compositor()->ScheduleFullRedraw();
 }
 
 void VwPlatform::OnVSync(base::TimeTicks timebase, base::TimeDelta interval) {
@@ -300,7 +334,9 @@ void VwPlatform::OnVSync(base::TimeTicks timebase, base::TimeDelta interval) {
 }
 
 void VwPlatform::SetActive(bool active) {
-  vsync_->SetActive(active);
+  if (vsync_) {
+    vsync_->SetActive(active);
+  }
 }
 
 VwPlatform::~VwPlatform() {

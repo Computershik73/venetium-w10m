@@ -1,0 +1,40 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Mon, 12 Oct 2026 10:58:04 +0400
+Subject: [PATCH] Windows 10 Mobile: 96 MB, not 512, set aside for array
+ buffers
+
+One process is the browser, the GPU thread and every renderer there, in
+2 GB of address space. The half gigabyte Blink reserves on 32-bit Windows
+is taken from Direct3D's textures and swap chains, DLLs and thread stacks,
+none of which can ask for it back.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../blink/renderer/controller/blink_initializer.cc  | 13 ++++++++++++-
+ 1 file changed, 12 insertions(+), 1 deletion(-)
+
+diff --git a/third_party/blink/renderer/controller/blink_initializer.cc b/third_party/blink/renderer/controller/blink_initializer.cc
+index 4d1f2acf58e43bf8d5e19294133647387f03cd0a..8ba2bd6fc4ba3b4938a0022762b7cf56226f0b7b 100644
+--- a/third_party/blink/renderer/controller/blink_initializer.cc
++++ b/third_party/blink/renderer/controller/blink_initializer.cc
+@@ -131,7 +131,18 @@ void InitializeCommon(Platform* platform, mojo::BinderMap* binders) {
+   if (!is_wow_64) {
+     // Try to reserve as much address space as we reasonably can.
+     const size_t kMB = 1024 * 1024;
+-    for (size_t size = 512 * kMB; size >= 32 * kMB; size -= 16 * kMB) {
++#if defined(VENETIUM_W10M)
++    // One process is the browser, the GPU thread and every renderer here, in
++    // 2 GB of address space. Half a gigabyte set aside for array buffers is
++    // taken from Direct3D's textures and swap chains, from DLLs and thread
++    // stacks, none of which can ask for it back. A piece small enough to
++    // spare is kept as PartitionAlloc's last resort.
++    const size_t kLargestReservation = 96 * kMB;
++#else
++    const size_t kLargestReservation = 512 * kMB;
++#endif
++    for (size_t size = kLargestReservation; size >= 32 * kMB;
++         size -= 16 * kMB) {
+       if (partition_alloc::ReserveAddressSpace(size)) {
+         break;
+       }

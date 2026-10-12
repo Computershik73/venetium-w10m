@@ -61,6 +61,7 @@ class MainPage {
   void ShowNotice(std::wstring const& text);
   void ShowLog();
   void ShowAbout();
+  void ShowEngineSwitches();
   void SendPhoneClipboard();
   void ReportScreen();
   void OnEngineStopped(int32_t code);

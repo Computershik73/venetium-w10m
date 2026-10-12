@@ -52,8 +52,18 @@ class PanelHost {
   // chain's generation (> 0), or 0 if the panel did not take it in time.
   uint32_t Attach(IDXGISwapChain1* chain, PresentKind kind);
   // Takes the chain of |generation| out of the panel, unless a newer one is
-  // there by now. Does not wait.
+  // there by now. Does not wait. What is on screen is the bitmap from here.
   void Detach(uint32_t generation);
+  // The same for a chain that another of its kind is about to replace (its
+  // buffers would not be resized; ANGLE's surface is made again). Any thread
+  // but the UI thread: waits, briefly, until the panel has let go of the
+  // chain, so that the new buffers are not made beside the old ones. What is
+  // on screen goes on being called its kind for a moment, so that the shell
+  // does not swap its layers for a few frames; if no chain comes -- Attach
+  // fails, NotReplaced() says so, or the moment passes -- it is the bitmap.
+  void DetachToReplace(uint32_t generation);
+  // The chain that was to replace one taken out could not be made.
+  void NotReplaced();
 
   // A frame of |generation| reached the screen.
   void Presented(uint32_t generation);
@@ -64,18 +74,22 @@ class PanelHost {
   // shown as kAngle. Its size is the content area's, in pixels.
   gfx::AcceleratedWidget angle_window();
   void SetSize(const gfx::Size& pixels);
-  // UI thread: the compositor's frame is on screen.
-  void CompositorPresented();
+  // Browser UI thread: a frame of the compositor's is on screen. True if it
+  // was ANGLE's -- its chain is the one in the panel -- and is counted.
+  bool CompositorPresented();
 
-  PresentKind presenting() const {
-    return static_cast<PresentKind>(presenting_.load());
-  }
+  // Any thread. Also where a replacement that never came is given up.
+  PresentKind presenting();
   uint64_t presented_frames() const { return presented_frames_.load(); }
 
  private:
   std::atomic<bool> has_panel_{false};
   std::atomic<int32_t> presenting_{0};
   std::atomic<uint64_t> presented_frames_{0};
+  // When a chain was taken out for another of its kind to replace it
+  // (milliseconds on TimeTicks' clock, never 0), or 0. Written with the
+  // panel's lock held. See DetachToReplace.
+  std::atomic<int64_t> replacing_since_{0};
 };
 
 }  // namespace venetium_w10m

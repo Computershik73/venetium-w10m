@@ -33,9 +33,13 @@ class Settings {
   // rather than copied into a bitmap. Read at start.
   static bool HardwareGraphics();
   static void SetHardwareGraphics(bool on);
+  // Set when Hardware graphics is switched on again: the next start asks
+  // the engine to forget what earlier runs could not do. Read once.
+  static bool TakeGraphicsRetry();
 
   // Extra Chromium switches, for diagnosing on a device.
   static std::wstring EngineSwitches();
+  static void SetEngineSwitches(std::wstring const& switches);
 };
 
 }  // namespace venetium_w10m::client
