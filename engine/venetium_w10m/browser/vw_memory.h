@@ -85,6 +85,9 @@ class VwMemory {
   void MaybeEnd(base::TimeTicks now);
   void Tell(base::MemoryPressureLevel level);
   void NoteLevel(int was);
+  // The clocks that ration trimming and unloading go on from where they
+  // stood when the app was suspended.
+  void Resumed(base::TimeTicks now);
 
   raw_ptr<VwBrowser> browser_;
   // False with --vw-discard=off among the shell's switches: caches are
@@ -136,6 +139,8 @@ class VwMemory {
   // What Chromium was last told, and since when nothing has been short.
   base::MemoryPressureLevel told_ = base::MEMORY_PRESSURE_LEVEL_NONE;
   base::TimeTicks calm_since_;
+  // When the app was last told it is suspended; null once it is back.
+  base::TimeTicks suspended_at_;
 
   base::WeakPtrFactory<VwMemory> weak_factory_{this};
 };

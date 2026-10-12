@@ -1,0 +1,37 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Mon, 12 Oct 2026 16:55:28 +0400
+Subject: [PATCH] Windows 10 Mobile: the renderer's main thread has 2 MB of
+ stack
+
+base gives a thread of a 32-bit process that is not under WOW64 512 KB,
+while V8 on ARM takes its limit to be 864 KB below the stack's start: a
+script that recurses until V8 would throw its RangeError ran off the end
+of the real stack first, and in one process that ends the browser.
+Reserved, not committed.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../browser/renderer_host/render_process_host_impl.cc    | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/content/browser/renderer_host/render_process_host_impl.cc b/content/browser/renderer_host/render_process_host_impl.cc
+index a37324ca77eea80a7917881fdcf5f8bbcf397db7..3dfee1ad9950aa77a1ea554c73cd302aaaa73b06 100644
+--- a/content/browser/renderer_host/render_process_host_impl.cc
++++ b/content/browser/renderer_host/render_process_host_impl.cc
+@@ -2012,6 +2012,15 @@ bool RenderProcessHostImpl::Init() {
+     // We can't have multiple UI loops on Linux and Android, so we don't support
+     // in-process plugins.
+     options.message_pump_type = base::MessagePumpType::DEFAULT;
++#endif
++#if defined(VENETIUM_W10M)
++    // Blink's main thread and V8's. base gives a thread of a 32-bit process
++    // that is not under WOW64 512 KB of stack (platform_thread_win.cc), while
++    // V8 on ARM takes its limit to be 864 KB below the stack's start
++    // (V8_DEFAULT_STACK_SIZE_KB): a script that recurses until V8 would throw
++    // its RangeError runs off the end of the real stack first, and that ends
++    // the whole browser. Reserved, not committed: address space only.
++    options.stack_size = 2 * 1024 * 1024;
+ #endif
+     // As for execution sequence, this callback should have no any dependency
+     // on starting in-process-render-thread.

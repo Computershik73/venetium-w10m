@@ -105,23 +105,35 @@ unsigned ProbeD3D11() {
 // is counted against hardware video decoding (vw_present_guard.h).
 void VideoDecoding(gl::W10mVideoEvent event) {
   switch (event) {
-    case gl::W10mVideoEvent::kStarting:
+    case gl::W10mVideoEvent::kStarting: {
       // And from here it is not also counted against GPU compositing, which
       // has drawn the page this video is on: a launch that opens a video at
       // once (within the five seconds GPU compositing is given to prove
       // itself) would otherwise charge a driver that only cannot decode
       // to both, and two such launches would leave both alone. Nothing
       // unless GPU compositing has shown a frame.
-      if (!VwEngine::Get()->gpu_compositing_failed()) {
+      // Not for the first of a run: that one is the driver being asked what
+      // it decodes, once, when the renderer starts (RenderMediaClient asks
+      // for the supported configurations at once, media element or none),
+      // and it is over in a moment. Proving GPU compositing there would let
+      // it off its five seconds in every launch whose first frame came
+      // before the question.
+      static std::atomic<bool> asked{false};
+      if (asked.exchange(true) &&
+          !VwEngine::Get()->gpu_compositing_failed()) {
         PresentGuard::Get()->Proven(PresentKind::kAngle);
       }
       PresentGuard::Get()->VideoTrying();
       break;
+    }
     case gl::W10mVideoEvent::kWorked:
       PresentGuard::Get()->VideoWorked();
       break;
     case gl::W10mVideoEvent::kEnded:
       PresentGuard::Get()->VideoEnded();
+      break;
+    case gl::W10mVideoEvent::kLost:
+      PresentGuard::Get()->VideoLost();
       break;
   }
 }
@@ -158,11 +170,12 @@ void ChoosePresentation(EngineConfig* config, uint64_t ram_mb) {
   for (const std::string& token :
        base::SplitString(config->switches, " ", base::TRIM_WHITESPACE,
                          base::SPLIT_WANT_NONEMPTY)) {
-    // Nor is the one that keeps video decoding on the CPU: switching that
-    // off must not have a way of presenting tried again.
+    // Nor is the one that keeps video decoding on the CPU, nor the one that
+    // leaves the device untrimmed when the app is suspended: a way out of
+    // what a driver cannot do must not have a way of presenting tried again.
     if (token != "--vw-gpu=retry" && token != "--vw-present=bitmap" &&
         token != "--vw-codecs=all" && token != "--vw-discard=off" &&
-        token != "--vw-video=software") {
+        token != "--vw-video=software" && token != "--vw-trim=off") {
       made_of += ' ';
       made_of += token;
     }

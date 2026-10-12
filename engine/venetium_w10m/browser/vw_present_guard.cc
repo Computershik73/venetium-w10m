@@ -227,6 +227,13 @@ void PresentGuard::Untried(PresentKind kind) {
       way->count == kGivenUp) {
     return;
   }
+  // Not before the swap chain the compositor shares with software frames
+  // has shown one of those: a run that has put nothing on screen at all and
+  // is closed may be one that hung on the way there, and it started with
+  // |kind|, so nothing else counts it.
+  if (kind == PresentKind::kCompositor && !d3d11_.worked) {
+    return;
+  }
   --way->count;
   way->counted = false;
   way->untried = true;
@@ -306,7 +313,7 @@ void PresentGuard::VideoTrying() {
   {
     base::AutoLock hold(lock_);
     video_watched_ = true;
-    if (video_worked_ || video_trying_ || video_suspended_) {
+    if (video_trying_ || video_suspended_) {
       return;
     }
     video_trying_ = true;
@@ -319,21 +326,24 @@ void PresentGuard::VideoTrying() {
 }
 
 void PresentGuard::VideoWorked() {
+  bool first = false;
   {
     base::AutoLock hold(lock_);
     video_watched_ = false;
-    if (video_worked_) {
-      return;
-    }
+    first = !video_worked_;
     video_worked_ = true;
-    video_trying_ = false;
-    if (video_ != 0) {
-      video_ = 0;
-      WriteVideoCount(file_, stamp_, video_);
+    if (video_trying_) {
+      video_trying_ = false;
+      if (video_ > 0) {
+        --video_;
+        WriteVideoCount(file_, stamp_, video_);
+      }
     }
   }
-  Note("video: the GPU's decoder has given frames for a few seconds; this "
-       "run no longer counts against it");
+  if (first) {
+    Note("video: the GPU's decoder has given frames for a few seconds; the "
+         "run counts against it again only while another decoder is new");
+  }
 }
 
 void PresentGuard::VideoEnded() {
@@ -349,6 +359,21 @@ void PresentGuard::VideoEnded() {
   }
 }
 
+void PresentGuard::VideoLost() {
+  {
+    base::AutoLock hold(lock_);
+    video_watched_ = false;
+    if (!video_trying_) {
+      return;
+    }
+    // Counted, and left so: nothing after this takes the run out again.
+    video_trying_ = false;
+    video_lost_ = true;
+  }
+  Note("video: the graphics device went while the GPU's decoder was first at "
+       "work; this run counts against it");
+}
+
 void PresentGuard::VideoSuspended(bool suspended) {
   base::AutoLock hold(lock_);
   video_suspended_ = suspended;
@@ -360,8 +385,13 @@ void PresentGuard::VideoSuspended(bool suspended) {
         --video_;
         WriteVideoCount(file_, stamp_, video_);
       }
+    } else if (video_worked_ && !video_lost_ && video_ != 0) {
+      // It decoded on the GPU and lived to be suspended with no decoder new:
+      // what earlier runs died of is forgotten.
+      video_ = 0;
+      WriteVideoCount(file_, stamp_, video_);
     }
-  } else if (video_watched_ && !video_worked_ && !video_trying_) {
+  } else if (video_watched_ && !video_trying_) {
     // Resumed with a decoder that has yet to show it works.
     video_trying_ = true;
     ++video_;

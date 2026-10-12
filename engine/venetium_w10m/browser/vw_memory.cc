@@ -122,6 +122,10 @@ constexpr base::TimeDelta kCalm = base::Seconds(30);
 // The phone's word holds until the shell's next measurements have had time
 // to arrive and say the same, or not.
 constexpr base::TimeDelta kPhoneHold = base::Seconds(5);
+// The phone freezes a suspended app within seconds of saying so (the shell
+// holds it for a second and a half): a measurement later than this was made
+// after the app came back.
+constexpr base::TimeDelta kFrozenAfter = base::Seconds(10);
 // An alarm is level 3 for the one step that answers it, and the next alarm
 // is heard only this long after: a heap at its limit calls again at every
 // collection.
@@ -164,6 +168,11 @@ void VwMemory::OnSample(const MemorySample& sample) {
   if (now - sample.taken > kStale) {
     return;
   }
+  if (!suspended_at_.is_null() && now - suspended_at_ > kFrozenAfter) {
+    // The shell's measuring thread was ahead of its word that the app is
+    // back.
+    Resumed(now);
+  }
   last_ = sample;
   measured_ = true;
   largest_level_ =
@@ -194,6 +203,7 @@ void VwMemory::OnAlarm(const char* what) {
 
 void VwMemory::OnAppState(bool suspended) {
   if (!suspended) {
+    Resumed(base::TimeTicks::Now());
     // Whatever is short now, the next measurements say; until then
     // Chromium's caches are not held at nothing for a trim made in passing
     // (it keeps the level it was last told).
@@ -207,6 +217,7 @@ void VwMemory::OnAppState(bool suspended) {
     return;
   }
   const base::TimeTicks now = base::TimeTicks::Now();
+  suspended_at_ = now;
   if (stepping_ || now < hard_due_) {
     return;  // a trim is under way, or was made a moment ago
   }
@@ -216,6 +227,27 @@ void VwMemory::OnAppState(bool suspended) {
                                         weak_factory_.GetWeakPtr(), step_));
   hard_due_ = now + hard_gap_;
   soft_due_ = now + soft_gap_;
+}
+
+void VwMemory::Resumed(base::TimeTicks now) {
+  if (suspended_at_.is_null()) {
+    return;
+  }
+  // Nothing was taken and nothing could be given back while the app stood
+  // frozen. Otherwise the first measurements after a long suspension find a
+  // trim due and make it as the person comes back, on top of the one made on
+  // the way out.
+  const base::TimeDelta away = now - suspended_at_;
+  suspended_at_ = base::TimeTicks();
+  if (!hard_due_.is_null()) {
+    hard_due_ += away;
+  }
+  if (!soft_due_.is_null()) {
+    soft_due_ += away;
+  }
+  if (!unload_due_.is_null()) {
+    unload_due_ += away;
+  }
 }
 
 void VwMemory::WatchReserve(base::TimeTicks now) {
@@ -302,11 +334,14 @@ void VwMemory::Evaluate(base::TimeTicks now, bool fresh) {
     // About to fail: the gap from the last step is not waited out.
     last_step_at_ = base::TimeTicks();
   }
-  if (stepping_ && level >= 2 && level > step_level_ && unload_ &&
-      browser_->UnloadableTabs(level >= 3 ? kSpareUrgent : kSpare) > 0) {
+  if (stepping_ && level >= 2 && level > step_level_ &&
+      ((step_level_ < 2 && now >= hard_due_) ||
+       (unload_ &&
+        browser_->UnloadableTabs(level >= 3 ? kSpareUrgent : kSpare) > 0))) {
     // Worse than what the step under way was for, and there is a tab to
-    // unload: that step is not waited for. (Its own trim, if still to come,
-    // is made by the one that takes its place.)
+    // unload, or that step only trimmed and a hard trim is due: it is not
+    // waited for. (Its own trim, if still to come, is made by the one that
+    // takes its place.)
     stepping_ = false;
     ++step_;
     last_step_at_ = base::TimeTicks();

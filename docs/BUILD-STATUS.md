@@ -55,6 +55,7 @@ frames before drawing), `--vw-vsync=timer` (frames from a timer, as before),
 `--disable_post_sub_buffers_for_onscreen_surfaces` (whole-frame presents),
 `--vw-codecs=all` (VP9 and AV1 offered to pages and calls again),
 `--vw-discard=off` (background tabs stay loaded whatever is short),
+`--vw-trim=off` (the device is not trimmed when the app is suspended),
 `--vw-video=software` (H.264 on the CPU), `--disable_dxgi_zero_copy_video=0`
 (the compositor samples the decoder's own textures: no copy, untried on an
 Adreno), `--vw-video-settle-ms=N` (the wait between two videos' decoders,

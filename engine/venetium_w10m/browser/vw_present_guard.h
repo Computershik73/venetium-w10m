@@ -16,8 +16,10 @@
 // forgets all of it.
 //
 // Hardware video decoding is remembered the same way and forgotten with the
-// rest, but it is tried when a page first plays a video, not at launch (see
-// VideoTrying()), and its count has a file of its own beside this one's.
+// rest, but a run counts against it only while the driver is being asked or
+// a decoder is new, not from launch (see VideoTrying(); the driver is asked
+// what it decodes once, as the renderer starts, and then when a page plays
+// a video), and its count has a file of its own beside this one's.
 
 #ifndef VENETIUM_W10M_BROWSER_VW_PRESENT_GUARD_H_
 #define VENETIUM_W10M_BROWSER_VW_PRESENT_GUARD_H_
@@ -100,13 +102,14 @@ class PresentGuard {
   int VideoFailures();
   // The driver is about to be asked for it: the run counts against it from
   // here, until VideoWorked() -- frames have come out of a decoder for a few
-  // seconds, and this run counts no more, whatever it tries -- or
+  // seconds; the run counts again only while another decoder is new -- or
   // VideoEnded() -- what was being tried is over and the run did not die of
   // it: the driver's answers are in, the video went, or the decoder failed
   // and the software one took over.
   void VideoTrying();
   void VideoWorked();
   void VideoEnded();
+  void VideoLost();
   // The app is suspended or resumed. A suspended run counts for nothing --
   // the phone ends suspended apps without another word -- whether the video
   // started before or after; one resumed with a decoder still untried
@@ -141,6 +144,7 @@ class PresentGuard {
   bool video_watched_ = false;
   bool video_worked_ = false;
   bool video_suspended_ = false;
+  bool video_lost_ = false;
   Way angle_;
   Way d3d11_;
   Way compositor_;

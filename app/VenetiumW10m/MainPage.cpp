@@ -946,7 +946,9 @@ void MainPage::ShowEngineSwitches() {
               L"--vw-codecs=all  (VP9 and AV1 video offered again)\n"
               L"--vw-video=software  (H.264 decoded on the CPU)\n"
               L"--vw-discard=off  (background tabs stay loaded when memory "
-              L"is short)");
+              L"is short)\n"
+              L"--vw-trim=off  (the graphics device is not trimmed when the "
+              L"app is suspended)");
     note.FontSize(12);
     note.Opacity(0.7);
     note.TextWrapping(TextWrapping::Wrap);

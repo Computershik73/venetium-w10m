@@ -38,13 +38,13 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  media/filters/decoder_stream.h                |  11 +
  .../gpu/windows/d3d11_decoder_configurator.cc |  17 +
  media/gpu/windows/d3d11_texture_wrapper.cc    |   9 +
- media/gpu/windows/d3d11_video_decoder.cc      | 491 +++++++++++++++++-
+ media/gpu/windows/d3d11_video_decoder.cc      | 493 +++++++++++++++++-
  .../windows/d3d11_video_decoder_wrapper.cc    |  37 ++
  .../windows/d3d11_video_processor_proxy.cc    |  13 +
  .../gpu/windows/supported_profile_helpers.cc  |   8 +
  media/renderers/video_renderer_impl.cc        |  15 +
  ui/gl/w10m_panel.h                            |  37 ++
- 11 files changed, 662 insertions(+), 1 deletion(-)
+ 11 files changed, 664 insertions(+), 1 deletion(-)
 
 diff --git a/content/renderer/media/batching_media_log.cc b/content/renderer/media/batching_media_log.cc
 index d657a3ee6a5f60b27a243a34d2796945fcd07b54..a40828075d869d3048cc5076ed9d998769b7f9d6 100644
@@ -181,7 +181,7 @@ index cf4de05aec19f1258eb89359f402e487d3391c7d..63a79f0b41fd80863a9b81183805b2cc
    gpu::SharedImageInfo si_info{output_si_format, size, color_space, usage,
                                 "VideoTexture"};
 diff --git a/media/gpu/windows/d3d11_video_decoder.cc b/media/gpu/windows/d3d11_video_decoder.cc
-index b09ce3452538b2650b5d205c25a8b209995b9214..0fd2ffb5971298cdbfc0233770588d0a235a422a 100644
+index b09ce3452538b2650b5d205c25a8b209995b9214..918d5b9f59dbd7227bed3e2e79085f10f9f9d6d6 100644
 --- a/media/gpu/windows/d3d11_video_decoder.cc
 +++ b/media/gpu/windows/d3d11_video_decoder.cc
 @@ -46,6 +46,22 @@
@@ -207,7 +207,7 @@ index b09ce3452538b2650b5d205c25a8b209995b9214..0fd2ffb5971298cdbfc0233770588d0a
  namespace media {
  
  namespace {
-@@ -101,6 +117,181 @@ bool ShouldUseDXVADeviceForHEVCRangeExtension(const VideoDecoderConfig& config,
+@@ -101,6 +117,183 @@ bool ShouldUseDXVADeviceForHEVCRangeExtension(const VideoDecoderConfig& config,
  BASE_FEATURE(kSetDefaultColorSpaceForVideoFrameAndSharedImage,
               base::FEATURE_ENABLED_BY_DEFAULT);
  
@@ -276,13 +276,15 @@ index b09ce3452538b2650b5d205c25a8b209995b9214..0fd2ffb5971298cdbfc0233770588d0a
 +}
 +
 +// |decoder| has the GPU's decoder no longer.
-+void W10mSessionGone(const void* decoder) {
++void W10mSessionGone(const void* decoder, ID3D11Device* device) {
 +  if (g_w10m_owner != decoder) {
 +    return;
 +  }
 +  g_w10m_owner = nullptr;
 +  W10mGlWatch().Stop();
-+  W10mTell(gl::W10mVideoEvent::kEnded);
++  W10mTell(device && FAILED(device->GetDeviceRemovedReason())
++               ? gl::W10mVideoEvent::kLost
++               : gl::W10mVideoEvent::kEnded);
 +}
 +
 +// Waits, |ms| at most, until the GPU has done what it was given: the decode,
@@ -389,7 +391,7 @@ index b09ce3452538b2650b5d205c25a8b209995b9214..0fd2ffb5971298cdbfc0233770588d0a
  }  // namespace
  
  std::unique_ptr<VideoDecoder> D3D11VideoDecoder::Create(
-@@ -166,6 +357,21 @@ D3D11VideoDecoder::~D3D11VideoDecoder() {
+@@ -166,6 +359,21 @@ D3D11VideoDecoder::~D3D11VideoDecoder() {
  
    // Explicitly destroy the decoder, since it can reference picture buffers.
    accelerated_video_decoder_.reset();
@@ -406,12 +408,12 @@ index b09ce3452538b2650b5d205c25a8b209995b9214..0fd2ffb5971298cdbfc0233770588d0a
 +    device_context_->Flush();
 +    g_w10m_released = base::TimeTicks::Now();
 +  }
-+  W10mSessionGone(this);
++  W10mSessionGone(this, device_.Get());
 +#endif
  }
  
  VideoDecoderType D3D11VideoDecoder::GetDecoderType() const {
-@@ -210,6 +416,46 @@ bool D3D11VideoDecoder::InitializeAcceleratedDecoder(
+@@ -210,6 +418,46 @@ bool D3D11VideoDecoder::InitializeAcceleratedDecoder(
  }
  
  bool D3D11VideoDecoder::ResetD3DVideoDecoder() {
@@ -458,7 +460,7 @@ index b09ce3452538b2650b5d205c25a8b209995b9214..0fd2ffb5971298cdbfc0233770588d0a
    // By default we assume outputs are 8-bit for SDR color spaces and 10 bit for
    // HDR color spaces (or VP9.2, or HEVC Main10, or HEVC Rext) with HBD capable
    // codecs (the decoder doesn't support H264PROFILE_HIGH10PROFILE). We'll get
-@@ -261,6 +507,45 @@ bool D3D11VideoDecoder::ResetD3DVideoDecoder() {
+@@ -261,6 +509,45 @@ bool D3D11VideoDecoder::ResetD3DVideoDecoder() {
      return false;
    }
  
@@ -504,7 +506,7 @@ index b09ce3452538b2650b5d205c25a8b209995b9214..0fd2ffb5971298cdbfc0233770588d0a
    auto video_decoder_wrapper =
        CreateD3DVideoDecoderWrapper(decoder_configurator.get(), bit_depth);
    if (!video_decoder_wrapper) {
-@@ -273,6 +558,20 @@ bool D3D11VideoDecoder::ResetD3DVideoDecoder() {
+@@ -273,6 +560,20 @@ bool D3D11VideoDecoder::ResetD3DVideoDecoder() {
    texture_selector_ = std::move(texture_selector);
    d3d_video_decoder_wrapper_ = std::move(video_decoder_wrapper);
  
@@ -525,7 +527,7 @@ index b09ce3452538b2650b5d205c25a8b209995b9214..0fd2ffb5971298cdbfc0233770588d0a
    return true;
  }
  
-@@ -322,7 +621,18 @@ D3D11VideoDecoder::CreateD3DVideoDecoderWrapper(
+@@ -322,7 +623,18 @@ D3D11VideoDecoder::CreateD3DVideoDecoderWrapper(
    } else {
      MEDIA_LOG(INFO, media_log_) << "D3D11VideoDecoder is using D3D11 backend";
      ComD3D11VideoContext video_context;
@@ -544,7 +546,7 @@ index b09ce3452538b2650b5d205c25a8b209995b9214..0fd2ffb5971298cdbfc0233770588d0a
      video_decoder_wrapper = D3D11VideoDecoderWrapper::Create(
          media_log_.get(), video_device_, std::move(video_context),
          decoder_configurator, usable_feature_level_, config_);
-@@ -395,6 +705,61 @@ void D3D11VideoDecoder::Initialize(const VideoDecoderConfig& config,
+@@ -395,6 +707,61 @@ void D3D11VideoDecoder::Initialize(const VideoDecoderConfig& config,
      return PostDecoderStatus(DecoderStatus::Codes::kUnsupportedEncryptionMode);
    }
  
@@ -606,7 +608,7 @@ index b09ce3452538b2650b5d205c25a8b209995b9214..0fd2ffb5971298cdbfc0233770588d0a
    // Initialize the video decoder.
  
    // Note that we assume that this is the ANGLE device, since we don't implement
-@@ -536,7 +901,15 @@ void D3D11VideoDecoder::Decode(scoped_refptr<DecoderBuffer> buffer,
+@@ -536,7 +903,15 @@ void D3D11VideoDecoder::Decode(scoped_refptr<DecoderBuffer> buffer,
  
    if (state_ == State::kError) {
      // TODO(liberato): consider posting, though it likely doesn't matter.
@@ -622,7 +624,7 @@ index b09ce3452538b2650b5d205c25a8b209995b9214..0fd2ffb5971298cdbfc0233770588d0a
      return;
    }
  
-@@ -570,6 +943,15 @@ void D3D11VideoDecoder::DoDecode() {
+@@ -570,6 +945,15 @@ void D3D11VideoDecoder::DoDecode() {
      return;
    }
  
@@ -638,7 +640,7 @@ index b09ce3452538b2650b5d205c25a8b209995b9214..0fd2ffb5971298cdbfc0233770588d0a
    // Periodically measure picture buffer usage.  We could do this on every free,
    // but it's not that important that we should run it so often.
    if (picture_buffers_.size() > 0) {
-@@ -675,7 +1057,13 @@ void D3D11VideoDecoder::DoDecode() {
+@@ -675,7 +1059,13 @@ void D3D11VideoDecoder::DoDecode() {
            accelerated_video_decoder_->GetChromaSampling();
        const auto new_color_space =
            accelerated_video_decoder_->GetVideoColorSpace();
@@ -653,7 +655,7 @@ index b09ce3452538b2650b5d205c25a8b209995b9214..0fd2ffb5971298cdbfc0233770588d0a
            new_coded_size == config_.coded_size() &&
            new_bit_depth == bit_depth_ && !picture_buffers_.size() &&
            new_chroma_sampling == chroma_sampling_ &&
-@@ -916,6 +1304,13 @@ bool D3D11VideoDecoder::OutputResult(const CodecPicture* picture,
+@@ -916,6 +1306,13 @@ bool D3D11VideoDecoder::OutputResult(const CodecPicture* picture,
    gfx::Size natural_size = config_.aspect_ratio().GetNaturalSize(visible_rect);
    base::TimeDelta timestamp = picture_buffer->timestamp_;
  
@@ -667,7 +669,7 @@ index b09ce3452538b2650b5d205c25a8b209995b9214..0fd2ffb5971298cdbfc0233770588d0a
    scoped_refptr<gpu::ClientSharedImage> shared_image;
    result = picture_buffer->ProcessTexture(shared_image);
    if (!result.is_ok()) {
-@@ -984,6 +1379,19 @@ bool D3D11VideoDecoder::OutputResult(const CodecPicture* picture,
+@@ -984,6 +1381,19 @@ bool D3D11VideoDecoder::OutputResult(const CodecPicture* picture,
          output_si_format == viz::MultiPlaneFormat::kNV12) &&
        use_shared_handle_;
  
@@ -687,7 +689,7 @@ index b09ce3452538b2650b5d205c25a8b209995b9214..0fd2ffb5971298cdbfc0233770588d0a
    output_cb_.Run(frame);
    return true;
  }
-@@ -1000,6 +1408,36 @@ void D3D11VideoDecoder::NotifyError(D3D11Status reason,
+@@ -1000,6 +1410,36 @@ void D3D11VideoDecoder::NotifyError(D3D11Status reason,
      MEDIA_LOG(ERROR, media_log_) << "D3D11VideoDecoder: " << reason.message();
    }
  
@@ -724,7 +726,7 @@ index b09ce3452538b2650b5d205c25a8b209995b9214..0fd2ffb5971298cdbfc0233770588d0a
    PostDecoderStatus(
        DecoderStatus(opt_decoder_code).AddCause(std::move(reason)));
  }
-@@ -1024,6 +1462,27 @@ void D3D11VideoDecoder::PostDecoderStatus(DecoderStatus status) {
+@@ -1024,6 +1464,27 @@ void D3D11VideoDecoder::PostDecoderStatus(DecoderStatus status) {
  
    // Also clear |input_buffer_queue_| since the callbacks have been consumed.
    input_buffer_queue_.clear();
@@ -745,14 +747,14 @@ index b09ce3452538b2650b5d205c25a8b209995b9214..0fd2ffb5971298cdbfc0233770588d0a
 +                         self->device_context_->Flush();
 +                         g_w10m_released = base::TimeTicks::Now();
 +                       }
-+                       W10mSessionGone(self.get());
++                       W10mSessionGone(self.get(), self->device_.Get());
 +                     },
 +                     weak_factory_.GetWeakPtr()));
 +#endif
  }
  
  void D3D11VideoDecoder::MeasurePictureBufferUsage() {
-@@ -1159,8 +1618,27 @@ D3D11VideoDecoder::GetSupportedVideoDecoderConfigs(
+@@ -1159,8 +1620,27 @@ D3D11VideoDecoder::GetSupportedVideoDecoderConfigs(
        return {};
      }
  
@@ -780,7 +782,7 @@ index b09ce3452538b2650b5d205c25a8b209995b9214..0fd2ffb5971298cdbfc0233770588d0a
    }
  
    std::vector<SupportedVideoDecoderConfig> configs;
-@@ -1183,6 +1661,17 @@ D3D11VideoDecoder::GetSupportedVideoDecoderConfigs(
+@@ -1183,6 +1663,17 @@ D3D11VideoDecoder::GetSupportedVideoDecoderConfigs(
      }
    }
  
@@ -943,7 +945,7 @@ index b2fe3d73471d0f192ef898f5e1bd0628675e516d..fa971e92adb1cd44cd73d78329a54d81
            status = {PIPELINE_ERROR_DECODE, std::move(result).error()};
            break;
 diff --git a/ui/gl/w10m_panel.h b/ui/gl/w10m_panel.h
-index a4c2d72bc0ad608dfcf635cfe4229b5abadd85f7..8f87fecea6d6c1d9053138dad061cab77b900b27 100644
+index a4c2d72bc0ad608dfcf635cfe4229b5abadd85f7..ad5148e53c416b1acf4b967630158cf3a6c7ddca 100644
 --- a/ui/gl/w10m_panel.h
 +++ b/ui/gl/w10m_panel.h
 @@ -61,12 +61,49 @@ inline void SetW10mGpuGivenUpHandler(W10mGpuGivenUpHandler handler) {
@@ -977,7 +979,7 @@ index a4c2d72bc0ad608dfcf635cfe4229b5abadd85f7..8f87fecea6d6c1d9053138dad061cab7
 +//              video has gone, the decoder failed and the page's player went
 +//              on without it -- and the process is still here.
 +// The handler is set before the GPU thread starts.
-+enum class W10mVideoEvent { kStarting, kWorked, kEnded };
++enum class W10mVideoEvent { kStarting, kWorked, kEnded, kLost };
 +
 +using W10mVideoHandler = void (*)(W10mVideoEvent event);
 +
