@@ -24,6 +24,7 @@
 #include <string>
 
 #include "base/memory/raw_ptr.h"
+#include "base/memory/weak_ptr.h"
 #include "base/time/time.h"
 #include "ui/aura/window_tree_host.h"
 #include "ui/display/screen_base.h"
@@ -44,6 +45,7 @@ class DefaultScreenPositionClient;
 namespace venetium_w10m {
 
 class VwInputMethod;
+class VwVsync;
 
 // One display, the phone's, sized and scaled by the shell.
 class VwScreen : public display::ScreenBase {
@@ -111,6 +113,8 @@ class VwPlatform {
   void SetScreen(const gfx::Size& screen_pixels);
   void SetScale(float scale);
   void SetDpi(int32_t dpi) { dpi_ = dpi; }
+  // The app went to the background (the display may be off) or came back.
+  void SetActive(bool active);
 
   // The shell's keyboard covers |pixels| at the bottom (0: hidden).
   void SetKeyboardInset(int32_t pixels);
@@ -153,6 +157,10 @@ class VwPlatform {
   gfx::Vector2dF wheel_remainder_;
   // Event times never go backwards.
   base::TimeTicks last_event_time_;
+
+  void OnVSync(base::TimeTicks timebase, base::TimeDelta interval);
+  std::unique_ptr<VwVsync> vsync_;
+  base::WeakPtrFactory<VwPlatform> weak_factory_{this};
 };
 
 }  // namespace venetium_w10m

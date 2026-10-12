@@ -6,6 +6,7 @@
 #include <robuffer.h>
 
 #include <algorithm>
+#include <cstdlib>
 
 #include "client/Log.h"
 #include "engine/EngineHost.h"
@@ -315,67 +316,49 @@ void EngineView::OnPointer(PointerRoutedEventArgs const& args, int32_t state) {
     return;
   }
   if (!Api().input_touch) return;
-  auto it = std::find(fingers_.begin(), fingers_.end(), id);
+  auto it = std::find_if(fingers_.begin(), fingers_.end(),
+                         [id](Finger const& f) { return f.id == id; });
   if (state == 0) {
-    if (it == fingers_.end()) fingers_.push_back(id);
+    if (it == fingers_.end()) {
+      fingers_.push_back(Finger{id, x, y});
+    } else {
+      it->x = x;
+      it->y = y;
+    }
   } else if (it == fingers_.end()) {
     return;  // a finger we never saw go down, or already up
-  } else if (state >= 2) {
-    fingers_.erase(it);
   }
-  const uint64_t current = point.Timestamp();
+  // Straight to the engine, from inside the event, as gecko-w10m does: a
+  // touch that waits for the dispatcher to be idle arrives late and in
+  // bursts, and a scroll made of bursts jerks. The time is the performance
+  // counter now; points the system coalesced into this one are sent first,
+  // each earlier by the gap between their own timestamps.
+  const int64_t now = Qpc();
   if (state == 1) {
-    // Moves the system coalesced into this one, each with its own time.
+    // A digitizer reports a resting finger over and over; a page (a video
+    // player reading touches itself) takes any touchmove for a drag. Three
+    // device pixels is about one CSS pixel (gecko-w10m).
+    if (std::abs(x - it->x) + std::abs(y - it->y) < 3) return;
+    const uint64_t current = point.Timestamp();
     try {
       auto points = args.GetIntermediatePoints(input_);  // newest first
       for (uint32_t i = points.Size(); i-- > 0;) {
         auto earlier = points.GetAt(i);
-        if (earlier.Timestamp() >= current) continue;
+        const uint64_t stamp = earlier.Timestamp();
+        if (stamp >= current) continue;
         int32_t ex = 0, ey = 0;
-        if (ToFrame(earlier.Position(), &ex, &ey)) {
-          QueueTouch(id, 1, ex, ey, earlier.Timestamp());
-        }
+        if (!ToFrame(earlier.Position(), &ex, &ey)) continue;
+        const int64_t age =
+            static_cast<int64_t>(current - stamp) * QpcFrequency() / 1000000;
+        Api().input_touch(static_cast<int32_t>(id), 1, ex, ey, now - age);
       }
     } catch (winrt::hresult_error const&) {
     }
+    it->x = x;
+    it->y = y;
   }
-  QueueTouch(id, state, x, y, current);
-}
-
-void EngineView::QueueTouch(uint32_t id, int32_t state, int32_t x, int32_t y,
-                            uint64_t timestamp) {
-  touches_.push_back(TouchPoint{id, state, x, y, timestamp});
-  if (flushPending_) return;
-  flushPending_ = true;
-  // Low priority runs after every input event of this pass, so all fingers'
-  // points go out together.
-  CoreWindow::GetForCurrentThread().Dispatcher().RunAsync(
-      CoreDispatcherPriority::Low, [this]() { FlushTouches(); });
-}
-
-// All fingers' points in time order -- the gesture recogniser takes them as
-// one stream -- stamped on the performance counter: the newest at the
-// counter's present reading, the others back from it by their own spacing.
-void EngineView::FlushTouches() {
-  flushPending_ = false;
-  if (touches_.empty() || !Api().input_touch) {
-    touches_.clear();
-    return;
-  }
-  std::vector<TouchPoint> points;
-  points.swap(touches_);
-  std::stable_sort(points.begin(), points.end(),
-                   [](TouchPoint const& a, TouchPoint const& b) {
-                     return a.timestamp < b.timestamp;
-                   });
-  const int64_t now = Qpc();
-  const uint64_t newest = points.back().timestamp;
-  for (TouchPoint const& p : points) {
-    const int64_t age =
-        static_cast<int64_t>(newest - p.timestamp) * QpcFrequency() / 1000000;
-    Api().input_touch(static_cast<int32_t>(p.id), p.state, p.x, p.y,
-                      now - age);
-  }
+  Api().input_touch(static_cast<int32_t>(id), state, x, y, now);
+  if (state >= 2) fingers_.erase(it);
 }
 
 void EngineView::SendKey(int32_t vkey) {

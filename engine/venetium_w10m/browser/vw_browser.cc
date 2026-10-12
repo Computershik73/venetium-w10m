@@ -264,6 +264,7 @@ void VwBrowser::SetKeyboardInset(int32_t pixels) {
 }
 
 void VwBrowser::AppStateChanged(bool suspended) {
+  platform_->SetActive(!suspended);
   if (!suspended) {
     NoteF("app resumed");
     return;

@@ -69,9 +69,6 @@ class EngineView {
   void ApplyInputKind(int32_t kind);
   void ReportKeyboard(winrt::Windows::Foundation::Rect occluded);
   bool SinkFocused() const;
-  void QueueTouch(uint32_t id, int32_t state, int32_t x, int32_t y,
-                  uint64_t timestamp);
-  void FlushTouches();
   void SendKey(int32_t vkey);
   static void PostToUi(std::function<void()> work);
 
@@ -94,19 +91,13 @@ class EngineView {
   uint64_t seen_ = 0;
   std::function<void()> firstFrame_;
 
-  // Fingers on the glass, by XAML pointer id.
-  std::vector<uint32_t> fingers_;
-  // Touch points of one dispatcher pass, all fingers, sent together in time
-  // order (Timestamp: microseconds, the input's own clock).
-  struct TouchPoint {
+  // Fingers on the glass, by XAML pointer id, where each last was.
+  struct Finger {
     uint32_t id;
-    int32_t state;
     int32_t x;
     int32_t y;
-    uint64_t timestamp;
   };
-  std::vector<TouchPoint> touches_;
-  bool flushPending_ = false;
+  std::vector<Finger> fingers_;
   // The mouse button held down, as its WM_*DOWN number (0: none).
   int32_t mouseDown_ = 0;
 

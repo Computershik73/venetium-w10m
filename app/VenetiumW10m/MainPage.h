@@ -60,6 +60,7 @@ class MainPage {
                    bool save);
   void ShowNotice(std::wstring const& text);
   void ShowLog();
+  void ShowAbout();
   void SendPhoneClipboard();
   void ReportScreen();
   void OnEngineStopped(int32_t code);

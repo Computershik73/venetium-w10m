@@ -71,6 +71,8 @@ shared_library("venetium_engine") {
     "browser/vw_platform.h",
     "browser/vw_tab.cc",
     "browser/vw_tab.h",
+    "browser/vw_vsync.cc",
+    "browser/vw_vsync.h",
     "capi/venetium_w10m_capi.cc",
     "capi/venetium_w10m_capi.h",
     "common/vw_delay_load.cc",

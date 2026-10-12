@@ -10,6 +10,7 @@
 #include <utility>
 
 #include "base/containers/flat_map.h"
+#include "base/functional/bind.h"
 #include "base/containers/flat_set.h"
 #include "base/observer_list.h"
 #include "base/scoped_observation.h"
@@ -25,10 +26,12 @@
 #include "ui/events/keycodes/dom/dom_code.h"
 #include "ui/events/keycodes/keyboard_code_conversion.h"
 #include "ui/events/keycodes/keyboard_codes.h"
+#include "ui/compositor/compositor.h"
 #include "ui/events/pointer_details.h"
 #include "ui/wm/core/default_activation_client.h"
 #include "ui/wm/core/default_screen_position_client.h"
 #include "venetium_w10m/browser/vw_input_method.h"
+#include "venetium_w10m/browser/vw_vsync.h"
 #include "venetium_w10m/common/vw_log.h"
 
 namespace venetium_w10m {
@@ -267,9 +270,21 @@ VwPlatform::VwPlatform(const gfx::Size& content_pixels,
 
   host_->Show();
   NoteF("platform: browser window %dx%d px", bounds.width(), bounds.height());
+
+  vsync_ = std::make_unique<VwVsync>(base::BindRepeating(
+      &VwPlatform::OnVSync, weak_factory_.GetWeakPtr()));
+}
+
+void VwPlatform::OnVSync(base::TimeTicks timebase, base::TimeDelta interval) {
+  host_->compositor()->SetDisplayVSyncParameters(timebase, interval);
+}
+
+void VwPlatform::SetActive(bool active) {
+  vsync_->SetActive(active);
 }
 
 VwPlatform::~VwPlatform() {
+  vsync_.reset();
   screen_position_client_.reset();
   parenting_client_.reset();
   capture_client_.reset();

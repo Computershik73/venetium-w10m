@@ -445,6 +445,7 @@ void MainPage::BuildMenu() {
   });
   menu_.Items().Append(hardware);
   item(L"Log", [this]() { ShowLog(); });
+  item(L"About", [this]() { ShowAbout(); });
   item(L"Copy logs to Pictures", [this]() {
     std::thread([]() { Log::Mirror(); }).detach();
     ShowNotice(L"Logs go to Pictures\\Venetium logs");
@@ -902,6 +903,98 @@ void MainPage::SendPhoneClipboard() {
       // Not in front after all, or the clipboard is busy: next time.
     }
   }();
+}
+
+// About the port and its authors, as gecko-w10m's Settings has it.
+void MainPage::ShowAbout() {
+  [](MainPage* self) -> winrt::fire_and_forget {
+    ContentDialog dialog;
+    dialog.Title(box_value(L"Venetium for Windows 10 Mobile"));
+
+    StackPanel panel;
+    auto line = [&panel](std::wstring const& text, double size, bool dim) {
+      TextBlock block;
+      block.Text(hstring(text));
+      block.FontSize(size);
+      block.TextWrapping(TextWrapping::Wrap);
+      block.Margin(ThicknessHelper::FromLengths(0, 0, 0, 8));
+      if (dim) block.Opacity(0.7);
+      panel.Children().Append(block);
+    };
+    // A link opens in a new tab of this browser, or in the phone's settings.
+    auto link = [&panel, &dialog, self](std::wstring const& text,
+                                         std::wstring const& uri) {
+      HyperlinkButton button;
+      button.Content(box_value(hstring(text)));
+      button.Padding(ThicknessHelper::FromLengths(0, 4, 0, 4));
+      // Weakly: the dialog owns the button, the button this handler.
+      button.Click([weak = winrt::make_weak(dialog), self, uri](auto&&,
+                                                                 auto&&) {
+        if (auto shown = weak.get()) shown.Hide();
+        if (uri.rfind(L"ms-settings:", 0) == 0) {
+          try {
+            Launcher::LaunchUriAsync(Uri(hstring(uri)));
+          } catch (winrt::hresult_error const&) {
+          }
+        } else {
+          self->OpenExternalUrl(uri);
+        }
+      });
+      panel.Children().Append(button);
+    };
+
+    std::wstring version = L"?";
+    std::wstring engine = L"Chromium";
+    try {
+      const auto v = Package::Current().Id().Version();
+      version = std::to_wstring(v.Major) + L"." + std::to_wstring(v.Minor) +
+                L"." + std::to_wstring(v.Build) + L"." +
+                std::to_wstring(v.Revision);
+      engine = L"Chromium " + std::to_wstring(v.Major) + L".0." +
+               std::to_wstring(v.Minor) + L"." + std::to_wstring(v.Build);
+    } catch (winrt::hresult_error const&) {
+    }
+    line(L"Venetium is Chromium \u2014 the engine of Chrome \u2014 running on "
+         L"Windows 10 Mobile.",
+         15, false);
+    line(L"Port version: " + version, 15, false);
+    line(L"The first three numbers are the engine's (" + engine +
+             L"), the last is the build number.",
+         12, true);
+    link(L"Make this the default browser", L"ms-settings:defaultapps");
+
+    line(L"Ported to Windows 10 Mobile by Computershik", 15, false);
+    line(L"Porting, building and debugging on the device.", 12, true);
+    link(L"Profile on 4pda",
+         L"https://4pda.to/forum/index.php?showuser=4458524");
+    link(L"Telegram channel @cmplog", L"https://t.me/cmplog");
+    link(L"Donate (within the CIS for now)",
+         L"https://pay.cloudtips.ru/p/83821e32");
+    line(L"Outside the CIS and would like to help? Send a message to the "
+         L"Telegram channel.",
+         12, true);
+
+    line(L"Based on Venetium by hamed7ir", 15, false);
+    line(L"Venetium is Chromium 150 for Windows 10 on 32-bit ARM (Surface RT, "
+         L"Surface 2): the whole ARM32 port of the engine is his work, and "
+         L"this Windows 10 Mobile port is built on it, at his request.",
+         12, true);
+    link(L"Venetium on GitHub", L"https://github.com/hamed7ir/venetium");
+    line(L"Venetium is built on Supermium by win32ss; Chromium is the work "
+         L"of The Chromium Authors. The Windows 10 Mobile approach comes "
+         L"from gecko-w10m.",
+         12, true);
+
+    ScrollViewer scroller;
+    scroller.MaxHeight(440);
+    scroller.Content(panel);
+    dialog.Content(scroller);
+    dialog.PrimaryButtonText(L"Close");
+    try {
+      co_await dialog.ShowAsync();
+    } catch (winrt::hresult_error const&) {
+    }
+  }(this);
 }
 
 void MainPage::ShowLog() {
