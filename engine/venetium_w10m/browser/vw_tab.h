@@ -14,6 +14,7 @@
 #include <string>
 
 #include "base/memory/raw_ptr.h"
+#include "base/time/time.h"
 #include "content/public/browser/web_contents_delegate.h"
 #include "content/public/browser/web_contents_observer.h"
 #include "url/gurl.h"
@@ -56,6 +57,25 @@ class VwTab : public content::WebContentsDelegate,
   static VwTab* FromWebContents(content::WebContents* contents);
   void Stop();
   bool CanGoBack();
+
+  // Whether the page can be unloaded now without the person losing what
+  // loading it again does not bring back; |why|, if given, is set to what
+  // is in the way (a literal, for the log) or to null.
+  bool CanDiscard(const char** why);
+  // Unloads the page to give its memory back. The WebContents is destroyed
+  // and an empty one takes its place, holding a copy of the session history
+  // -- the URL and the title with it, the scroll position, what was typed
+  // into forms -- and set to load its current entry when it is next shown.
+  // The view is a new window: the caller puts it in the root. Never from
+  // inside one of this tab's own callbacks (CloseContents and the like): a
+  // WebContents may not be destroyed while it is telling its observers.
+  void Discard();
+  // Unloaded, and not loading again yet.
+  bool discarded() const { return discarded_; }
+
+  // When the tab left the screen (when it was made, if it never was on it).
+  base::TimeTicks last_seen() const { return last_seen_; }
+  void set_last_seen(base::TimeTicks when) { last_seen_ = when; }
 
   bool fullscreen() const { return fullscreen_; }
   void ExitFullscreen();
@@ -114,18 +134,27 @@ class VwTab : public content::WebContentsDelegate,
   using content::WebContentsObserver::BeforeUnloadFired;
   void LoadProgressChanged(double progress) override;
   void TitleWasSet(content::NavigationEntry* entry) override;
+  void DidStartNavigation(
+      content::NavigationHandle* navigation_handle) override;
   void DidFinishNavigation(
       content::NavigationHandle* navigation_handle) override;
   void PrimaryMainFrameRenderProcessGone(
       base::TerminationStatus status) override;
 
  private:
+  // Makes this tab the delegate and the observer of |contents_| and gives it
+  // the tab's settings: for the WebContents the tab is made with, and for
+  // the empty one that takes its place in Discard.
+  void AttachContents();
+
   raw_ptr<VwBrowser> browser_;
   const int32_t id_;
   const int32_t opener_;
   std::unique_ptr<content::WebContents> contents_;
   bool fullscreen_ = false;
   bool desktop_ = false;
+  bool discarded_ = false;
+  base::TimeTicks last_seen_ = base::TimeTicks::Now();
 
   // What the shell was last told.
   std::string reported_url_;

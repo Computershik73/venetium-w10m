@@ -22,6 +22,8 @@ The device the port is brought up on: HP Elite x3 class, Windows 10 Mobile
 | Touch flings (the curve was built from 0 pixels per inch: no inertia at all) | fixed in 222.19, untested |
 | Address space: 512 MB that Blink set aside for array buffers, now 96 MB | built (222.19); the log's `memory:` line says what takes the rest |
 | Video codecs: pages and calls are told H.264 and VP8 only (VP9, AV1 and HEVC refused: canPlayType, MediaSource, MediaCapabilities, WebCodecs, WebRTC), so a site that asks sends H.264; a file whose only picture is VP9 or AV1 does not play | built (222.20), untested |
+| Memory pressure, arranged as gecko-w10m has it: the shell measures the address space (largest free piece, all that is free) and the app's memory against the phone's limit every 2 s; one arbiter in the engine (`browser/vw_memory`) trims at level 1, unloads background tabs least recently seen first at level 2 (all of them at 3) and collects the JavaScript heaps in full; an unloaded tab keeps its place, title and history and loads again when selected | built (222.21), untested. gecko-w10m itself does not unload tabs: that half is new |
+| Before an allocation fails for good: PartitionAlloc's 96 MB reserve as a canary, V8's near-heap-limit callback (the limit is raised only while there is a tab to unload), Chromium's own RAM-based pressure watcher put to sleep, discardable memory capped at 64 MB | built (222.21), untested |
 | Feature level 9_3 phones: frames through Direct3D 11 (the row above); a Direct3D 11 compositor of our own for them | the first is built and is what such a phone gets today; the second is designed, not written |
 
 What the log says about graphics, in order: `gpu: Direct3D 11 feature
@@ -38,7 +40,8 @@ Chromium's and the engine's own switches for the next start:
 `--vw-gpu=off`, `--vw-vsync=timer` (frames from a timer, as before),
 `--vw-vsync=eager` (a frame made up at once when an animation starts),
 `--disable_post_sub_buffers_for_onscreen_surfaces` (whole-frame presents),
-`--vw-codecs=all` (VP9 and AV1 offered to pages and calls again).
+`--vw-codecs=all` (VP9 and AV1 offered to pages and calls again),
+`--vw-discard=off` (background tabs stay loaded whatever is short).
 
 ## Toolchain and tree — built/checked
 
@@ -150,9 +153,11 @@ notice, keyboard sink, back button.
    `vsync:` and `memory:` lines say).
 2. Feature level 9_3: a Direct3D 11 compositor in viz for phones ANGLE's
    Direct3D 11 backend does not take (it starts at 10_0).
-3. Memory: an address-space watcher that puts the engine under pressure
-   (gecko-w10m's low mark is 96 MB for the largest free piece); background
-   tabs discarded.
+3. Memory: read the first log with `memory: pressure` lines -- do the
+   marks fit, does free address space come back after `tab N: unloaded`
+   (PartitionAlloc never unreserves its super pages on 32-bit), how long a
+   full collection takes. Not covered yet: the tile budget under pressure,
+   worker isolates at their heap limit, the GPU thread's own listener.
 4. Touch: an acknowledgement timeout as on Android, so that a scroll does
    not wait for a busy page (`input_router_config_helper.cc`).
 5. GPU raster, WebGL checked on the driver, hardware H.264.

@@ -12,6 +12,7 @@
 #include "base/task/single_thread_task_runner.h"
 #include "base/task/thread_pool.h"
 #include "base/time/time.h"
+#include "components/discardable_memory/service/discardable_shared_memory_manager.h"
 #include "content/public/browser/browser_thread.h"
 #include "content/public/common/result_codes.h"
 #include "venetium_w10m/browser/vw_browser.h"
@@ -80,6 +81,17 @@ int VwBrowserMainParts::PreMainMessageLoopRun() {
   base::ThreadPool::PostDelayedTask(FROM_HERE, {base::MayBlock()},
                                     base::BindOnce(&NoteTimerGrain),
                                     base::Seconds(5));
+  // Decoded images that are off screen wait in discardable memory: shared
+  // memory, mapped twice in one process, by the manager and by the renderer
+  // that asked for it. Chromium lets it grow to 512 MB, a quarter of the RAM
+  // at most, and to an eighth of that only where the RAM is 2 GB or less
+  // (GetDefaultMaxBytes in discardable_shared_memory_manager.cc): on a phone
+  // with 3 GB that is up to a gigabyte of the 2 GB of address space. 64 MB,
+  // what the phones with less get, for all of them.
+  if (auto* discardable =
+          discardable_memory::DiscardableSharedMemoryManager::Get()) {
+    discardable->SetMaxBytes(64 * 1024 * 1024);
+  }
   VwEngine* engine = VwEngine::Get();
   const EngineConfig config = engine->config();
   browser_context_ =

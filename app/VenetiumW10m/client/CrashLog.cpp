@@ -109,6 +109,7 @@ bool IsFatal(DWORD code) {
     case 0xC0000374:            // STATUS_HEAP_CORRUPTION
     case 0xC0000409:            // STATUS_STACK_BUFFER_OVERRUN (fail fast)
     case 0xC0000602:            // STATUS_FAIL_FAST_EXCEPTION
+    case 0xE0000008:            // Chromium's out of memory (OOM_CRASH)
       return true;
     default:
       return false;
@@ -182,17 +183,36 @@ AddressSpaceUse AddressSpace() {
   return use;
 }
 
-std::wstring MemoryLine() {
+// The numbers of one look, megabytes, for whoever acts on them
+// (SetMemorySink).
+struct MemoryNumbers {
+  int32_t largest_free = 0;
+  int32_t free = 0;
+  int32_t app = 0;
+  int32_t limit = 0;
+};
+
+std::atomic<MemorySink> g_memory_sink{nullptr};
+
+std::wstring MemoryLine(MemoryNumbers* numbers = nullptr) {
   std::wstring line = L"memory:";
+  uint64_t app = 0;
+  uint64_t limit = 0;
   try {
     using winrt::Windows::System::MemoryManager;
-    line += L" app " + std::to_wstring(MemoryManager::AppMemoryUsage() >> 20) +
-            L" MB of " +
-            std::to_wstring(MemoryManager::AppMemoryUsageLimit() >> 20) +
-            L" MB";
+    app = MemoryManager::AppMemoryUsage();
+    limit = MemoryManager::AppMemoryUsageLimit();
+    line += L" app " + std::to_wstring(app >> 20) + L" MB of " +
+            std::to_wstring(limit >> 20) + L" MB";
   } catch (...) {
   }
   const AddressSpaceUse use = AddressSpace();
+  if (numbers) {
+    numbers->largest_free = static_cast<int32_t>(use.largest_free >> 20);
+    numbers->free = static_cast<int32_t>(use.free >> 20);
+    numbers->app = static_cast<int32_t>(app >> 20);
+    numbers->limit = static_cast<int32_t>(limit >> 20);
+  }
   const auto mb = [](uint64_t bytes) { return std::to_wstring(bytes >> 20); };
   line += L", address space free " + mb(use.free) + L" MB (largest " +
           mb(use.largest_free) + L" MB); taken: DLLs " + mb(use.image) +
@@ -245,10 +265,17 @@ DWORD WINAPI Heartbeat(LPVOID) {
   for (;;) {
     ::Sleep(2000);
     // Only when it moved by a few megabytes: a quiet page logs nothing.
-    const std::wstring line = MemoryLine();
+    MemoryNumbers numbers;
+    const std::wstring line = MemoryLine(&numbers);
     if (line != last) {
       Log::Write(line);
       last = line;
+    }
+    // To the engine every time, moved or not: its memory pressure goes by
+    // these numbers, and by how they stand a few seconds after it has let
+    // something go.
+    if (const MemorySink sink = g_memory_sink.load()) {
+      sink(numbers.largest_free, numbers.free, numbers.app, numbers.limit);
     }
   }
 }
@@ -272,6 +299,10 @@ void InstallCrashLog() {
     ::CloseHandle(thread);
   }
   Log::Write(L"crash log: installed; " + MemoryLine());
+}
+
+void SetMemorySink(MemorySink sink) {
+  g_memory_sink.store(sink);
 }
 
 }  // namespace venetium_w10m::client

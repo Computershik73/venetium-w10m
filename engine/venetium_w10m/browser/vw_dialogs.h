@@ -61,6 +61,9 @@ class VwDialogs : public content::JavaScriptDialogManager {
 
   // A tab is going away: whatever it asked is cancelled.
   void ForgetContents(content::WebContents* web_contents);
+  // Whether |web_contents| is waiting for the answer to a dialog or a file
+  // chooser.
+  bool HasPending(content::WebContents* web_contents) const;
 
  private:
   struct PendingDialog {

@@ -71,8 +71,22 @@ VW_EXPORT void venetium_w10m_quit(void);
 // suspended app without telling it.
 VW_EXPORT void venetium_w10m_app_state(int32_t suspended);
 
-// The phone says memory is low (1: moderate, 2: critical).
+// The phone says memory is low (1: moderate, 2: critical): what
+// Windows.System.MemoryManager reports of the app's use against its limit,
+// passed on at once. The engine weighs it with what memory_status last told
+// it and decides itself what to let go of, and how often.
 VW_EXPORT void venetium_w10m_memory_pressure(int32_t level);
+
+// What the shell measured, every couple of seconds, in megabytes: the
+// largest free piece of the process's address space and all of it that is
+// free, the app's memory use as the phone counts it, and the limit the phone
+// gives the app (0: not known). A 32-bit process runs out of address space
+// long before it reaches the phone's limit, so it is by these numbers that
+// the engine trims its caches and unloads the pages of background tabs
+// (browser/vw_memory.h). Any thread.
+VW_EXPORT void venetium_w10m_memory_status(int32_t largest_free_mb,
+                                           int32_t free_mb, int32_t app_mb,
+                                           int32_t limit_mb);
 
 // ---- Frames (software path) -------------------------------------------------
 // The newest composited frame of the visible tab, BGRA premultiplied, rows
@@ -173,6 +187,9 @@ VW_EXPORT void venetium_w10m_set_desktop_mode(int32_t desktop);
 // ---- Events (engine -> shell) ----------------------------------------------
 typedef struct {
   // A tab's state changed. Every field is current; the shell compares.
+  // progress is 0..1, or -1 for a background tab whose page was unloaded to
+  // give its memory back: the tab keeps its URL, its title and its history,
+  // and loads the page again when it is selected.
   void (*tab_state)(int32_t tab, const char* url, const char* title,
                     float progress, int32_t loading, int32_t can_back,
                     int32_t can_forward, int32_t secure);

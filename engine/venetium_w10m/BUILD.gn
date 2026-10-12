@@ -63,6 +63,8 @@ shared_library("venetium_engine") {
     "browser/vw_frame_sink.h",
     "browser/vw_input_method.cc",
     "browser/vw_input_method.h",
+    "browser/vw_memory.cc",
+    "browser/vw_memory.h",
     "browser/vw_panel.cc",
     "browser/vw_panel.h",
     "browser/vw_present_guard.cc",
@@ -89,6 +91,7 @@ shared_library("venetium_engine") {
   deps = [
     "//base",
     "//base:i18n",
+    "//components/discardable_memory/service",
     "//components/download/public/common:public",
     "//components/headless/clipboard",
     "//components/embedder_support:user_agent",

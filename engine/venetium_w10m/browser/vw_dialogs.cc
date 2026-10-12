@@ -173,4 +173,18 @@ void VwDialogs::ForgetContents(content::WebContents* web_contents) {
   }
 }
 
+bool VwDialogs::HasPending(content::WebContents* web_contents) const {
+  for (const auto& [id, dialog] : dialogs_) {
+    if (dialog.contents == web_contents) {
+      return true;
+    }
+  }
+  for (const auto& [id, files] : files_) {
+    if (files.contents == web_contents) {
+      return true;
+    }
+  }
+  return false;
+}
+
 }  // namespace venetium_w10m

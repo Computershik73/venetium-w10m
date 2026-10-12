@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <thread>
 
+#include "client/CrashLog.h"
 #include "client/Log.h"
 #include "client/Settings.h"
 #include "engine/EngineHost.h"
@@ -545,6 +546,11 @@ void MainPage::Start(std::wstring initialUrl) {
   if (Api().set_desktop_mode) {
     Api().set_desktop_mode(Settings::DesktopMode() ? 1 : 0);
   }
+  // What the crash log's heartbeat measures every two seconds -- the address
+  // space left, the app's memory against its limit -- goes to the engine,
+  // whose memory pressure goes by it: it trims its caches and unloads the
+  // pages of background tabs as the numbers fall.
+  client::SetMemorySink(Api().memory_status);
 
   ReportScreen();
   try {
@@ -669,7 +675,7 @@ void MainPage::RefreshChrome() {
   const bool loading = tab && tab->loading;
   reloadIcon_.Glyph(loading ? L"\uE711" : L"\uE72C");  // Cancel : Refresh
   progress_.Opacity(loading ? 1.0 : 0.0);
-  progress_.Value(tab ? tab->progress : 0);
+  progress_.Value(tab && tab->progress > 0 ? tab->progress : 0);
   if (forwardItem_) forwardItem_.IsEnabled(tab && tab->canForward);
 }
 
@@ -704,6 +710,9 @@ void MainPage::RebuildTabList() {
     title.Foreground(Brush(ChromeFg()));
     title.FontSize(15);
     title.TextTrimming(TextTrimming::CharacterEllipsis);
+    // Its page was unloaded to give its memory back (progress -1); it
+    // loads again when the tab is chosen.
+    if (info.progress < 0) title.Opacity(0.5);
     lines.Children().Append(title);
     TextBlock url;
     url.Text(hstring(DisplayUrl(info.url)));
@@ -932,7 +941,9 @@ void MainPage::ShowEngineSwitches() {
               L"--vw-gpu=off  (no GPU compositing)\n"
               L"--vw-vsync=timer  (frames from a timer)\n"
               L"--vw-present-buffers=2\n"
-              L"--vw-codecs=all  (VP9 and AV1 video offered again)");
+              L"--vw-codecs=all  (VP9 and AV1 video offered again)\n"
+              L"--vw-discard=off  (background tabs stay loaded when memory "
+              L"is short)");
     note.FontSize(12);
     note.Opacity(0.7);
     note.TextWrapping(TextWrapping::Wrap);

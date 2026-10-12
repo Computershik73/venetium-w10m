@@ -13,9 +13,20 @@
 // Adapted from gecko-w10m's engine/CrashProbe.
 #pragma once
 
+#include <cstdint>
+
 namespace venetium_w10m::client {
 
 // Installs the fault logger and starts the heartbeat. Once, early.
 void InstallCrashLog();
+
+// What the heartbeat measures every two seconds, in megabytes: the largest
+// free piece of the address space and all of it that is free, the app's
+// memory use and the limit the phone gives it (0: not known).
+using MemorySink = void (*)(int32_t largest_free_mb, int32_t free_mb,
+                            int32_t app_mb, int32_t limit_mb);
+// Has the heartbeat hand every measurement to |sink| as well as the log
+// (null: no more). The sink is called on the heartbeat's thread. Any thread.
+void SetMemorySink(MemorySink sink);
 
 }  // namespace venetium_w10m::client

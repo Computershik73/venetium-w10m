@@ -27,6 +27,7 @@ struct Api {
   decltype(&venetium_w10m_quit) quit = nullptr;
   decltype(&venetium_w10m_app_state) app_state = nullptr;
   decltype(&venetium_w10m_memory_pressure) memory_pressure = nullptr;
+  decltype(&venetium_w10m_memory_status) memory_status = nullptr;
   decltype(&venetium_w10m_frame_copy) frame_copy = nullptr;
   decltype(&venetium_w10m_resize) resize = nullptr;
   decltype(&venetium_w10m_set_screen) set_screen = nullptr;

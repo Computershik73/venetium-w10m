@@ -2,16 +2,19 @@
 
 #include "venetium_w10m/browser/vw_download_delegate.h"
 
+#include <set>
 #include <string>
 #include <utility>
 
 #include "base/files/file_util.h"
 #include "base/functional/bind.h"
+#include "base/no_destructor.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/task/thread_pool.h"
 #include "components/download/public/common/download_item.h"
 #include "content/public/browser/browser_task_traits.h"
 #include "content/public/browser/browser_thread.h"
+#include "content/public/browser/download_item_utils.h"
 #include "net/base/filename_util.h"
 #include "venetium_w10m/browser/vw_engine.h"
 #include "venetium_w10m/common/vw_log.h"
@@ -20,10 +23,18 @@ namespace venetium_w10m {
 
 namespace {
 
+// The downloads coming in now, from being given a path to being over.
+// UI thread.
+std::set<download::DownloadItem*>& ComingIn() {
+  static base::NoDestructor<std::set<download::DownloadItem*>> items;
+  return *items;
+}
+
 // Tells the shell when one download is over, then goes away.
 class CompletionObserver : public download::DownloadItem::Observer {
  public:
   static void Attach(download::DownloadItem* item) {
+    ComingIn().insert(item);
     item->AddObserver(new CompletionObserver());
   }
 
@@ -59,6 +70,7 @@ class CompletionObserver : public download::DownloadItem::Observer {
 
  private:
   void Detach(download::DownloadItem* item) {
+    ComingIn().erase(item);
     item->RemoveObserver(this);
     delete this;
   }
@@ -85,6 +97,17 @@ base::FilePath ChoosePath(const GURL& url,
 }
 
 }  // namespace
+
+bool DownloadComingInFrom(content::WebContents* contents) {
+  for (download::DownloadItem* item : ComingIn()) {
+    // The WebContents the download began in, even if that has gone on to
+    // another page since.
+    if (content::DownloadItemUtils::GetOriginalWebContents(item) == contents) {
+      return true;
+    }
+  }
+  return false;
+}
 
 VwDownloadDelegate::VwDownloadDelegate(const base::FilePath& directory)
     : directory_(directory) {}

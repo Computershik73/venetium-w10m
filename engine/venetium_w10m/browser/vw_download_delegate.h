@@ -16,7 +16,15 @@
 #include "components/download/public/common/download_target_info.h"
 #include "content/public/browser/download_manager_delegate.h"
 
+namespace content {
+class WebContents;
+}
+
 namespace venetium_w10m {
+
+// Whether a download that a page of |contents| started is still coming in.
+// UI thread.
+bool DownloadComingInFrom(content::WebContents* contents);
 
 class VwDownloadDelegate : public content::DownloadManagerDelegate {
  public:

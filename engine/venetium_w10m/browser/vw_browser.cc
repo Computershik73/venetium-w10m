@@ -7,11 +7,13 @@
 
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
-#include "base/memory/memory_pressure_listener.h"
 #include "base/strings/escape.h"
 #include "base/strings/string_util.h"
 #include "base/task/single_thread_task_runner.h"
+#include "base/time/time.h"
 #include "components/url_formatter/url_fixer.h"
+#include "content/public/browser/navigation_controller.h"
+#include "content/public/browser/render_frame_host.h"
 #include "content/public/browser/storage_partition.h"
 #include "content/public/browser/web_contents.h"
 #include "services/network/public/mojom/cookie_manager.mojom.h"
@@ -146,6 +148,7 @@ void VwBrowser::SelectTab(int32_t id) {
       old->ExitFullscreen();
     }
     old->view()->Hide();
+    old->set_last_seen(base::TimeTicks::Now());
   }
   selected_ = id;
   recent_.erase(std::remove(recent_.begin(), recent_.end(), id),
@@ -154,6 +157,10 @@ void VwBrowser::SelectTab(int32_t id) {
   VwTab* tab = it->second.get();
   tab->view()->SetBounds(gfx::Rect(platform_->root()->bounds().size()));
   tab->view()->Show();
+  // An unloaded tab loads its page again on being shown (WebContentsImpl
+  // makes its NavigationController active); this is for a Show that did not
+  // reach it, and does nothing otherwise.
+  tab->contents()->GetController().LoadIfNecessary();
   tab->contents()->Focus();
   tab->SetDesktopMode(VwEngine::Get()->desktop_mode.load());
   PublishSelection();
@@ -267,6 +274,7 @@ void VwBrowser::AppStateChanged(bool suspended) {
   platform_->SetActive(!suspended);
   if (!suspended) {
     NoteF("app resumed");
+    memory_.OnAppState(false);
     return;
   }
   // The phone usually ends a suspended app without another word: cookies and
@@ -277,12 +285,102 @@ void VwBrowser::AppStateChanged(bool suspended) {
   partition->GetCookieManagerForBrowserProcess()->FlushCookieStore(
       base::DoNothing());
   partition->Flush();
+  memory_.OnAppState(true);
 }
 
 void VwBrowser::MemoryPressure(int32_t level) {
-  base::MemoryPressureListener::NotifyMemoryPressure(
-      level >= 2 ? base::MEMORY_PRESSURE_LEVEL_CRITICAL
-                 : base::MEMORY_PRESSURE_LEVEL_MODERATE);
+  memory_.OnPhoneLevel(level);
+}
+
+bool VwBrowser::TiedToSelected(VwTab* tab) {
+  VwTab* front = selected();
+  if (!front || front == tab) {
+    return front == tab;
+  }
+  const auto opened_by = [](VwTab* child, VwTab* parent) {
+    content::RenderFrameHost* opener = child->contents()->GetOpener();
+    return opener && content::WebContents::FromRenderFrameHost(opener) ==
+                         parent->contents();
+  };
+  return opened_by(front, tab) || opened_by(tab, front);
+}
+
+const char* VwBrowser::WhyKept(VwTab* tab, base::TimeDelta spare) {
+  const char* why = nullptr;
+  if (!tab->CanDiscard(&why)) {
+    return why;
+  }
+  if (TiedToSelected(tab)) {
+    // A sign-in window and the page waiting for its answer, say: unloading
+    // either ends what the person is in the middle of.
+    return "bound to the tab on screen as opener and opened";
+  }
+  if (base::TimeTicks::Now() - tab->last_seen() < spare) {
+    return "only just left the screen";
+  }
+  return nullptr;
+}
+
+int VwBrowser::UnloadableTabs(base::TimeDelta spare) {
+  int count = 0;
+  for (auto& [id, tab] : tabs_) {
+    if (id != selected_ && !WhyKept(tab.get(), spare)) {
+      ++count;
+    }
+  }
+  return count;
+}
+
+int VwBrowser::UnloadBackgroundTabs(int limit,
+                                    base::TimeDelta spare,
+                                    const char* cause) {
+  std::vector<VwTab*> candidates;
+  for (auto& [id, tab] : tabs_) {
+    if (id != selected_ && !WhyKept(tab.get(), spare)) {
+      candidates.push_back(tab.get());
+    }
+  }
+  std::sort(candidates.begin(), candidates.end(), [](VwTab* a, VwTab* b) {
+    return a->last_seen() < b->last_seen();
+  });
+  const base::TimeTicks now = base::TimeTicks::Now();
+  int unloaded = 0;
+  for (VwTab* tab : candidates) {
+    if (unloaded >= limit) {
+      break;
+    }
+    const int seconds = static_cast<int>((now - tab->last_seen()).InSeconds());
+    tab->Discard();
+    // As in AddTab: the tab's view is a new window.
+    aura::Window* view = tab->view();
+    platform_->root()->AddChild(view);
+    view->SetBounds(gfx::Rect(platform_->root()->bounds().size()));
+    view->Hide();
+    NoteF("tab %d: unloaded (least recently used, %d s off screen; %s)",
+          tab->id(), seconds, cause);
+    tab->ReportState(true);
+    ++unloaded;
+  }
+  return unloaded;
+}
+
+void VwBrowser::NoteKeptTabs(base::TimeDelta spare) {
+  std::string kept;
+  int unloaded = 0;
+  for (auto& [id, tab] : tabs_) {
+    if (id == selected_) {
+      continue;
+    }
+    if (tab->discarded()) {
+      ++unloaded;
+      continue;
+    }
+    if (const char* why = WhyKept(tab.get(), spare)) {
+      kept += absl::StrFormat("; tab %d: %s", id, why);
+    }
+  }
+  NoteF("memory: no background tab to unload (%d unloaded already)%s",
+        unloaded, kept);
 }
 
 void VwBrowser::OnTabStateChanged(VwTab* tab) {

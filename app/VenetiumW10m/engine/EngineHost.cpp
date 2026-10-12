@@ -97,6 +97,7 @@ bool EngineHost::Load(winrt::Windows::UI::Core::CoreDispatcher const& dispatcher
   VW_RESOLVE(quit);
   VW_RESOLVE(app_state);
   VW_RESOLVE(memory_pressure);
+  VW_RESOLVE(memory_status);
   VW_RESOLVE(frame_copy);
   VW_RESOLVE(resize);
   VW_RESOLVE(set_screen);

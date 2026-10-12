@@ -22,6 +22,7 @@
 #include "venetium_w10m/browser/vw_browser.h"
 #include "venetium_w10m/browser/vw_browser_client.h"
 #include "venetium_w10m/browser/vw_dialogs.h"
+#include "venetium_w10m/browser/vw_download_delegate.h"
 #include "venetium_w10m/browser/vw_engine.h"
 #include "venetium_w10m/common/vw_log.h"
 #include "venetium_w10m/common/vw_user_agent.h"
@@ -37,8 +38,13 @@ VwTab::VwTab(VwBrowser* browser,
       id_(id),
       opener_(opener),
       contents_(std::move(contents)) {
-  contents_->SetDelegate(this);
   desktop_ = VwEngine::Get()->desktop_mode.load();
+  AttachContents();
+}
+
+void VwTab::AttachContents() {
+  Observe(contents_.get());
+  contents_->SetDelegate(this);
   // The desktop agent goes with every navigation made while the desktop-site
   // switch is on (NavigationController::UA_OVERRIDE_TRUE); the mobile one is
   // the browser's own.
@@ -136,6 +142,72 @@ bool VwTab::CanGoBack() {
   return contents_->GetController().CanGoBack();
 }
 
+bool VwTab::CanDiscard(const char** why) {
+  content::NavigationController& controller = contents_->GetController();
+  content::NavigationEntry* entry = controller.GetLastCommittedEntry();
+  const char* reason = nullptr;
+  if (discarded_) {
+    reason = "unloaded already";
+  } else if (!entry || entry->IsInitialEntry()) {
+    // Nothing to come back to; and a window a page opened and wrote into
+    // itself has no more than this.
+    reason = "no page of its own loaded";
+  } else if (controller.GetPendingEntry()) {
+    // It would come back at the page it is leaving.
+    reason = "on its way to another page";
+  } else if (entry->GetHasPostData()) {
+    // Such a page is loaded again from the cache only, which seldom has
+    // the answer to a form: it would come back as ERR_CACHE_MISS.
+    reason = "the page is the answer to a form";
+  } else if (entry->GetURL().SchemeIsBlob()) {
+    // The page that made the blob may be gone, and the blob with it.
+    reason = "the page was made by a script (blob:)";
+  } else if (fullscreen_ || contents_->HasPictureInPictureVideo()) {
+    reason = "fullscreen or picture in picture";
+  } else if (contents_->IsCurrentlyAudible()) {
+    reason = "playing sound";
+  } else if (contents_->IsBeingCaptured()) {
+    reason = "being captured";
+  } else if (browser_->dialogs()->HasPending(contents_.get())) {
+    reason = "a dialog or a file chooser is open";
+  } else if (DownloadComingInFrom(contents_.get())) {
+    reason = "a download it started is coming in";
+  }
+  if (why) {
+    *why = reason;
+  }
+  return !reason;
+}
+
+void VwTab::Discard() {
+  content::WebContents::CreateParams params(contents_->GetBrowserContext());
+  params.initially_hidden = true;
+  params.desired_renderer_state =
+      content::WebContents::CreateParams::kNoRendererProcess;
+  params.last_active_time = contents_->GetLastActiveTime();
+  params.last_active_time_ticks = contents_->GetLastActiveTimeTicks();
+  std::unique_ptr<content::WebContents> empty =
+      content::WebContents::Create(params);
+  // needs_reload: the current entry is loaded when the WebContents is first
+  // shown (NavigationController::SetActive, from VwBrowser::SelectTab's
+  // Show), and as a restore: from the cache where it can be, scrolled to
+  // where the page was. This is what desktop Chrome does to a tab it
+  // discards (TabLifecycleUnit::FinishDiscard).
+  empty->GetController().CopyStateFrom(&contents_->GetController(),
+                                       /*needs_reload=*/true);
+  // document.wasDiscarded, for the page when it is back.
+  empty->SetWasDiscarded(true);
+
+  browser_->dialogs()->ForgetContents(contents_.get());
+  contents_->SetDelegate(nullptr);
+  Observe(nullptr);
+  // The page goes here: its frames, layers and tiles with the WebContents,
+  // its documents and scripts at the renderer's next full collection.
+  contents_ = std::move(empty);
+  AttachContents();
+  discarded_ = true;
+}
+
 void VwTab::ExitFullscreen() {
   if (fullscreen_) {
     contents_->ExitFullscreen(/*will_cause_resize=*/true);
@@ -150,8 +222,11 @@ void VwTab::ReportState(bool force) {
   }
   std::string title = base::UTF16ToUTF8(contents_->GetTitle());
   const bool loading = contents_->IsLoading();
+  // -1: the page is unloaded (venetium_w10m_events.tab_state).
   const float progress =
-      loading ? static_cast<float>(contents_->GetLoadProgress()) : 1.0f;
+      discarded_ ? -1.0f
+      : loading  ? static_cast<float>(contents_->GetLoadProgress())
+                 : 1.0f;
   auto& controller = contents_->GetController();
   const bool can_back = controller.CanGoBack();
   const bool can_forward = controller.CanGoForward();
@@ -339,6 +414,16 @@ void VwTab::LoadProgressChanged(double progress) {
 
 void VwTab::TitleWasSet(content::NavigationEntry* entry) {
   ReportState();
+}
+
+void VwTab::DidStartNavigation(content::NavigationHandle* navigation_handle) {
+  // An unloaded tab's page is on its way back: the tab was selected, or
+  // sent somewhere while out of sight.
+  if (discarded_ && navigation_handle->IsInPrimaryMainFrame()) {
+    discarded_ = false;
+    NoteF("tab %d: loaded again", id_);
+    ReportState(true);
+  }
 }
 
 void VwTab::DidFinishNavigation(content::NavigationHandle* navigation_handle) {

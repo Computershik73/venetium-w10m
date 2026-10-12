@@ -13,6 +13,7 @@
 #include <utility>
 
 #include "base/functional/bind.h"
+#include "base/time/time.h"
 #include "venetium_w10m/browser/vw_browser.h"
 #include "venetium_w10m/browser/vw_browser_main_parts.h"
 #include "venetium_w10m/browser/vw_engine.h"
@@ -68,6 +69,29 @@ VW_EXPORT void venetium_w10m_memory_pressure(int32_t level) {
   Post(base::BindOnce(
       [](int32_t level, VwBrowser* browser) { browser->MemoryPressure(level); },
       level));
+}
+
+VW_EXPORT void venetium_w10m_memory_status(int32_t largest_free_mb,
+                                           int32_t free_mb,
+                                           int32_t app_mb,
+                                           int32_t limit_mb) {
+  // Not queued for a browser that has not started: these come every two
+  // seconds for as long as the shell runs.
+  if (!VwEngine::Get()->browser_running()) {
+    return;
+  }
+  venetium_w10m::MemorySample sample;
+  sample.largest = largest_free_mb;
+  sample.free = free_mb;
+  sample.app = app_mb;
+  sample.limit = limit_mb;
+  // Stamped here: one that waits long on the UI thread is out of date.
+  sample.taken = base::TimeTicks::Now();
+  Post(base::BindOnce(
+      [](venetium_w10m::MemorySample sample, VwBrowser* browser) {
+        browser->memory()->OnSample(sample);
+      },
+      sample));
 }
 
 VW_EXPORT int32_t venetium_w10m_frame_copy(void* dest,

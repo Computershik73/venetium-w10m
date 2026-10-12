@@ -13,6 +13,7 @@
 #include <dxgi.h>
 #include <wrl/client.h>
 
+#include <atomic>
 #include <string>
 #include <vector>
 
@@ -27,6 +28,7 @@
 #include "content/public/app/content_main.h"
 #include "content/public/common/content_switches.h"
 #include "gpu/config/gpu_switches.h"
+#include "partition_alloc/oom_callback.h"
 #include "sandbox/policy/switches.h"
 #include "sandbox/win/src/sandbox_types.h"
 #include "third_party/blink/public/common/switches.h"
@@ -117,15 +119,16 @@ void ChoosePresentation(EngineConfig* config, uint64_t ram_mb) {
   // What a verdict belongs to: this package (its directory carries the appx
   // version; the engine DLL alone is the same in a build that changes only
   // ANGLE or the shell) and the switches of the run, less the two the shell
-  // adds for its Hardware graphics setting and the one that only chooses
-  // which video codecs pages are offered.
+  // adds for its Hardware graphics setting and the ones that only choose
+  // which video codecs pages are offered and whether background tabs are
+  // unloaded.
   std::string made_of = base::ToLowerASCII(
       base::WideToUTF8(config->install_dir.BaseName().value()));
   for (const std::string& token :
        base::SplitString(config->switches, " ", base::TRIM_WHITESPACE,
                          base::SPLIT_WANT_NONEMPTY)) {
     if (token != "--vw-gpu=retry" && token != "--vw-present=bitmap" &&
-        token != "--vw-codecs=all") {
+        token != "--vw-codecs=all" && token != "--vw-discard=off") {
       made_of += ' ';
       made_of += token;
     }
@@ -177,6 +180,17 @@ void ChoosePresentation(EngineConfig* config, uint64_t ram_mb) {
         config->gpu_compositing ? "GPU compositing (ANGLE on Direct3D 11)"
                                 : "software compositing",
         config->present_buffers);
+}
+
+// Runs on the thread that could not get memory, just before Chromium raises
+// its out-of-memory exception (0xE0000008), which nothing handles: the last
+// line of a run that ended this way says so.
+void NoteOutOfMemory() {
+  static std::atomic<bool> noted{false};
+  if (!noted.exchange(true)) {
+    Note("memory: OUT OF MEMORY -- an allocation failed, and Chromium ends "
+         "the process for it");
+  }
 }
 
 uint64_t PhysicalMemoryMb() {
@@ -253,6 +267,29 @@ void SetUpCommandLine(const EngineConfig& config) {
   command_line->AppendSwitchASCII(
       switches::kDisableFeatures,
       "BackForwardCache,ShutdownForFailedChannelCreation");
+  // What memory pressure reaches. On Windows Chromium leaves some of those
+  // that listen for it untold (kSuppressMemoryListeners and its mask, a
+  // character a listener, in
+  // base/memory/memory_pressure_listener_registry.cc), and one of them
+  // holds much here: the manager of the discardable memory that decoded
+  // images wait in (listener 9), each megabyte of it mapped twice in this
+  // one process. The mask below is Chromium's with that one told again.
+  // Blink is to let go of the resources no page is using, and of decoded
+  // images it can decode again: off by default on Windows. And Chromium's
+  // own watcher of memory is put to sleep. Every 5 s it calls less than
+  // 1000 MB of RAM free in the whole phone moderate pressure, told again
+  // every 10 s, and less than 400 MB critical, told every 5 s
+  // (components/memory_pressure/system_memory_pressure_evaluator_win.cc): a
+  // phone with 1 GB is never clear of that, and what it measures is not
+  // what runs out here. That the shell measures, and VwMemory decides what
+  // it is worth (browser/vw_memory.h).
+  command_line->AppendSwitchASCII(
+      switches::kEnableFeatures,
+      "SuppressMemoryListeners:suppress_memory_listeners_mask/"
+      "0200200200220200020020020002020020000002000000020,"
+      "ReleaseResourceStrongReferencesOnMemoryPressure,"
+      "ReleaseResourceDecodedDataOnMemoryPressure,"
+      "WinMemoryPressurePeriod:period/30d");
   if (!config.jit) {
     // V8 without a JIT: no executable memory needed at all, which is all an
     // app container without the codeGeneration capability allows.
@@ -354,6 +391,7 @@ extern "C" VW_EXPORT int32_t venetium_w10m_run(
         engine_config.profile_dir.Append(FILE_PATH_LITERAL("Cache"));
   }
 
+  partition_alloc::SetPartitionAllocOomCallback(&NoteOutOfMemory);
   ChoosePresentation(&engine_config, PhysicalMemoryMb());
 
   VwEngine* engine = VwEngine::Get();
