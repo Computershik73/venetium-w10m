@@ -117,13 +117,15 @@ void ChoosePresentation(EngineConfig* config, uint64_t ram_mb) {
   // What a verdict belongs to: this package (its directory carries the appx
   // version; the engine DLL alone is the same in a build that changes only
   // ANGLE or the shell) and the switches of the run, less the two the shell
-  // adds for its Hardware graphics setting.
+  // adds for its Hardware graphics setting and the one that only chooses
+  // which video codecs pages are offered.
   std::string made_of = base::ToLowerASCII(
       base::WideToUTF8(config->install_dir.BaseName().value()));
   for (const std::string& token :
        base::SplitString(config->switches, " ", base::TRIM_WHITESPACE,
                          base::SPLIT_WANT_NONEMPTY)) {
-    if (token != "--vw-gpu=retry" && token != "--vw-present=bitmap") {
+    if (token != "--vw-gpu=retry" && token != "--vw-present=bitmap" &&
+        token != "--vw-codecs=all") {
       made_of += ' ';
       made_of += token;
     }

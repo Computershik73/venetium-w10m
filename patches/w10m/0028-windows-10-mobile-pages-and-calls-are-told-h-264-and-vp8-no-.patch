@@ -1,0 +1,304 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Mon, 12 Oct 2026 13:27:42 +0400
+Subject: [PATCH] Windows 10 Mobile: pages and calls are told H.264 and VP8, no
+ VP9 or AV1
+
+A site that is told VP9 or AV1 plays sends that, and both are decoded on
+the CPU on these phones; H.264 is the codec they are built to play. The
+embedder's ContentRendererClient::IsDecoderSupportedVideoType answers for
+canPlayType, MediaSource, MediaCapabilities, the HLS player and WebCodecs'
+isConfigSupported; what it does not reach is closed here:
+
+- WebRTC's codec factories (blink's video_codec_factory.cc) list H.264
+  first, then VP8, and nothing else: SDP, getCapabilities and
+  MediaCapabilities' "webrtc" answers all come from them.
+- WebCodecs' VideoDecoder.configure() refuses what isConfigSupported()
+  refuses.
+- A file whose only picture is VP9 or AV1 fails to load instead of playing
+  its sound over a blank frame, so that a <source> list goes on to its MP4.
+
+"--vw-codecs=all" lifts it; media/base/video_codecs_w10m.h is the one
+place the switch is read.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ media/base/video_codecs_w10m.h                | 30 +++++++
+ media/filters/ffmpeg_demuxer.cc               | 35 ++++++++
+ .../modules/webcodecs/video_decoder.cc        | 10 +++
+ .../peerconnection/video_codec_factory.cc     | 89 +++++++++++++++++++
+ 4 files changed, 164 insertions(+)
+ create mode 100644 media/base/video_codecs_w10m.h
+
+diff --git a/media/base/video_codecs_w10m.h b/media/base/video_codecs_w10m.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..a4f29e056c52e5e8d8d396a691d6871b1b5c6118
+--- /dev/null
++++ b/media/base/video_codecs_w10m.h
+@@ -0,0 +1,30 @@
++// Copyright 2026 The Venetium-W10M Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef MEDIA_BASE_VIDEO_CODECS_W10M_H_
++#define MEDIA_BASE_VIDEO_CODECS_W10M_H_
++
++#include "base/command_line.h"
++
++namespace media {
++
++// Windows 10 Mobile (Venetium): video is decoded in software there, so pages
++// and peers are offered H.264 and VP8 and nothing heavier. "--vw-codecs=all"
++// among the shell's switches lifts that, for comparing on a device, and this
++// is the one place the switch is read. Two places decide by it: the
++// embedder's ContentRendererClient::IsDecoderSupportedVideoType, which media
++// and Blink ask through media::IsDecoderSupportedVideoType, and WebRTC's
++// codec factories (blink's video_codec_factory.cc), which cannot ask the
++// embedder: that question may wait for the main thread, and the main thread
++// waits for the signaling thread while the factories are made.
++inline bool W10mEveryVideoCodec() {
++  static const bool every_codec =
++      base::CommandLine::ForCurrentProcess()->GetSwitchValueASCII(
++          "vw-codecs") == "all";
++  return every_codec;
++}
++
++}  // namespace media
++
++#endif  // MEDIA_BASE_VIDEO_CODECS_W10M_H_
+diff --git a/media/filters/ffmpeg_demuxer.cc b/media/filters/ffmpeg_demuxer.cc
+index 45d82a351a1bcdc7ef832d220d112cbd04516ca1..333694d028004d72415a5edbbae88dc6f3c7dc78 100644
+--- a/media/filters/ffmpeg_demuxer.cc
++++ b/media/filters/ffmpeg_demuxer.cc
+@@ -1317,6 +1317,10 @@ void FFmpegDemuxer::OnFindStreamInfoDone(int result) {
+   int supported_audio_track_count = 0;
+   int supported_video_track_count = 0;
+   bool has_opus_or_vorbis_audio = false;
++#if defined(VENETIUM_W10M)
++  bool has_video_stream = false;
++  bool refused_video_stream = false;
++#endif
+   const base::span<AVStream*> stream_span =
+       AVFormatContextToSpan(format_context);
+   for (size_t i = 0; i < stream_span.size(); ++i) {
+@@ -1376,6 +1380,23 @@ void FFmpegDemuxer::OnFindStreamInfoDone(int result) {
+     // things like: codec, channel layout, sample/pixel format, etc...
+     std::unique_ptr<FFmpegDemuxerStream> demuxer_stream =
+         FFmpegDemuxerStream::Create(this, stream, media_log_);
++#if defined(VENETIUM_W10M)
++    if (codec_type == AVMEDIA_TYPE_VIDEO) {
++      if (demuxer_stream) {
++        has_video_stream = true;
++      } else if (codec_id == AV_CODEC_ID_VP9 || codec_id == AV_CODEC_ID_AV1) {
++        // Skipped because the embedder refuses the codec itself, in its
++        // plainest form, and not for a profile libvpx or dav1d lack?
++        const bool vp9 = codec_id == AV_CODEC_ID_VP9;
++        if (!IsDecoderSupportedVideoType(
++                {vp9 ? VideoCodec::kVP9 : VideoCodec::kAV1,
++                 vp9 ? VP9PROFILE_PROFILE0 : AV1PROFILE_PROFILE_MAIN,
++                 kNoVideoCodecLevel, VideoColorSpace::REC709()})) {
++          refused_video_stream = true;
++        }
++      }
++    }
++#endif
+     if (demuxer_stream.get()) {
+       streams_[i] = std::move(demuxer_stream);
+     } else {
+@@ -1489,6 +1510,20 @@ void FFmpegDemuxer::OnFindStreamInfoDone(int result) {
+       has_opus_or_vorbis_audio = is_opus_or_vorbis;
+   }
+ 
++#if defined(VENETIUM_W10M)
++  // A file whose only picture is VP9 or AV1, which the embedder refuses on
++  // this phone, is not played as its sound over a blank frame (upstream's
++  // partial playback): the load fails, as in a browser without the codec,
++  // and a <source> list goes on to its next entry -- the MP4, usually.
++  if (refused_video_stream && !has_video_stream) {
++    MEDIA_LOG(ERROR, media_log_)
++        << GetDisplayName() << ": the video is VP9 or AV1, not decoded here";
++    LOG(WARNING) << "media: a file whose picture is VP9 or AV1 is not played";
++    RunInitCB(DEMUXER_ERROR_NO_SUPPORTED_STREAMS);
++    return;
++  }
++#endif
++
+   if (media_tracks->tracks().empty()) {
+     MEDIA_LOG(ERROR, media_log_) << GetDisplayName()
+                                  << ": no supported streams";
+diff --git a/third_party/blink/renderer/modules/webcodecs/video_decoder.cc b/third_party/blink/renderer/modules/webcodecs/video_decoder.cc
+index 810bf89aa66e469fb50dd7cf559c902a047485dd..ac3e7db281cd99669ef24ffa765d0db630ab4a0c 100644
+--- a/third_party/blink/renderer/modules/webcodecs/video_decoder.cc
++++ b/third_party/blink/renderer/modules/webcodecs/video_decoder.cc
+@@ -447,6 +447,16 @@ VideoDecoder::MakeMediaVideoDecoderConfigInternal(
+   if (video_type.codec == media::VideoCodec::kUnknown) {
+     return std::nullopt;
+   }
++#if defined(VENETIUM_W10M)
++  // configure() takes no codec isConfigSupported() says no to. Upstream asks
++  // the embedder only there: a page that configures VP9 or AV1 without asking
++  // first would still get libvpx or dav1d, which the embedder refuses on this
++  // phone (VwContentRendererClient::IsDecoderSupportedVideoType).
++  if (!media::IsDecoderSupportedVideoType(video_type)) {
++    *js_error_message = "Unsupported codec.";
++    return std::nullopt;
++  }
++#endif
+ 
+   std::vector<uint8_t> extra_data;
+   if (config.hasDescription()) {
+diff --git a/third_party/blink/renderer/platform/peerconnection/video_codec_factory.cc b/third_party/blink/renderer/platform/peerconnection/video_codec_factory.cc
+index e958c0b2c102dc06ddc443c26dc203326f87ccd6..acaac30a6220801927090ee3eaa231bca65d01aa 100644
+--- a/third_party/blink/renderer/platform/peerconnection/video_codec_factory.cc
++++ b/third_party/blink/renderer/platform/peerconnection/video_codec_factory.cc
+@@ -32,6 +32,14 @@
+ #include "media/base/android/media_codec_util.h"
+ #endif
+ 
++#if defined(VENETIUM_W10M)
++#include <algorithm>
++
++#include "base/logging.h"
++#include "media/base/video_codecs_w10m.h"
++#include "third_party/webrtc/media/base/media_constants.h"
++#endif
++
+ namespace blink {
+ 
+ namespace {
+@@ -83,6 +91,49 @@ std::unique_ptr<webrtc::VideoDecoder> Wrap(
+   return software_decoder;
+ }
+ 
++#if defined(VENETIUM_W10M)
++// Calls in H.264, with VP8 for a peer that has no H.264. WebRTC would also
++// offer VP9 and AV1, and a site that is offered them takes them: the two
++// heaviest to decode and to encode on a CPU, which is all a call has here.
++// SDP, getCapabilities() and MediaCapabilities' "webrtc" answers all ask
++// the two adapters below, so every one of them says the same.
++// "--vw-codecs=all" among the engine switches lifts this, for comparing on
++// a device.
++bool VwEveryCodec() {
++  static const bool every_codec = [] {
++    const bool all = media::W10mEveryVideoCodec();
++    LOG(WARNING) << "calls: video in "
++                 << (all ? "every codec WebRTC has"
++                         : "H.264, then VP8; no VP9, no AV1");
++    return all;
++  }();
++  return every_codec;
++}
++
++bool VwIsH264(const webrtc::SdpVideoFormat& format) {
++  return base::EqualsCaseInsensitiveASCII(format.name, webrtc::kH264CodecName);
++}
++
++bool VwCodecAllowed(const webrtc::SdpVideoFormat& format) {
++  return VwEveryCodec() || VwIsH264(format) ||
++         base::EqualsCaseInsensitiveASCII(format.name, webrtc::kVp8CodecName);
++}
++
++// What a factory lists, less what is left out, H.264 first: the order is the
++// order of preference in an offer, and the other side sends the first of
++// them it has.
++std::vector<webrtc::SdpVideoFormat> VwAllowedFormats(
++    std::vector<webrtc::SdpVideoFormat> formats) {
++  if (!VwEveryCodec()) {
++    std::erase_if(formats, [](const webrtc::SdpVideoFormat& format) {
++      return !VwCodecAllowed(format);
++    });
++    std::stable_partition(formats.begin(), formats.end(), VwIsH264);
++  }
++  return formats;
++}
++#endif  // defined(VENETIUM_W10M)
++
+ // This class combines a hardware factory with the internal factory and adds
+ // internal SW codecs, simulcast, and SW fallback wrappers.
+ class EncoderAdapter : public webrtc::VideoEncoderFactory {
+@@ -105,6 +156,11 @@ class EncoderAdapter : public webrtc::VideoEncoderFactory {
+       LOG(ERROR) << "Unsupported SDP format: " << format.name;
+       return nullptr;
+     }
++#if defined(VENETIUM_W10M)
++    if (!VwCodecAllowed(format)) {
++      return nullptr;
++    }
++#endif
+     const bool supported_in_hardware =
+         IsFormatSupported(hardware_encoder_factory_.get(), format);
+     bool allow_h264_profile_fallback = false;
+@@ -147,16 +203,30 @@ class EncoderAdapter : public webrtc::VideoEncoderFactory {
+   std::vector<webrtc::SdpVideoFormat> GetSupportedFormats() const override {
+     std::vector<webrtc::SdpVideoFormat> software_formats =
+         software_encoder_factory_.GetSupportedFormats();
++#if defined(VENETIUM_W10M)
++    if (hardware_encoder_factory_) {
++      software_formats =
++          MergeFormats(std::move(software_formats),
++                       hardware_encoder_factory_->GetSupportedFormats());
++    }
++    return VwAllowedFormats(std::move(software_formats));
++#else
+     return hardware_encoder_factory_
+                ? MergeFormats(software_formats,
+                               hardware_encoder_factory_->GetSupportedFormats())
+                : software_formats;
++#endif
+   }
+ 
+   webrtc::VideoEncoderFactory::CodecSupport QueryCodecSupport(
+       const webrtc::SdpVideoFormat& format,
+       std::optional<std::string> scalability_mode,
+       std::optional<webrtc::Resolution> resolution) const override {
++#if defined(VENETIUM_W10M)
++    if (!VwCodecAllowed(format)) {
++      return webrtc::VideoEncoderFactory::CodecSupport();
++    }
++#endif
+     webrtc::VideoEncoderFactory::CodecSupport codec_support =
+         hardware_encoder_factory_
+             ? hardware_encoder_factory_->QueryCodecSupport(
+@@ -188,6 +258,11 @@ class DecoderAdapter : public webrtc::VideoDecoderFactory {
+   std::unique_ptr<webrtc::VideoDecoder> Create(
+       const webrtc::Environment& env,
+       const webrtc::SdpVideoFormat& format) override {
++#if defined(VENETIUM_W10M)
++    if (!VwCodecAllowed(format)) {
++      return nullptr;
++    }
++#endif
+     std::unique_ptr<webrtc::VideoDecoder> software_decoder =
+         CreateDecoder(&software_decoder_factory_, env, format);
+ 
+@@ -206,16 +281,30 @@ class DecoderAdapter : public webrtc::VideoDecoderFactory {
+   std::vector<webrtc::SdpVideoFormat> GetSupportedFormats() const override {
+     std::vector<webrtc::SdpVideoFormat> software_formats =
+         software_decoder_factory_.GetSupportedFormats();
++#if defined(VENETIUM_W10M)
++    if (hardware_decoder_factory_) {
++      software_formats =
++          MergeFormats(std::move(software_formats),
++                       hardware_decoder_factory_->GetSupportedFormats());
++    }
++    return VwAllowedFormats(std::move(software_formats));
++#else
+     return hardware_decoder_factory_
+                ? MergeFormats(software_formats,
+                               hardware_decoder_factory_->GetSupportedFormats())
+                : software_formats;
++#endif
+   }
+ 
+   webrtc::VideoDecoderFactory::CodecSupport QueryCodecSupport(
+       const webrtc::SdpVideoFormat& format,
+       bool reference_scaling,
+       std::optional<webrtc::Resolution> resolution) const override {
++#if defined(VENETIUM_W10M)
++    if (!VwCodecAllowed(format)) {
++      return webrtc::VideoDecoderFactory::CodecSupport();
++    }
++#endif
+     webrtc::VideoDecoderFactory::CodecSupport codec_support =
+         hardware_decoder_factory_
+             ? hardware_decoder_factory_->QueryCodecSupport(

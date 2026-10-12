@@ -21,6 +21,7 @@ The device the port is brought up on: HP Elite x3 class, Windows 10 Mobile
 | The panel's swap chain resized in place when the room changes (keyboard, rotation) | built (222.19), untested |
 | Touch flings (the curve was built from 0 pixels per inch: no inertia at all) | fixed in 222.19, untested |
 | Address space: 512 MB that Blink set aside for array buffers, now 96 MB | built (222.19); the log's `memory:` line says what takes the rest |
+| Video codecs: pages and calls are told H.264 and VP8 only (VP9, AV1 and HEVC refused: canPlayType, MediaSource, MediaCapabilities, WebCodecs, WebRTC), so a site that asks sends H.264; a file whose only picture is VP9 or AV1 does not play | built (222.20), untested |
 | Feature level 9_3 phones: frames through Direct3D 11 (the row above); a Direct3D 11 compositor of our own for them | the first is built and is what such a phone gets today; the second is designed, not written |
 
 What the log says about graphics, in order: `gpu: Direct3D 11 feature
@@ -36,7 +37,8 @@ Hardware graphics is switched off and on). Menu → Engine switches takes
 Chromium's and the engine's own switches for the next start:
 `--vw-gpu=off`, `--vw-vsync=timer` (frames from a timer, as before),
 `--vw-vsync=eager` (a frame made up at once when an animation starts),
-`--disable_post_sub_buffers_for_onscreen_surfaces` (whole-frame presents).
+`--disable_post_sub_buffers_for_onscreen_surfaces` (whole-frame presents),
+`--vw-codecs=all` (VP9 and AV1 offered to pages and calls again).
 
 ## Toolchain and tree — built/checked
 

@@ -931,7 +931,8 @@ void MainPage::ShowEngineSwitches() {
               L"spaces; used from the next start. For example:\n"
               L"--vw-gpu=off  (no GPU compositing)\n"
               L"--vw-vsync=timer  (frames from a timer)\n"
-              L"--vw-present-buffers=2");
+              L"--vw-present-buffers=2\n"
+              L"--vw-codecs=all  (VP9 and AV1 video offered again)");
     note.FontSize(12);
     note.Opacity(0.7);
     note.TextWrapping(TextWrapping::Wrap);

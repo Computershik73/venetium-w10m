@@ -10,7 +10,8 @@
 namespace venetium_w10m {
 
 // The renderer runs on a thread of the same process (single-process mode);
-// what it needs from the embedder is little more than an error page.
+// what it needs from the embedder is an error page, and which video codecs
+// pages are told it plays.
 class VwContentRendererClient : public content::ContentRendererClient {
  public:
   VwContentRendererClient();
@@ -25,6 +26,7 @@ class VwContentRendererClient : public content::ContentRendererClient {
                         content::mojom::AlternativeErrorPageOverrideInfoPtr
                             alternative_error_page_info,
                         std::string* error_html) override;
+  bool IsDecoderSupportedVideoType(const media::VideoType& type) override;
 };
 
 }  // namespace venetium_w10m
