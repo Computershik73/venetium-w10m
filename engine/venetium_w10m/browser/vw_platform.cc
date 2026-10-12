@@ -30,7 +30,9 @@
 #include "ui/events/pointer_details.h"
 #include "ui/wm/core/default_activation_client.h"
 #include "ui/wm/core/default_screen_position_client.h"
+#include "venetium_w10m/browser/vw_engine.h"
 #include "venetium_w10m/browser/vw_input_method.h"
+#include "venetium_w10m/browser/vw_panel.h"
 #include "venetium_w10m/browser/vw_vsync.h"
 #include "venetium_w10m/common/vw_log.h"
 
@@ -163,7 +165,15 @@ display::Display VwScreen::GetDisplayNearestWindow(
 VwWindowTreeHost::VwWindowTreeHost(const gfx::Rect& bounds_in_pixels)
     : bounds_(bounds_in_pixels) {
   CreateCompositor();
-  OnAcceleratedWidgetAvailable();
+  if (VwEngine::Get()->config().gpu_compositing) {
+    // The compositor alone gets the panel for a window: GL draws into it.
+    // GetAcceleratedWidget() stays null, so nothing that takes a widget for
+    // an HWND (IME, native window tracking) ever sees it.
+    PanelHost::Get()->SetSize(bounds_in_pixels.size());
+    compositor()->SetAcceleratedWidget(PanelHost::Get()->angle_window());
+  } else {
+    OnAcceleratedWidgetAvailable();
+  }
 }
 
 VwWindowTreeHost::~VwWindowTreeHost() {
@@ -273,6 +283,16 @@ VwPlatform::VwPlatform(const gfx::Size& content_pixels,
 
   vsync_ = std::make_unique<VwVsync>(base::BindRepeating(
       &VwPlatform::OnVSync, weak_factory_.GetWeakPtr()));
+
+  // The first frame the compositor itself puts on screen (GPU compositing;
+  // the software paths count their own presents).
+  host_->compositor()->RequestSuccessfulPresentationTimeForNextFrame(
+      base::BindOnce([](const viz::FrameTimingDetails&) {
+        PanelHost::Get()->CompositorPresented();
+        if (PanelHost::Get()->presenting() == PresentKind::kAngle) {
+          VwEngine::Get()->HardwarePresentWorked();
+        }
+      }));
 }
 
 void VwPlatform::OnVSync(base::TimeTicks timebase, base::TimeDelta interval) {
@@ -300,6 +320,9 @@ void VwPlatform::Resize(const gfx::Size& content_pixels) {
   if (content_pixels.IsEmpty()) {
     return;
   }
+  // Before the host: the GL surface is made again at the new size, and
+  // reads it from the panel.
+  PanelHost::Get()->SetSize(content_pixels);
   host_->SetBoundsInPixels(gfx::Rect(content_pixels));
 }
 

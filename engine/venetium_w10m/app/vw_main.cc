@@ -33,6 +33,7 @@
 #include "ui/gl/gl_switches.h"
 #include "venetium_w10m/app/vw_main_delegate.h"
 #include "venetium_w10m/browser/vw_engine.h"
+#include "venetium_w10m/browser/vw_panel.h"
 #include "venetium_w10m/capi/venetium_w10m_capi.h"
 #include "venetium_w10m/common/vw_log.h"
 
@@ -99,10 +100,15 @@ bool HasSwitch(const std::string& switches, const char* name) {
   return switches.find(name) != std::string::npos;
 }
 
-// How frames reach the screen: through the shell's SwapChainPanel by
-// Direct3D 11 unless the shell asked for the bitmap, there is no GPU, or
-// two runs in a row died before their first such frame (a driver that
-// cannot do it would otherwise end every launch).
+// How frames reach the screen, best first:
+//   GPU compositing  ANGLE on Direct3D 11 draws the page's layers into the
+//                    shell's SwapChainPanel (feature level 11_0 and up);
+//   D3D11 present    the software compositor's frames, shown by the GPU
+//                    through the panel (any feature level from 9_3);
+//   the bitmap       frames copied out to the shell.
+// The shell can ask for less. And each run that dies before its first frame
+// steps the next one down a mode: a driver that cannot do one of these would
+// otherwise end every launch.
 void ChoosePresentation(EngineConfig* config, uint64_t ram_mb) {
   const unsigned level = ProbeD3D11();
   config->present_guard = config->profile_dir.Append(L"present-guard");
@@ -126,10 +132,19 @@ void ChoosePresentation(EngineConfig* config, uint64_t ram_mb) {
     }
     ::CloseHandle(file);
   }
+  const bool angle_capable =
+      level >= 0xb000 && PanelHost::Get()->has_panel() &&
+      !HasSwitch(config->switches, "--vw-gpu=off");
+  // The best mode has one try; the one below it has one more.
   if (deaths >= 2) {
-    Note("gpu: frames through the bitmap: the last two hardware runs ended "
+    Note("gpu: frames through the bitmap: the last hardware runs ended "
          "before their first frame (delete present-guard to try again)");
     return;
+  }
+  config->gpu_compositing = angle_capable && deaths == 0;
+  if (angle_capable && deaths > 0) {
+    Note("gpu: no GPU compositing this run: the last one ended before its "
+         "first frame");
   }
   file = ::CreateFileW(guard.c_str(), GENERIC_WRITE, 0, nullptr,
                        CREATE_ALWAYS, 0, nullptr);
@@ -149,8 +164,11 @@ void ChoosePresentation(EngineConfig* config, uint64_t ram_mb) {
   } else if (HasSwitch(config->switches, "--vw-present-buffers=3")) {
     config->present_buffers = 3;
   }
-  NoteF("gpu: frames through Direct3D 11 into the panel when it is there, "
-        "%d buffers", config->present_buffers);
+  NoteF("gpu: %s; software frames through Direct3D 11 into the panel when "
+        "it is there, %d buffers",
+        config->gpu_compositing ? "GPU compositing (ANGLE on Direct3D 11)"
+                                : "software compositing",
+        config->present_buffers);
 }
 
 uint64_t PhysicalMemoryMb() {
@@ -168,10 +186,21 @@ void SetUpCommandLine(const EngineConfig& config) {
   command_line->AppendSwitch(switches::kSingleProcess);
   command_line->AppendSwitch(switches::kInProcessGPU);
   command_line->AppendSwitch(sandbox::policy::switches::kNoSandbox);
-  // No HWND for the GPU to draw in yet: software raster and compositing,
-  // frames to the shell's bitmap (vw_frame_sink).
-  command_line->AppendSwitch(switches::kDisableGpu);
-  command_line->AppendSwitch(switches::kDisableGpuCompositing);
+  if (config.gpu_compositing) {
+    // The compositor on the GPU: SkiaRenderer on ANGLE's Direct3D 11,
+    // presenting into the shell's panel. Raster stays on the CPU for now,
+    // and video decode and 2D canvas off the GPU: one thing at a time.
+    command_line->AppendSwitchASCII(switches::kUseGL, "angle");
+    command_line->AppendSwitchASCII(switches::kUseANGLE, "d3d11");
+    command_line->AppendSwitch(switches::kDisableGpuRasterization);
+    command_line->AppendSwitch(switches::kDisableAcceleratedVideoDecode);
+    command_line->AppendSwitch(switches::kDisableAccelerated2dCanvas);
+  } else {
+    // Software raster and compositing; the frames go to the panel through
+    // Direct3D 11, or to the shell's bitmap (vw_frame_sink).
+    command_line->AppendSwitch(switches::kDisableGpu);
+    command_line->AppendSwitch(switches::kDisableGpuCompositing);
+  }
   // Without it --disable-gpu still falls back to WebGL on Direct3D's WARP
   // rasterizer through ANGLE, which loads libGLESv2 and asks for a screen
   // DC; with it the GPU thread only composites, and GL stays off.

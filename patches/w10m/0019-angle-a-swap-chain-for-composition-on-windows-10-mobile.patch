@@ -1,0 +1,216 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Mon, 12 Oct 2026 08:50:05 +0400
+Subject: [PATCH] ANGLE: a swap chain for composition on Windows 10 Mobile
+
+An app there has no windows. The native window the embedder passes is a
+pointer to a small struct it owns (W10mPanelWindow): somewhere to show a
+swap chain made for composition -- a XAML SwapChainPanel, which only
+the embedder may touch -- and the surface's size. NativeWindow11Win32
+makes a flip-model, three-buffer, opaque chain and hands it over; no
+user32 call is left (the phone's user32 lacks them), so libGLESv2.dll
+imports only kernel32 and dxgi.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ third_party/angle/src/libANGLE/Display.cpp    |   4 +
+ .../renderer/d3d/d3d11/Renderer11.cpp         |   6 +
+ .../d3d/d3d11/win32/NativeWindow11Win32.cpp   | 104 ++++++++++++++++++
+ 3 files changed, 114 insertions(+)
+
+diff --git a/third_party/angle/src/libANGLE/Display.cpp b/third_party/angle/src/libANGLE/Display.cpp
+index 7b03f9ac05034ab0332d7db8e1fb3446a576c2c2..a0b8fdc770a76ad368c7d3a765d36ad21eb843e8 100644
+--- a/third_party/angle/src/libANGLE/Display.cpp
++++ b/third_party/angle/src/libANGLE/Display.cpp
+@@ -2410,7 +2410,11 @@ bool Display::isValidNativeDisplay(EGLNativeDisplayType display)
+     {
+         return true;
+     }
++#    if defined(VENETIUM_W10M)
++    return false;  // no device contexts on Windows 10 Mobile
++#    else
+     return (WindowFromDC(display) != nullptr);
++#    endif
+ #else
+     return true;
+ #endif
+diff --git a/third_party/angle/src/libANGLE/renderer/d3d/d3d11/Renderer11.cpp b/third_party/angle/src/libANGLE/renderer/d3d/d3d11/Renderer11.cpp
+index bc03c09c2e3090cf791486450f345cdfb2c81647..0d874a48a982c911ba570ba527c1b88b9ff7f366 100644
+--- a/third_party/angle/src/libANGLE/renderer/d3d/d3d11/Renderer11.cpp
++++ b/third_party/angle/src/libANGLE/renderer/d3d/d3d11/Renderer11.cpp
+@@ -559,6 +559,11 @@ egl::Error Renderer11::initialize()
+         // required.
+         // The easiest way to check is to query for a IDXGIDevice2.
+         bool requireDXGI1_2 = false;
++#        if defined(VENETIUM_W10M)
++        // Windows 10 Mobile has no windows (nor these two functions): the
++        // chain is made for composition, which is DXGI 1.2 itself.
++        requireDXGI1_2 = true;
++#        else
+         HWND hwnd           = WindowFromDC(mDisplay->getNativeDisplayId());
+         if (hwnd)
+         {
+@@ -571,6 +576,7 @@ egl::Error Renderer11::initialize()
+         {
+             requireDXGI1_2 = true;
+         }
++#        endif
+ 
+         if (requireDXGI1_2)
+         {
+diff --git a/third_party/angle/src/libANGLE/renderer/d3d/d3d11/win32/NativeWindow11Win32.cpp b/third_party/angle/src/libANGLE/renderer/d3d/d3d11/win32/NativeWindow11Win32.cpp
+index 722510a4824014a46f530cbdae76f03248c48a7a..31fa61afcf52e617a583e7c3fd31ecdc8149fbca 100644
+--- a/third_party/angle/src/libANGLE/renderer/d3d/d3d11/win32/NativeWindow11Win32.cpp
++++ b/third_party/angle/src/libANGLE/renderer/d3d/d3d11/win32/NativeWindow11Win32.cpp
+@@ -19,6 +19,36 @@
+ namespace rx
+ {
+ 
++#if defined(VENETIUM_W10M)
++// Windows 10 Mobile (Venetium): an app there has no windows. What the
++// embedder passes as the native window is a pointer to this, which it owns:
++// somewhere to show a swap chain made for composition (a XAML
++// SwapChainPanel, reached through the embedder, which alone may touch it),
++// and the size of the surface. The layout is shared with Chromium's
++// ui/gl/w10m_panel.h.
++struct W10mPanelWindow
++{
++    uint32_t magic;    // kW10mPanelMagic
++    uint32_t version;  // 1
++    void *context;
++    // Shows |swapChain| in the panel (null: takes the last one out). Any
++    // thread; returns once the panel has it, or with why it does not.
++    HRESULT(__stdcall *setSwapChain)(void *context, IDXGISwapChain1 *swapChain);
++    volatile LONG width;   // pixels
++    volatile LONG height;
++};
++constexpr uint32_t kW10mPanelMagic = 0x4E505756;  // "VWPN"
++
++namespace
++{
++W10mPanelWindow *W10mPanel(EGLNativeWindowType window)
++{
++    auto *panel = reinterpret_cast<W10mPanelWindow *>(window);
++    return panel && panel->magic == kW10mPanelMagic ? panel : nullptr;
++}
++}  // namespace
++#endif  // defined(VENETIUM_W10M)
++
+ NativeWindow11Win32::NativeWindow11Win32(EGLNativeWindowType window,
+                                          bool hasAlpha,
+                                          bool directComposition)
+@@ -32,6 +62,12 @@ NativeWindow11Win32::NativeWindow11Win32(EGLNativeWindowType window,
+ 
+ NativeWindow11Win32::~NativeWindow11Win32()
+ {
++#if defined(VENETIUM_W10M)
++    if (W10mPanelWindow *panel = W10mPanel(getNativeWindow()))
++    {
++        panel->setSwapChain(panel->context, nullptr);
++    }
++#endif
+     SafeRelease(mCompositionTarget);
+     SafeRelease(mDevice);
+     SafeRelease(mVisual);
+@@ -44,12 +80,29 @@ bool NativeWindow11Win32::initialize()
+ 
+ bool NativeWindow11Win32::getClientRect(LPRECT rect) const
+ {
++#if defined(VENETIUM_W10M)
++    W10mPanelWindow *panel = W10mPanel(getNativeWindow());
++    if (!panel)
++    {
++        return false;
++    }
++    rect->left   = 0;
++    rect->top    = 0;
++    rect->right  = panel->width;
++    rect->bottom = panel->height;
++    return true;
++#else
+     return GetClientRect(getNativeWindow(), rect) == TRUE;
++#endif
+ }
+ 
+ bool NativeWindow11Win32::isIconic() const
+ {
++#if defined(VENETIUM_W10M)
++    return false;
++#else
+     return IsIconic(getNativeWindow()) == TRUE;
++#endif
+ }
+ 
+ HRESULT NativeWindow11Win32::createSwapChain(ID3D11Device *device,
+@@ -66,6 +119,52 @@ HRESULT NativeWindow11Win32::createSwapChain(ID3D11Device *device,
+         return E_INVALIDARG;
+     }
+ 
++#if defined(VENETIUM_W10M)
++    {
++        // A chain for composition, shown by the embedder's panel. Flip
++        // model, as composition requires; three buffers, so that a frame
++        // that takes a little over a refresh does not cost two (gecko-w10m
++        // measured it); opaque, or the system would blend the whole page
++        // with what lies under the panel.
++        W10mPanelWindow *panel = W10mPanel(getNativeWindow());
++        IDXGIFactory2 *factory2 = d3d11::DynamicCastComObject<IDXGIFactory2>(factory);
++        if (panel == nullptr || factory2 == nullptr)
++        {
++            SafeRelease(factory2);
++            return E_INVALIDARG;
++        }
++        DXGI_SWAP_CHAIN_DESC1 swapChainDesc = {};
++        swapChainDesc.Width                 = width;
++        swapChainDesc.Height                = height;
++        swapChainDesc.Format                = format;
++        swapChainDesc.Stereo                = FALSE;
++        swapChainDesc.SampleDesc.Count      = 1;
++        swapChainDesc.SampleDesc.Quality    = 0;
++        swapChainDesc.BufferUsage =
++            DXGI_USAGE_RENDER_TARGET_OUTPUT | DXGI_USAGE_SHADER_INPUT | DXGI_USAGE_BACK_BUFFER;
++        swapChainDesc.BufferCount   = 3;
++        swapChainDesc.Scaling       = DXGI_SCALING_STRETCH;
++        swapChainDesc.SwapEffect    = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
++        swapChainDesc.AlphaMode     = DXGI_ALPHA_MODE_IGNORE;
++        swapChainDesc.Flags         = 0;
++        IDXGISwapChain1 *swapChain1 = nullptr;
++        HRESULT result =
++            factory2->CreateSwapChainForComposition(device, &swapChainDesc, nullptr, &swapChain1);
++        SafeRelease(factory2);
++        if (SUCCEEDED(result))
++        {
++            result = panel->setSwapChain(panel->context, swapChain1);
++            if (FAILED(result))
++            {
++                SafeRelease(swapChain1);
++                return result;
++            }
++            *swapChain = static_cast<IDXGISwapChain *>(swapChain1);
++        }
++        return result;
++    }
++#else   // defined(VENETIUM_W10M)
++
+     if (mDirectComposition)
+     {
+         HMODULE dcomp = ::GetModuleHandle(TEXT("dcomp.dll"));
+@@ -200,6 +299,7 @@ HRESULT NativeWindow11Win32::createSwapChain(ID3D11Device *device,
+         factory->MakeWindowAssociation(getNativeWindow(), DXGI_MWA_NO_ALT_ENTER);
+     }
+     return result;
++#endif  // defined(VENETIUM_W10M)
+ }
+ 
+ void NativeWindow11Win32::commitChange()
+@@ -213,6 +313,10 @@ void NativeWindow11Win32::commitChange()
+ // static
+ bool NativeWindow11Win32::IsValidNativeWindow(EGLNativeWindowType window)
+ {
++#if defined(VENETIUM_W10M)
++    return W10mPanel(window) != nullptr;
++#else
+     return IsWindow(window) == TRUE;
++#endif
+ }
+ }  // namespace rx

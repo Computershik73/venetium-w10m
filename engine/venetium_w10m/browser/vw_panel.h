@@ -23,6 +23,9 @@
 
 #include <atomic>
 
+#include "ui/gfx/geometry/size.h"
+#include "ui/gfx/native_ui_types.h"
+
 struct IDXGISwapChain1;
 struct IInspectable;
 
@@ -54,6 +57,15 @@ class PanelHost {
 
   // A frame of |generation| reached the screen.
   void Presented(uint32_t generation);
+
+  // GPU compositing: what the compositor is given for a window. Not an
+  // HWND -- there are none -- but the panel as ANGLE understands it
+  // (ui/gl/w10m_panel.h): ANGLE's swap chain comes back through it and is
+  // shown as kAngle. Its size is the content area's, in pixels.
+  gfx::AcceleratedWidget angle_window();
+  void SetSize(const gfx::Size& pixels);
+  // UI thread: the compositor's frame is on screen.
+  void CompositorPresented();
 
   PresentKind presenting() const {
     return static_cast<PresentKind>(presenting_.load());

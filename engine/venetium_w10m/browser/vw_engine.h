@@ -42,6 +42,9 @@ struct EngineConfig {
   // through frame_copy), with this many buffers.
   bool hardware_present = false;
   int present_buffers = 2;
+  // The compositor itself runs on the GPU (ANGLE on Direct3D 11) and
+  // presents into the panel; the two above are what it falls back to.
+  bool gpu_compositing = false;
   // A file that exists while a hardware run has not shown a frame yet.
   base::FilePath present_guard;
 };

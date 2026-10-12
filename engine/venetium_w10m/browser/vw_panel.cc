@@ -21,6 +21,7 @@
 
 #include "base/no_destructor.h"
 #include "base/synchronization/lock.h"
+#include "ui/gl/w10m_panel.h"
 #include "venetium_w10m/common/vw_log.h"
 
 namespace venetium_w10m {
@@ -47,6 +48,8 @@ struct State {
   uint32_t generation = 0;
   float scale_x = 1.0f;
   float scale_y = 1.0f;
+  // The generation of ANGLE's chain, while it is in the panel.
+  uint32_t angle_generation = 0;
 };
 
 State& GetState() {
@@ -132,6 +135,33 @@ const char* KindName(PresentKind kind) {
       return "bitmap";
   }
 }
+
+// ANGLE, on the GPU thread, with a chain it made for the panel (or null,
+// when its surface goes).
+HRESULT __stdcall SetAngleSwapChain(void* context, IDXGISwapChain1* chain) {
+  PanelHost* host = PanelHost::Get();
+  State& state = GetState();
+  if (!chain) {
+    uint32_t generation = 0;
+    {
+      base::AutoLock hold(state.lock);
+      generation = state.angle_generation;
+      state.angle_generation = 0;
+    }
+    host->Detach(generation);
+    return S_OK;
+  }
+  const uint32_t generation = host->Attach(chain, PresentKind::kAngle);
+  if (!generation) {
+    return E_FAIL;
+  }
+  base::AutoLock hold(state.lock);
+  state.angle_generation = generation;
+  return S_OK;
+}
+
+gl::W10mPanelWindow g_angle_window = {gl::kW10mPanelMagic, 1, nullptr,
+                                      &SetAngleSwapChain, 0, 0};
 
 }  // namespace
 
@@ -296,6 +326,21 @@ void PanelHost::Detach(uint32_t generation) {
           })
           .Get(),
       &action);
+}
+
+gfx::AcceleratedWidget PanelHost::angle_window() {
+  return reinterpret_cast<gfx::AcceleratedWidget>(&g_angle_window);
+}
+
+void PanelHost::SetSize(const gfx::Size& pixels) {
+  ::InterlockedExchange(&g_angle_window.width, pixels.width());
+  ::InterlockedExchange(&g_angle_window.height, pixels.height());
+}
+
+void PanelHost::CompositorPresented() {
+  if (presenting() == PresentKind::kAngle) {
+    presented_frames_.fetch_add(1);
+  }
 }
 
 void PanelHost::Presented(uint32_t generation) {

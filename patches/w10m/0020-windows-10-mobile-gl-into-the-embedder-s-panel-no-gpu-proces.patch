@@ -1,0 +1,172 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Mon, 12 Oct 2026 08:54:20 +0400
+Subject: [PATCH] Windows 10 Mobile: GL into the embedder's panel; no GPU
+ process to restart
+
+- ui/gl/w10m_panel.h: what stands in for a native window where there are
+  none (the embedder's XAML SwapChainPanel, as ANGLE's NativeWindow11Win32
+  takes it). NativeViewGLSurfaceEGL reads its size from it instead of a
+  client rect; the surface gets a fixed 60 Hz vsync provider instead of
+  one that asks DWM about an HWND.
+- GpuServiceImpl: a context lost in the host process turns GPU
+  compositing off (software compositing takes over) rather than hoping
+  for a recovery no process restart will bring.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ components/viz/service/gl/gpu_service_impl.cc |  7 +++
+ .../service/image_transport_surface_win.cc    | 11 +++++
+ ui/gl/BUILD.gn                                |  1 +
+ ui/gl/gl_surface_egl.cc                       | 12 ++++-
+ ui/gl/w10m_panel.h                            | 48 +++++++++++++++++++
+ 5 files changed, 78 insertions(+), 1 deletion(-)
+ create mode 100644 ui/gl/w10m_panel.h
+
+diff --git a/components/viz/service/gl/gpu_service_impl.cc b/components/viz/service/gl/gpu_service_impl.cc
+index e3b08fc117d0588f5909860053ba5e4bfa3c7544..393ba3e0e0e7e74c27ddc98fd7114d0374074a1d 100644
+--- a/components/viz/service/gl/gpu_service_impl.cc
++++ b/components/viz/service/gl/gpu_service_impl.cc
+@@ -848,6 +848,13 @@ void GpuServiceImpl::MaybeExitOnContextLost(
+   DCHECK(main_runner_->BelongsToCurrentThread());
+ 
+   if (in_host_process()) {
++#if defined(VENETIUM_W10M)
++    // Windows 10 Mobile runs everything in one process, for good: with no
++    // GPU process to restart there is nothing to recover with, and the
++    // compositor would ask for a context for ever. Software compositing
++    // takes over (the embedder still presents its frames through the GPU).
++    DisableGpuCompositing();
++#endif
+     // We can't restart the GPU process when running in the host process;
+     // instead, just hope for recovery from the context loss.
+     return;
+diff --git a/gpu/ipc/service/image_transport_surface_win.cc b/gpu/ipc/service/image_transport_surface_win.cc
+index 684051155a6607c7b4bf5ee81dc88567b0ef67e5..53d2364c976a3e65ed31799114b924f404753913 100644
+--- a/gpu/ipc/service/image_transport_surface_win.cc
++++ b/gpu/ipc/service/image_transport_surface_win.cc
+@@ -9,6 +9,7 @@
+ #include "base/win/windows_version.h"
+ #include "gpu/config/gpu_driver_bug_workarounds.h"
+ #include "ui/gfx/native_ui_types.h"
++#include "ui/gfx/vsync_provider.h"
+ #include "ui/gl/dcomp_presenter.h"
+ #include "ui/gl/direct_composition_support.h"
+ #include "ui/gl/gl_bindings.h"
+@@ -73,10 +74,20 @@ scoped_refptr<gl::GLSurface> ImageTransportSurface::CreateNativeGLSurface(
+   if (gl::GetGLImplementation() == gl::kGLImplementationEGLANGLE) {
+     // We always expect to succeed from |CreatePresenter| when DComp is enabled.
+     CHECK(!gl::DirectCompositionSupported());
++#if defined(VENETIUM_W10M)
++    // No HWND for VSyncProviderWin to ask DWM or a monitor about: the
++    // embedder gives the compositor the display's real timing itself.
++    surface = gl::InitializeGLSurface(
++        base::MakeRefCounted<gl::NativeViewGLSurfaceEGL>(
++            display->GetAs<gl::GLDisplayEGL>(), surface_handle,
++            std::make_unique<gfx::FixedVSyncProvider>(
++                base::TimeTicks(), base::Hertz(60))));
++#else
+     surface = gl::InitializeGLSurface(
+         base::MakeRefCounted<gl::NativeViewGLSurfaceEGL>(
+             display->GetAs<gl::GLDisplayEGL>(), surface_handle,
+             std::make_unique<gl::VSyncProviderWin>(surface_handle)));
++#endif
+     if (!surface) {
+       return nullptr;
+     }
+diff --git a/ui/gl/BUILD.gn b/ui/gl/BUILD.gn
+index 1f2009e45817c08c71abf4a288e48a6df1872e7c..f5965488d62704c71feea484c7a2e6675e8b4655 100644
+--- a/ui/gl/BUILD.gn
++++ b/ui/gl/BUILD.gn
+@@ -274,6 +274,7 @@ component("gl") {
+       "swap_chain_presenter.h",
+       "vsync_provider_win.cc",
+       "vsync_provider_win.h",
++      "w10m_panel.h",
+       "vsync_provider_win_dcomp.cc",
+       "vsync_provider_win_dcomp.h",
+       "vsync_thread_win.cc",
+diff --git a/ui/gl/gl_surface_egl.cc b/ui/gl/gl_surface_egl.cc
+index 4324577756241f4b03fac4a7106df585849f82b4..82ef4b16ca04ca731f1bb19f3786e9a0193de7a1 100644
+--- a/ui/gl/gl_surface_egl.cc
++++ b/ui/gl/gl_surface_egl.cc
+@@ -41,6 +41,10 @@
+ #include "ui/gl/scoped_make_current.h"
+ #include "ui/gl/sync_control_vsync_provider.h"
+ 
++#if defined(VENETIUM_W10M)
++#include "ui/gl/w10m_panel.h"
++#endif
++
+ using ui::GetLastEGLErrorString;
+ 
+ namespace gl {
+@@ -339,7 +343,13 @@ NativeViewGLSurfaceEGL::NativeViewGLSurfaceEGL(
+     : GLSurfaceEGL(display),
+       window_(window),
+       vsync_provider_external_(std::move(vsync_provider)) {
+-#if BUILDFLAG(IS_WIN)
++#if defined(VENETIUM_W10M)
++  // No HWND on Windows 10 Mobile: the "window" is the embedder's panel,
++  // which says its own size (ui/gl/w10m_panel.h).
++  if (W10mPanelWindow* panel = W10mPanelFromWindow(window_)) {
++    size_ = gfx::Size(panel->width, panel->height);
++  }
++#elif BUILDFLAG(IS_WIN)
+   RECT windowRect;
+   if (GetClientRect(window_, &windowRect)) {
+     size_ = gfx::Rect(windowRect).size();
+diff --git a/ui/gl/w10m_panel.h b/ui/gl/w10m_panel.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..926695491e9fdd0169bf4e194419b9cb436914a8
+--- /dev/null
++++ b/ui/gl/w10m_panel.h
+@@ -0,0 +1,48 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef UI_GL_W10M_PANEL_H_
++#define UI_GL_W10M_PANEL_H_
++
++// Windows 10 Mobile (Venetium): the "window" GL draws into.
++//
++// An app there has no HWND. The embedder shows the browser in a XAML
++// SwapChainPanel, which only the embedder may touch; where Chromium wants a
++// native window it is given a pointer to a W10mPanelWindow instead, cast to
++// gfx::AcceleratedWidget. ANGLE (NativeWindow11Win32, which has the same
++// struct) makes a swap chain for composition and hands it to set_swap_chain;
++// the surface's size is read from here, there being no client rect to ask
++// for.
++
++#include <windows.h>
++
++#include <stdint.h>
++
++struct IDXGISwapChain1;
++
++namespace gl {
++
++struct W10mPanelWindow {
++  uint32_t magic;    // kW10mPanelMagic
++  uint32_t version;  // 1
++  void* context;
++  // Shows |swap_chain| in the panel (null: takes the last one out). Any
++  // thread; returns once the panel has it, or with why it does not.
++  HRESULT(__stdcall* set_swap_chain)(void* context,
++                                     IDXGISwapChain1* swap_chain);
++  volatile LONG width;  // pixels
++  volatile LONG height;
++};
++
++inline constexpr uint32_t kW10mPanelMagic = 0x4E505756;  // "VWPN"
++
++// The panel behind |window|, or null if it is not one.
++inline W10mPanelWindow* W10mPanelFromWindow(HWND window) {
++  auto* panel = reinterpret_cast<W10mPanelWindow*>(window);
++  return panel && panel->magic == kW10mPanelMagic ? panel : nullptr;
++}
++
++}  // namespace gl
++
++#endif  // UI_GL_W10M_PANEL_H_
