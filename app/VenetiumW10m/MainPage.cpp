@@ -1043,8 +1043,9 @@ void MainPage::ShowAbout() {
 
     line(L"Based on Venetium by hamed7ir", 15, false);
     line(L"Venetium is Chromium 150 for Windows 10 on 32-bit ARM (Surface RT, "
-         L"Surface 2): the whole ARM32 port of the engine is his work, and "
-         L"this Windows 10 Mobile port is built on it, at his request.",
+         L"Surface 2): the whole ARM32 port of the engine is hamed7ir's "
+         L"work, and this Windows 10 Mobile port is built on it, at "
+         L"hamed7ir's request.",
          12, true);
     link(L"Venetium on GitHub", L"https://github.com/hamed7ir/venetium");
     line(L"Venetium is built on Supermium by win32ss; Chromium is the work "
