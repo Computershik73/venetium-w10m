@@ -7,6 +7,7 @@
 
 #include "base/task/single_thread_task_runner.h"
 #include "chrome/browser/platform_util.h"
+#include "chrome/browser/ui/toolbar/app_menu_model.h"
 #include "ui/display/win/dpi.h"
 #include "venetium_w10m/browser/vw_browser.h"
 #include "venetium_w10m/browser/vw_browser_main_parts.h"
@@ -43,6 +44,14 @@ void OpenThroughShell(platform_util::W10mOpen what, const std::string& target) {
   }
 }
 
+// The shell's About, log and engine switches, from Chrome's menu.
+void ShellCommand(int command) {
+  const venetium_w10m_events events = VwEngine::Get()->events();
+  if (events.shell_command) {
+    events.shell_command(command);
+  }
+}
+
 }  // namespace
 
 VwChromeExtraParts::VwChromeExtraParts() = default;
@@ -72,6 +81,7 @@ void VwChromeExtraParts::PreProfileInit() {
   // After Chrome's own (PreMainMessageLoopRun installs it before this).
   VwSelectFileDialogFactory::Install();
   platform_util::SetW10mOpenHandler(&OpenThroughShell);
+  AppMenuModel::SetW10mShellCommandHandler(&ShellCommand);
   auto host = std::make_unique<VwChromeHost>();
   host_ = host.get();
   browser_ = std::make_unique<VwBrowser>(nullptr, VwEngine::Get()->config(),
@@ -90,6 +100,7 @@ void VwChromeExtraParts::PostMainMessageLoopRun() {
   Note("chrome: main loop ended");
   VwEngine::Get()->BrowserStopping();
   platform_util::SetW10mOpenHandler(nullptr);
+  AppMenuModel::SetW10mShellCommandHandler(nullptr);
   host_ = nullptr;
   browser_.reset();
 }

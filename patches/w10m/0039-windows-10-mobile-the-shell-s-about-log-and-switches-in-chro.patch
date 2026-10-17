@@ -1,0 +1,120 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Sun, 18 Oct 2026 01:09:12 +0400
+Subject: [PATCH] Windows 10 Mobile: the shell's About, log and switches in
+ Chrome's menu
+
+With Chrome's own interface the app's shell has no menu of its own on
+screen: a "Windows 10 Mobile" submenu after Settings reaches its About,
+log, engine switches and log copy, through a handler the embedder sets
+(AppMenuModel::SetW10mShellCommandHandler). No Exit item: the phone
+closes apps, and Exit would only end the engine under the shell.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ chrome/browser/ui/toolbar/app_menu_model.cc | 56 ++++++++++++++++++++-
+ chrome/browser/ui/toolbar/app_menu_model.h  |  9 ++++
+ 2 files changed, 64 insertions(+), 1 deletion(-)
+
+diff --git a/chrome/browser/ui/toolbar/app_menu_model.cc b/chrome/browser/ui/toolbar/app_menu_model.cc
+index 44cc2b51c48a2249a392de772d898be1688fa719..8222917f2bb9e1b4c644b45c0c373228b6792a78 100644
+--- a/chrome/browser/ui/toolbar/app_menu_model.cc
++++ b/chrome/browser/ui/toolbar/app_menu_model.cc
+@@ -1281,7 +1281,40 @@ bool AppMenuModel::DoesCommandIdDismissMenu(int command_id) const {
+   return command_id != IDC_ZOOM_MINUS && command_id != IDC_ZOOM_PLUS;
+ }
+ 
++#if defined(VENETIUM_W10M)
++namespace {
++
++// The shell's items (AppMenuModel::SetW10mShellCommandHandler): ids of their
++// own, past Chrome's 40xxx menu commands.
++constexpr int kW10mShellCommandFirst = 40990;
++constexpr int kW10mShellCommandCount = 4;
++constexpr int kW10mShellSubmenu = kW10mShellCommandFirst + 9;
++AppMenuModel::W10mShellCommandHandler g_w10m_shell_command = nullptr;
++
++bool IsW10mShellCommand(int command_id) {
++  return (command_id >= kW10mShellCommandFirst &&
++          command_id < kW10mShellCommandFirst + kW10mShellCommandCount) ||
++         command_id == kW10mShellSubmenu;
++}
++
++}  // namespace
++
++// static
++void AppMenuModel::SetW10mShellCommandHandler(
++    W10mShellCommandHandler handler) {
++  g_w10m_shell_command = handler;
++}
++#endif  // defined(VENETIUM_W10M)
++
+ void AppMenuModel::ExecuteCommand(int command_id, int event_flags) {
++#if defined(VENETIUM_W10M)
++  if (IsW10mShellCommand(command_id)) {
++    if (g_w10m_shell_command && command_id != kW10mShellSubmenu) {
++      g_w10m_shell_command(command_id - kW10mShellCommandFirst + 1);
++    }
++    return;
++  }
++#endif
+   GlobalError* error =
+       GlobalErrorServiceFactory::GetForProfile(browser_->profile())
+           ->GetGlobalErrorByMenuItemCommandID(command_id);
+@@ -2006,6 +2039,11 @@ bool AppMenuModel::IsCommandIdChecked(int command_id) const {
+ }
+ 
+ bool AppMenuModel::IsCommandIdEnabled(int command_id) const {
++#if defined(VENETIUM_W10M)
++  if (IsW10mShellCommand(command_id)) {
++    return true;
++  }
++#endif
+   GlobalError* error =
+       GlobalErrorServiceFactory::GetForProfile(browser_->profile())
+           ->GetGlobalErrorByMenuItemCommandID(command_id);
+@@ -2322,7 +2360,23 @@ void AppMenuModel::Build() {
+       this, IDC_OPTIONS, IDS_SETTINGS,
+       features::IsRoundedIconsEnabled() ? kSettingsIcon : kSettingsMenuOldIcon);
+ 
+-  if (browser_defaults::kShowExitMenuItem) {
++#if defined(VENETIUM_W10M)
++  {
++    auto shell = std::make_unique<ui::SimpleMenuModel>(this);
++    shell->AddItem(kW10mShellCommandFirst, u"About this port");
++    shell->AddItem(kW10mShellCommandFirst + 1, u"Log");
++    shell->AddItem(kW10mShellCommandFirst + 2, u"Engine switches (restart)");
++    shell->AddItem(kW10mShellCommandFirst + 3, u"Copy logs to Pictures");
++    sub_menus_.push_back(std::move(shell));
++    AddSubMenu(kW10mShellSubmenu, u"Windows 10 Mobile",
++               sub_menus_.back().get());
++  }
++  // The phone closes apps; Exit would only end the engine under the shell.
++  const bool show_exit = false;
++#else
++  const bool show_exit = browser_defaults::kShowExitMenuItem;
++#endif
++  if (show_exit) {
+     AddItemWithStringIdAndVectorIcon(
+         this, IDC_EXIT, IDS_EXIT,
+         features::IsRoundedIconsEnabled() ? kExitToAppIcon : kExitMenuOldIcon);
+diff --git a/chrome/browser/ui/toolbar/app_menu_model.h b/chrome/browser/ui/toolbar/app_menu_model.h
+index 04cf48490e909e2f8951c60a9f50b2a0d36e9efc..93e33f368b2e82d79f664593a008ce92f53321c3 100644
+--- a/chrome/browser/ui/toolbar/app_menu_model.h
++++ b/chrome/browser/ui/toolbar/app_menu_model.h
+@@ -192,6 +192,15 @@ class AppMenuModel : public ui::SimpleMenuModel,
+                      public user_education::HighlightingSimpleMenuModelDelegate,
+                      public ui::ButtonMenuItemModel::Delegate {
+  public:
++#if defined(VENETIUM_W10M)
++  // Windows 10 Mobile: the app's shell has an About, a log and engine
++  // switches of its own, reached from a submenu of this menu. The embedder
++  // says what they do; |command| is 1 About, 2 the log, 3 the engine
++  // switches, 4 copy the logs.
++  using W10mShellCommandHandler = void (*)(int command);
++  static void SetW10mShellCommandHandler(W10mShellCommandHandler handler);
++#endif
++
+   DECLARE_CLASS_ELEMENT_IDENTIFIER_VALUE(kCreateNewTabGroupTopLevel);
+   DECLARE_CLASS_ELEMENT_IDENTIFIER_VALUE(kProfileMenuItem);
+   DECLARE_CLASS_ELEMENT_IDENTIFIER_VALUE(kProfileOpenGuestItem);
