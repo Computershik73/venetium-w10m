@@ -11,7 +11,7 @@
 #include "base/location.h"
 #include "base/task/single_thread_task_runner.h"
 #include "chrome/browser/browser_process.h"
-#include "chrome/browser/lifetime/application_lifetime_desktop.h"
+#include "chrome/browser/lifetime/application_lifetime.h"
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/profiles/profile_manager.h"
 #include "chrome/browser/resource_coordinator/lifecycle_unit_state.mojom.h"
@@ -55,8 +55,8 @@ views::Widget* FrontWidgetOtherThanBrowser() {
   if (!platform || !platform->window_manager()) {
     return nullptr;
   }
-  aura::Window* active =
-      platform->window_manager()->focus_controller()->GetActiveWindow();
+  aura::Window* active = const_cast<aura::Window*>(
+      platform->window_manager()->focus_controller()->GetActiveWindow());
   if (!active || BrowserView::GetBrowserViewForNativeWindow(active)) {
     return nullptr;
   }
@@ -105,7 +105,8 @@ void VwChromeHost::OpenUrl(const GURL& url) {
       NoteF("chrome: no profile to open %s in", url.spec().c_str());
       return;
     }
-    chrome::NewEmptyWindow(profiles.front());
+    chrome::NewEmptyWindow(profiles.front(),
+                         /*should_trigger_session_restore=*/false);
     browser = ActiveBrowser();
     if (!browser) {
       return;
@@ -223,7 +224,8 @@ void VwChromeHost::ReopenIfEmpty() {
     return;
   }
   Note("chrome: the last window closed; a new one, as a phone browser has");
-  chrome::NewEmptyWindow(profiles.front());
+  chrome::NewEmptyWindow(profiles.front(),
+                         /*should_trigger_session_restore=*/false);
   WatchActiveTab();
   UpdateBackState();
 }

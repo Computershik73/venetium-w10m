@@ -10,7 +10,7 @@
 #include "base/path_service.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/task/single_thread_task_runner.h"
-#include "base/threading/thread_restrictions.h"
+#include "base/task/thread_pool.h"
 #include "chrome/common/chrome_paths.h"
 #include "ui/shell_dialogs/select_file_policy.h"
 #include "ui/shell_dialogs/selected_file_info.h"
@@ -23,24 +23,22 @@ namespace venetium_w10m {
 namespace {
 
 // Where a file to save goes: the app's Downloads folder, under |suggested|'s
-// name, made unique as a download's would be.
-base::FilePath SavePath(const base::FilePath& suggested) {
+// name, made unique as a download's would be. On a thread that may block.
+std::vector<base::FilePath> SavePath(const base::FilePath& suggested) {
   base::FilePath downloads;
   base::PathService::Get(chrome::DIR_DEFAULT_DOWNLOADS, &downloads);
   base::FilePath name = suggested.BaseName();
   if (name.empty() || name.value() == FILE_PATH_LITERAL(".")) {
     name = base::FilePath(FILE_PATH_LITERAL("download"));
   }
-  // A file name and a directory listing, on the UI thread: the dialog's
-  // answer is expected from here, and this is all the disk it touches.
-  base::ScopedAllowBlocking allow_blocking;
   base::CreateDirectory(downloads);
   base::FilePath path = downloads.Append(name);
   for (int i = 1; base::PathExists(path) && i < 100; ++i) {
     path = downloads.Append(name).InsertBeforeExtensionASCII(
         " (" + base::NumberToString(i) + ")");
   }
-  return path;
+  NoteF("files: Chrome saves %s", path.AsUTF8Unsafe().c_str());
+  return {path};
 }
 
 }  // namespace
@@ -94,14 +92,14 @@ void VwSelectFileDialog::SelectFileImpl(
                                    weak_factory_.GetWeakPtr(), multiple));
       return;
     }
-    case SELECT_SAVEAS_FILE: {
-      const base::FilePath path = SavePath(default_path);
-      NoteF("files: Chrome saves %s", path.AsUTF8Unsafe().c_str());
-      answer_later(base::BindOnce(&VwSelectFileDialog::Picked,
-                                  weak_factory_.GetWeakPtr(), false,
-                                  std::vector<base::FilePath>{path}));
+    case SELECT_SAVEAS_FILE:
+      running_ = true;
+      base::ThreadPool::PostTaskAndReplyWithResult(
+          FROM_HERE, {base::MayBlock(), base::TaskPriority::USER_BLOCKING},
+          base::BindOnce(&SavePath, default_path),
+          base::BindOnce(&VwSelectFileDialog::Picked,
+                         weak_factory_.GetWeakPtr(), false));
       return;
-    }
     default:
       Note("files: a folder cannot be chosen here");
       answer_later(base::BindOnce(&VwSelectFileDialog::Cancelled,

@@ -6,6 +6,7 @@
 
 #include "base/check.h"
 #include "base/win/resource_exhaustion.h"
+#include "chrome/common/profiler/main_thread_stack_sampling_profiler.h"
 #include "venetium_w10m/chrome/vw_chrome_browser_client.h"
 #include "venetium_w10m/chrome/vw_chrome_renderer_client.h"
 #include "venetium_w10m/common/vw_log.h"

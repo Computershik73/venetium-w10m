@@ -6,6 +6,7 @@
 #include <string>
 #include <utility>
 
+#include "base/base_switches.h"
 #include "base/command_line.h"
 #include "base/debug/dump_without_crashing.h"
 #include "base/files/file_path.h"
@@ -21,7 +22,7 @@
 #include "chrome/install_static/install_details.h"
 #include "chrome/install_static/install_modes.h"
 #include "chrome/install_static/install_util.h"
-#include "components/embedder_support/switches.h"
+#include "components/sync/base/command_line_switches.h"
 #include "content/public/app/content_main.h"
 #include "content/public/common/content_switches.h"
 #include "sandbox/win/src/sandbox_types.h"
@@ -68,7 +69,7 @@ void AddChromeSwitches(const EngineConfig& config,
   // and unpacked into the profile: a phone's data, flash and address space.
   command_line->AppendSwitch(switches::kDisableBackgroundNetworking);
   command_line->AppendSwitch(switches::kDisableComponentUpdate);
-  command_line->AppendSwitch(switches::kDisableSync);
+  command_line->AppendSwitch(syncer::kDisableSync);
   command_line->AppendSwitch(switches::kDisableDomainReliability);
   command_line->AppendSwitch(switches::kNoPings);
   // A phone ends a suspended app; that is not a crash to apologise for.
