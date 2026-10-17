@@ -62,6 +62,8 @@ struct Api {
   decltype(&venetium_w10m_set_panel) set_panel = nullptr;
   decltype(&venetium_w10m_presenting) presenting = nullptr;
   decltype(&venetium_w10m_presented_frames) presented_frames = nullptr;
+  // venetium_w10m_interface ("interface" is a macro in the Windows headers).
+  decltype(&venetium_w10m_interface) ui_owner = nullptr;
 };
 
 // What the page wants to hear about. Every handler runs on the XAML thread.
@@ -83,6 +85,9 @@ struct Events {
                      bool save)>
       fileChooser;
   std::function<void(std::wstring text)> clipboardSet;
+  // Chrome's menu asked for something of the shell's (1 About, 2 the log,
+  // 3 engine switches, 4 copy the logs).
+  std::function<void(int32_t command)> shellCommand;
   // venetium_w10m_run returned: the engine has ended, for good.
   std::function<void(int32_t code)> engineStopped;
 };
@@ -141,6 +146,7 @@ class EngineHost {
   static void OnFileChooser(int32_t id, const char* accept, int32_t multiple,
                             int32_t mode);
   static void OnClipboardSet(const char* text);
+  static void OnShellCommand(int32_t command);
 
   HMODULE module_ = nullptr;
   Api api_;

@@ -142,6 +142,18 @@ bool HasSwitch(const std::string& switches, const char* name) {
   return switches.find(name) != std::string::npos;
 }
 
+// Chrome's own interface, unless the switches ask for the shell's
+// ("--vw-ui=shell"). Only an engine built with Chrome's browser layer has
+// one to give.
+bool ChromeInterface(const std::string& switches,
+                     const base::FilePath& profile_dir) {
+#if defined(VW_CHROME_INTERFACE)
+  return !HasSwitch(switches, "--vw-ui=shell");
+#else
+  return false;
+#endif
+}
+
 // How frames reach the screen, best first:
 //   GPU compositing  ANGLE on Direct3D 11 draws the page's layers into the
 //                    shell's SwapChainPanel (feature level 11_0 and up);
@@ -488,6 +500,14 @@ void SetUpPaths(const EngineConfig& config) {
 }  // namespace
 
 }  // namespace venetium_w10m
+
+extern "C" VW_EXPORT int32_t venetium_w10m_interface(
+    const char* switches,
+    const wchar_t* profile_dir) {
+  using namespace venetium_w10m;
+  return ChromeInterface(switches ? switches : "", PathOf(profile_dir)) ? 1
+                                                                        : 0;
+}
 
 extern "C" VW_EXPORT int32_t venetium_w10m_run(
     const venetium_w10m_config* config) {

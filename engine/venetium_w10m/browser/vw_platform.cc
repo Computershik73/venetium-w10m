@@ -31,6 +31,8 @@
 #include "ui/events/keycodes/keyboard_codes.h"
 #include "ui/compositor/compositor.h"
 #include "ui/events/pointer_details.h"
+#include "ui/aura/client/cursor_shape_client.h"
+#include "ui/wm/core/cursor_loader.h"
 #include "ui/wm/core/default_activation_client.h"
 #include "ui/wm/core/default_screen_position_client.h"
 #include "venetium_w10m/browser/vw_engine.h"
@@ -38,6 +40,7 @@
 #include "venetium_w10m/browser/vw_panel.h"
 #include "venetium_w10m/browser/vw_present_guard.h"
 #include "venetium_w10m/browser/vw_vsync.h"
+#include "venetium_w10m/browser/vw_window_manager.h"
 #include "venetium_w10m/common/vw_log.h"
 
 namespace venetium_w10m {
@@ -49,6 +52,17 @@ constexpr int64_t kDisplayId = 1;
 // How many frames that were not ANGLE's the compositor may show before it
 // is no longer asked about them (GPU compositing has ended, then).
 constexpr int kMaxCompositorFrameAsks = 120;
+
+VwPlatform* g_platform = nullptr;
+
+// A page in fullscreen, or Chrome's window: the shell hides the status bar.
+void TellFullscreen(bool on) {
+  VwEngine::Get()->fullscreen.store(on);
+  venetium_w10m_events events = VwEngine::Get()->events();
+  if (events.fullscreen) {
+    events.fullscreen(on ? 1 : 0);
+  }
+}
 
 // Like //headless's focus client: one focused window, observers told.
 class VwFocusClient : public aura::client::FocusClient,
@@ -257,10 +271,17 @@ void VwWindowTreeHost::RefreshScale() {
 
 // --- VwPlatform -------------------------------------------------------------
 
+// static
+VwPlatform* VwPlatform::Get() {
+  return g_platform;
+}
+
 VwPlatform::VwPlatform(const gfx::Size& content_pixels,
                        const gfx::Size& screen_pixels,
-                       float scale)
+                       float scale,
+                       bool window_manager)
     : screen_pixels_(screen_pixels), scale_(scale) {
+  g_platform = this;
   // The screen first: the host asks it for the scale as soon as it is
   // initialised.
   screen_ = std::make_unique<VwScreen>(
@@ -276,15 +297,26 @@ VwPlatform::VwPlatform(const gfx::Size& content_pixels,
   host_->SetBoundsInPixels(bounds);
   host_->window()->Show();
 
-  focus_client_ = std::make_unique<VwFocusClient>();
-  aura::client::SetFocusClient(root(), focus_client_.get());
-  // Deletes itself with the root window.
-  new wm::DefaultActivationClient(root());
+  if (window_manager) {
+    window_manager_ = std::make_unique<VwWindowManager>(
+        root(), base::BindRepeating(&TellFullscreen));
+  } else {
+    focus_client_ = std::make_unique<VwFocusClient>();
+    aura::client::SetFocusClient(root(), focus_client_.get());
+    // Deletes itself with the root window.
+    new wm::DefaultActivationClient(root());
+    parenting_client_ = std::make_unique<VwParentingClient>(root());
+  }
   capture_client_ =
       std::make_unique<aura::client::DefaultCaptureClient>(root());
-  parenting_client_ = std::make_unique<VwParentingClient>(root());
   screen_position_client_ =
       std::make_unique<wm::DefaultScreenPositionClient>(root());
+  // Cursor shapes: a page's CSS cursor is looked up through this when a
+  // mouse is over it, and there must be one to ask (it CHECKs). LoadCursor
+  // is a stub on the phone, so every shape comes back empty: there is no
+  // pointer on screen to give it to anyway.
+  cursor_loader_ = std::make_unique<wm::CursorLoader>();
+  aura::client::SetCursorShapeClient(cursor_loader_.get());
 
   host_->Show();
   NoteF("platform: browser window %dx%d px", bounds.width(), bounds.height());
@@ -379,15 +411,19 @@ void VwPlatform::SetActive(bool active) {
 
 VwPlatform::~VwPlatform() {
   vsync_.reset();
+  aura::client::SetCursorShapeClient(nullptr);
+  cursor_loader_.reset();
   screen_position_client_.reset();
   parenting_client_.reset();
   capture_client_.reset();
+  window_manager_.reset();
   aura::client::SetFocusClient(root(), nullptr);
   host_.reset();
   focus_client_.reset();
   input_method_.reset();
   display::Screen::SetScreenInstance(nullptr);
   screen_.reset();
+  g_platform = nullptr;
 }
 
 void VwPlatform::Resize(const gfx::Size& content_pixels) {

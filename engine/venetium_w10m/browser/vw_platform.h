@@ -43,6 +43,7 @@ class FrameTimingDetails;
 }  // namespace viz
 
 namespace wm {
+class CursorLoader;
 class DefaultScreenPositionClient;
 }  // namespace wm
 
@@ -50,6 +51,7 @@ namespace venetium_w10m {
 
 class VwInputMethod;
 class VwVsync;
+class VwWindowManager;
 
 // One display, the phone's, sized and scaled by the shell.
 class VwScreen : public display::ScreenBase {
@@ -104,14 +106,24 @@ class VwWindowTreeHost : public aura::WindowTreeHost {
 // and turning the shell's input into events.
 class VwPlatform {
  public:
+  // |window_manager|: Chrome's own interface runs in the host, and the
+  // windows it opens are managed as a window manager would
+  // (vw_window_manager.h). Otherwise the host holds the shell's tabs' pages
+  // and their popups, and needs no more than one focused window.
   VwPlatform(const gfx::Size& content_pixels,
              const gfx::Size& screen_pixels,
-             float scale);
+             float scale,
+             bool window_manager = false);
   ~VwPlatform();
+
+  // The one there is, UI thread; null before it is made and after it goes.
+  static VwPlatform* Get();
 
   VwWindowTreeHost* host() { return host_.get(); }
   aura::Window* root() { return host_->window(); }
   VwInputMethod* input_method() { return input_method_.get(); }
+  // Null unless Chrome's own interface runs here.
+  VwWindowManager* window_manager() { return window_manager_.get(); }
 
   void Resize(const gfx::Size& content_pixels);
   void SetScreen(const gfx::Size& screen_pixels);
@@ -146,6 +158,8 @@ class VwPlatform {
   std::unique_ptr<aura::client::DefaultCaptureClient> capture_client_;
   std::unique_ptr<aura::client::WindowParentingClient> parenting_client_;
   std::unique_ptr<wm::DefaultScreenPositionClient> screen_position_client_;
+  std::unique_ptr<wm::CursorLoader> cursor_loader_;
+  std::unique_ptr<VwWindowManager> window_manager_;
   std::unique_ptr<VwInputMethod> input_method_;
 
   gfx::Size screen_pixels_;

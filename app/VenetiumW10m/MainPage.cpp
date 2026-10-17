@@ -487,7 +487,7 @@ void MainPage::WireEngineEvents() {
     tabOrder_.erase(std::remove(tabOrder_.begin(), tabOrder_.end(), tab),
                     tabOrder_.end());
     if (selected_ == tab) selected_ = 0;
-    if (tabs_.empty() && Api().tab_create) {
+    if (tabs_.empty() && !chromeUi_ && Api().tab_create) {
       // The last tab closed: a phone browser is never without a page.
       Api().tab_create(Narrow(Settings::HomePage()).c_str(), 1);
     }
@@ -526,6 +526,23 @@ void MainPage::WireEngineEvents() {
       Clipboard::SetContent(package);
     } catch (winrt::hresult_error const& e) {
       Log::Write(L"clipboard: set failed", std::wstring(e.message()));
+    }
+  };
+  events.shellCommand = [this](int32_t command) {
+    switch (command) {
+      case 1:
+        ShowAbout();
+        break;
+      case 2:
+        ShowLog();
+        break;
+      case 3:
+        ShowEngineSwitches();
+        break;
+      case 4:
+        std::thread([]() { Log::Mirror(); }).detach();
+        ShowNotice(L"Logs go to Pictures\\Venetium logs");
+        break;
     }
   };
   events.engineStopped = [this](int32_t code) { OnEngineStopped(code); };
@@ -573,6 +590,10 @@ void MainPage::Start(std::wstring initialUrl) {
     params.switches += " --vw-present=bitmap";
   } else if (Settings::TakeGraphicsRetry()) {
     params.switches += " --vw-gpu=retry";
+  }
+  if (Api().ui_owner &&
+      Api().ui_owner(params.switches.c_str(), params.profileDir.c_str()) == 1) {
+    EnterChromeUi();
   }
   // The panel the engine presents into, before it starts.
   if (Api().set_panel) Api().set_panel(winrt::get_abi(engineView_->Panel()));
@@ -766,10 +787,19 @@ void MainPage::ApplyVisibleBounds() {
              std::to_wstring(static_cast<int>(sane(bottom))) + L" bottom");
 }
 
+void MainPage::EnterChromeUi() {
+  chromeUi_ = true;
+  chrome_.Visibility(Visibility::Collapsed);
+  progress_.Visibility(Visibility::Collapsed);
+  tabsPanel_.Visibility(Visibility::Collapsed);
+  Log::Write(L"interface: Chrome's own, drawn by the engine");
+}
+
 void MainPage::SetFullscreen(bool on) {
   fullscreen_ = on;
-  chrome_.Visibility(on ? Visibility::Collapsed : Visibility::Visible);
-  progress_.Visibility(on ? Visibility::Collapsed : Visibility::Visible);
+  const bool bar = !on && !chromeUi_;
+  chrome_.Visibility(bar ? Visibility::Visible : Visibility::Collapsed);
+  progress_.Visibility(bar ? Visibility::Visible : Visibility::Collapsed);
   progress_.Opacity(0);
   auto view = ApplicationView::GetForCurrentView();
   try {
@@ -906,6 +936,12 @@ void MainPage::ReportScreen() {
 
 void MainPage::OnEngineStopped(int32_t code) {
   engineView_->Stop();
+  if (chromeUi_) {
+    // Chrome's menu went with the engine: the shell's bar comes back for its
+    // own, which has the log and the engine switches ("--vw-ui=shell").
+    chromeUi_ = false;
+    chrome_.Visibility(Visibility::Visible);
+  }
   splashRing_.IsActive(false);
   splashText_.Text(L"The engine stopped (code " + std::to_wstring(code) +
                    L").\nMenu \u2192 Log says why.");

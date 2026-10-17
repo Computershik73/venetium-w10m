@@ -133,6 +133,7 @@ bool EngineHost::Load(winrt::Windows::UI::Core::CoreDispatcher const& dispatcher
   VW_RESOLVE(presenting);
   VW_RESOLVE(presented_frames);
 #undef VW_RESOLVE
+  Resolve(module_, "venetium_w10m_interface", api_.ui_owner, missing);
   if (!api_.run || !api_.frame_copy) {
     Log::Write(L"engine: the DLL has no venetium_w10m_run/frame_copy");
     ::FreeLibrary(module_);
@@ -151,7 +152,7 @@ bool EngineHost::Load(winrt::Windows::UI::Core::CoreDispatcher const& dispatcher
       &EngineHost::OnFullscreen,  &EngineHost::OnLaunchUri,
       &EngineHost::OnDownloadDone, &EngineHost::OnDialog,
       &EngineHost::OnPermission,  &EngineHost::OnFileChooser,
-      &EngineHost::OnClipboardSet,
+      &EngineHost::OnClipboardSet, &EngineHost::OnShellCommand,
   };
   if (api_.set_event_sink) {
     api_.set_event_sink(&kEvents);
@@ -275,6 +276,12 @@ void EngineHost::OnFileChooser(int32_t id, const char* accept, int32_t multiple,
 void EngineHost::OnClipboardSet(const char* text) {
   Get().Post([text = Widen(text)]() {
     if (Get().events_.clipboardSet) Get().events_.clipboardSet(text);
+  });
+}
+
+void EngineHost::OnShellCommand(int32_t command) {
+  Get().Post([command]() {
+    if (Get().events_.shellCommand) Get().events_.shellCommand(command);
   });
 }
 

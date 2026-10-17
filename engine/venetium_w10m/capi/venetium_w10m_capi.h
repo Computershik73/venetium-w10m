@@ -184,6 +184,17 @@ VW_EXPORT void venetium_w10m_set_search_url(const char* url_template);
 // Desktop (1) or mobile (0) user agent for new navigations of every tab.
 VW_EXPORT void venetium_w10m_set_desktop_mode(int32_t desktop);
 
+// ---- Interface ---------------------------------------------------------------
+// Who draws the browser's interface in a run with these engine switches and
+// this profile directory: 1 Chrome's own, which the engine draws into the
+// panel with everything else -- tabs, address bar, menus, dialogs -- while
+// the shell is its host (the panel, touch, the keyboard, the back button,
+// the status bar); 0 the shell's address bar, tabs and menus over the
+// engine's pages. Any thread, before venetium_w10m_run, whose run answers
+// the same for the same switches and profile.
+VW_EXPORT int32_t venetium_w10m_interface(const char* switches,
+                                          const wchar_t* profile_dir);
+
 // ---- Events (engine -> shell) ----------------------------------------------
 typedef struct {
   // A tab's state changed. Every field is current; the shell compares.
@@ -218,6 +229,9 @@ typedef struct {
                        int32_t mode);
   // Something was copied to the clipboard by a page (UTF-8 text).
   void (*clipboard_set)(const char* text);
+  // Chrome's menu asked for something the shell does: 1 About, 2 the log,
+  // 3 the engine switches, 4 copy the logs to Pictures.
+  void (*shell_command)(int32_t command);
 } venetium_w10m_events;
 
 VW_EXPORT void venetium_w10m_set_event_sink(const venetium_w10m_events* sink);

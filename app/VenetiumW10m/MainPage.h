@@ -65,6 +65,9 @@ class MainPage {
   void SendPhoneClipboard();
   void ReportScreen();
   void OnEngineStopped(int32_t code);
+  // Chrome's own interface is drawn by the engine: the shell's bar, tabs
+  // and menu go, and the page is all panel.
+  void EnterChromeUi();
 
   TabInfo* Selected();
 
@@ -74,6 +77,7 @@ class MainPage {
   int32_t selected_ = 0;
   bool editingAddress_ = false;
   bool fullscreen_ = false;
+  bool chromeUi_ = false;
   std::wstring pendingUrl_;
   double rawPerView_ = 1.0;
 
