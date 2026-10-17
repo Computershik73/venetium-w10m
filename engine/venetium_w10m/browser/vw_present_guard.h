@@ -34,6 +34,9 @@
 
 namespace venetium_w10m {
 
+// This build of the engine DLL: what a remembered verdict belongs to.
+uint32_t EngineBuildStamp();
+
 class PresentGuard {
  public:
   // Runs a way may end before it is left alone.

@@ -39,6 +39,7 @@
 #include "ui/views/widget/widget.h"
 #include "ui/wm/core/focus_controller.h"
 #include "venetium_w10m/browser/vw_engine.h"
+#include "venetium_w10m/browser/vw_interface_guard.h"
 #include "venetium_w10m/browser/vw_platform.h"
 #include "venetium_w10m/browser/vw_window_manager.h"
 #include "venetium_w10m/common/vw_log.h"
@@ -86,6 +87,10 @@ void VwChromeHost::Started() {
   started_ = true;
   WatchActiveTab();
   UpdateBackState();
+  // A run that has gone on with Chrome's window for a while did not die of
+  // Chrome's interface.
+  base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
+      FROM_HERE, base::BindOnce(&interface_guard::Proven), base::Seconds(10));
 }
 
 BrowserWindowInterface* VwChromeHost::ActiveBrowser() {
@@ -238,6 +243,9 @@ void VwChromeHost::NavigationEntriesDeleted() {
 }
 
 void VwChromeHost::Suspending() {
+  if (started_) {
+    interface_guard::Proven();
+  }
   // The phone ends a suspended app without telling it: preferences,
   // cookies and storage are written out now, and the run is marked as one
   // that was ended, not one that crashed -- the next start then restores

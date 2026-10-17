@@ -106,6 +106,14 @@ uint32_t BuildStamp() {
   return stamp;
 }
 
+}  // namespace
+
+uint32_t EngineBuildStamp() {
+  return BuildStamp();
+}
+
+namespace {
+
 const char* Name(PresentKind kind) {
   return kind == PresentKind::kAngle        ? "GPU compositing"
          : kind == PresentKind::kCompositor ? "the Direct3D 11 compositor"

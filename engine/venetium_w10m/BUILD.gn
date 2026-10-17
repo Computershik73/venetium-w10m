@@ -84,6 +84,8 @@ shared_library("venetium_engine") {
     "browser/vw_frame_sink.h",
     "browser/vw_input_method.cc",
     "browser/vw_input_method.h",
+    "browser/vw_interface_guard.cc",
+    "browser/vw_interface_guard.h",
     "browser/vw_memory.cc",
     "browser/vw_memory.h",
     "browser/vw_panel.cc",

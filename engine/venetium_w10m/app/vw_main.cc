@@ -36,6 +36,7 @@
 #include "ui/gl/w10m_panel.h"
 #include "venetium_w10m/app/vw_main_delegate.h"
 #include "venetium_w10m/browser/vw_engine.h"
+#include "venetium_w10m/browser/vw_interface_guard.h"
 #include "venetium_w10m/browser/vw_panel.h"
 #include "venetium_w10m/browser/vw_present_guard.h"
 #include "venetium_w10m/capi/venetium_w10m_capi.h"
@@ -147,12 +148,26 @@ bool HasSwitch(const std::string& switches, const char* name) {
 }
 
 // Chrome's own interface, unless the switches ask for the shell's
-// ("--vw-ui=shell"). Only an engine built with Chrome's browser layer has
-// one to give.
+// ("--vw-ui=shell"), or runs with it have ended before its window showed
+// (vw_interface_guard.h). Only an engine built with Chrome's browser layer
+// has one to give.
 bool ChromeInterface(const std::string& switches,
                      const base::FilePath& profile_dir) {
 #if defined(VW_CHROME_INTERFACE)
-  return !HasSwitch(switches, "--vw-ui=shell");
+  if (HasSwitch(switches, "--vw-ui=shell")) {
+    return false;
+  }
+  if (interface_guard::GaveUp(profile_dir)) {
+    static bool noted = false;
+    if (!noted) {
+      noted = true;
+      NoteF("interface: the shell's: %d runs with Chrome's ended before its "
+            "window showed (a new build tries Chrome's again)",
+            interface_guard::kTries);
+    }
+    return false;
+  }
+  return true;
 #else
   return false;
 #endif
@@ -564,6 +579,7 @@ extern "C" VW_EXPORT int32_t venetium_w10m_run(
     NoteF("command line for Chrome: %s",
           base::WideToUTF8(command_line->GetCommandLineString()));
     SetUpChromePaths(engine_config);
+    interface_guard::Trying(engine_config.profile_dir);
     return RunChrome(ThisModule());
   }
 #endif
