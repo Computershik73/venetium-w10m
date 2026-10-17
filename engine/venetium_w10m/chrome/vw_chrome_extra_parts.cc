@@ -15,6 +15,7 @@
 #include "venetium_w10m/browser/vw_platform.h"
 #include "venetium_w10m/chrome/vw_browser_native_widget.h"
 #include "venetium_w10m/chrome/vw_chrome_host.h"
+#include "venetium_w10m/chrome/vw_select_file_dialog.h"
 #include "venetium_w10m/common/vw_log.h"
 
 namespace venetium_w10m {
@@ -68,6 +69,8 @@ void VwChromeExtraParts::PreProfileInit() {
   // browser window opens as soon as it is loaded.
   TuneBrowserProcess();
   VwBrowserNativeWidgetFactory::Install();
+  // After Chrome's own (PreMainMessageLoopRun installs it before this).
+  VwSelectFileDialogFactory::Install();
   platform_util::SetW10mOpenHandler(&OpenThroughShell);
   auto host = std::make_unique<VwChromeHost>();
   host_ = host.get();

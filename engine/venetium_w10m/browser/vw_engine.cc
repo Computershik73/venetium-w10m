@@ -29,6 +29,10 @@ VwEngine* VwEngine::Get() {
   return engine.get();
 }
 
+VwBrowser* VwEngine::browser() {
+  return g_browser;
+}
+
 VwEngine::VwEngine() = default;
 
 void VwEngine::Configure(const EngineConfig& config) {

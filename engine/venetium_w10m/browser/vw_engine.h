@@ -95,6 +95,9 @@ class VwEngine {
                       scoped_refptr<base::SingleThreadTaskRunner> ui);
   void BrowserStopping();
   bool browser_running() const { return running_.load(); }
+  // UI thread: the browser between BrowserStarted and BrowserStopping, else
+  // null.
+  VwBrowser* browser();
   // From the start of shutdown on (ContentBrowserClient::IsShuttingDown).
   // Not "not running yet": during startup Chromium asks this before creating
   // the network service, and a yes there leaves it never created.

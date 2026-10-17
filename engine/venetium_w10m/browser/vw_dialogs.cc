@@ -128,7 +128,8 @@ void VwDialogs::ChooseFiles(content::WebContents* web_contents,
   }
   const std::string accept_list = base::JoinString(accept, ",");
   const int32_t id = next_id_++;
-  files_[id] = PendingFiles{web_contents, std::move(listener), params.mode};
+  files_[id] =
+      PendingFiles{web_contents, std::move(listener), params.mode, {}};
   const bool multiple =
       params.mode == blink::mojom::FileChooserParams::Mode::kOpenMultiple;
   const bool save = params.mode == blink::mojom::FileChooserParams::Mode::kSave;
@@ -144,6 +145,16 @@ void VwDialogs::FilesChosen(int32_t id, const std::string& paths) {
   }
   PendingFiles pending = std::move(it->second);
   files_.erase(it);
+  if (pending.picked) {
+    std::vector<base::FilePath> picked;
+    for (const std::string& path :
+         base::SplitString(paths, "\n", base::TRIM_WHITESPACE,
+                           base::SPLIT_WANT_NONEMPTY)) {
+      picked.emplace_back(base::UTF8ToWide(path));
+    }
+    std::move(pending.picked).Run(std::move(picked));
+    return;
+  }
   std::vector<blink::mojom::FileChooserFileInfoPtr> chosen;
   for (const std::string& path :
        base::SplitString(paths, "\n", base::TRIM_WHITESPACE,
@@ -159,6 +170,20 @@ void VwDialogs::FilesChosen(int32_t id, const std::string& paths) {
   }
   pending.listener->FileSelected(std::move(chosen), base::FilePath(),
                                  pending.mode);
+}
+
+void VwDialogs::PickFiles(bool multiple, PickedCallback chosen) {
+  const venetium_w10m_events events = VwEngine::Get()->events();
+  if (!events.file_chooser) {
+    std::move(chosen).Run({});
+    return;
+  }
+  const int32_t id = next_id_++;
+  files_[id] = PendingFiles{nullptr, nullptr,
+                            blink::mojom::FileChooserParams::Mode::kOpen,
+                            std::move(chosen)};
+  NoteF("files %d: Chrome's file dialog, multiple %d", id, multiple ? 1 : 0);
+  events.file_chooser(id, "", multiple ? 1 : 0, 0);
 }
 
 void VwDialogs::ForgetContents(content::WebContents* web_contents) {

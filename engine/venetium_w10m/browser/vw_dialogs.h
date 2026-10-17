@@ -16,6 +16,8 @@
 #include <string>
 #include <vector>
 
+#include "base/files/file_path.h"
+#include "base/functional/callback.h"
 #include "base/memory/raw_ptr.h"
 #include "base/memory/scoped_refptr.h"
 #include "content/public/browser/javascript_dialog_manager.h"
@@ -59,6 +61,13 @@ class VwDialogs : public content::JavaScriptDialogManager {
   // paths: UTF-8, separated by '\n'; empty cancels.
   void FilesChosen(int32_t id, const std::string& paths);
 
+  // A file dialog of Chrome's interface (ui::SelectFileDialog): the shell's
+  // picker, which copies what is picked into the app's own folders.
+  // |chosen| hears the copies' paths, none when cancelled or with no shell.
+  using PickedCallback =
+      base::OnceCallback<void(std::vector<base::FilePath> paths)>;
+  void PickFiles(bool multiple, PickedCallback chosen);
+
   // A tab is going away: whatever it asked is cancelled.
   void ForgetContents(content::WebContents* web_contents);
   // Whether |web_contents| is waiting for the answer to a dialog or a file
@@ -74,6 +83,8 @@ class VwDialogs : public content::JavaScriptDialogManager {
     raw_ptr<content::WebContents> contents;
     scoped_refptr<content::FileSelectListener> listener;
     blink::mojom::FileChooserParams::Mode mode;
+    // PickFiles' instead of |listener|.
+    PickedCallback picked;
   };
 
   int32_t next_id_ = 1;
