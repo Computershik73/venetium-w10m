@@ -1,0 +1,53 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Sun, 18 Oct 2026 00:08:43 +0400
+Subject: [PATCH] base: a message window that cannot be made is not memory
+ running out
+
+On Windows 10 Mobile RegisterClassEx is a stub, so registering the
+message-only window class always fails, and MessageWindow treated that as
+resource exhaustion and ended the process. Chrome's browser layer reaches
+it a few seconds after start (WebUsbDetector -> DeviceMonitorWin), and the
+content layer on demand (WebHID, WebAuthn's HID discovery, Web Serial).
+Now the class is left unregistered and MessageWindow::Create fails, which
+its users already handle.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ base/win/message_window.cc | 15 +++++++++++++++
+ 1 file changed, 15 insertions(+)
+
+diff --git a/base/win/message_window.cc b/base/win/message_window.cc
+index 01fb5d9b5a2f72c5ac66354b38e1424ddadf36d7..92f85dd0ca350f12aa94cc82920e9fb903706225 100644
+--- a/base/win/message_window.cc
++++ b/base/win/message_window.cc
+@@ -123,7 +123,15 @@ MessageWindow::WindowClass::WindowClass() {
+   if (atom_ == 0) {
+     PLOG(ERROR)
+         << "Failed to register the window class for a message-only window";
++#if defined(VENETIUM_W10M)
++    // On Windows 10 Mobile an app has no window classes (RegisterClassEx is
++    // a stub there), which says nothing about memory: every MessageWindow
++    // fails to be created instead, and its users go on without one -- the
++    // device monitor behind WebUSB, WebHID and WebAuthn, the gamepad's raw
++    // input.
++#else
+     OnResourceExhausted();
++#endif
+   }
+ }
+ 
+@@ -173,6 +181,13 @@ bool MessageWindow::DoCreate(MessageCallback message_callback,
+   message_callback_ = std::move(message_callback);
+ 
+   WindowClass& window_class = g_window_class.Get();
++#if defined(VENETIUM_W10M)
++  // Before CreateWindow, whose stub leaves the last error as it was: one
++  // left at ERROR_NOT_ENOUGH_MEMORY would end the process below.
++  if (!window_class.atom()) {
++    return false;
++  }
++#endif
+   window_ =
+       CreateWindow(MAKEINTATOM(window_class.atom()), window_name, 0, 0, 0, 0, 0,
+                    HWND_MESSAGE, nullptr, window_class.instance(), this);

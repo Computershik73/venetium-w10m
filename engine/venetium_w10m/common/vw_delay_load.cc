@@ -12,7 +12,9 @@
 // are written to the log (once each), and the caller gets a stub that returns
 // that function's failure value. Which value depends on what the function
 // returns, decided by its name and then by its DLL's family:
-//   E_NOTIMPL                   COM-style functions (an HRESULT)
+//   E_NOTIMPL                   COM-style functions (an HRESULT), and the
+//                               ones where only a negative value fails: an
+//                               NTSTATUS (LSA), a SECURITY_STATUS (CNG)
 //   ERROR_CALL_NOT_IMPLEMENTED  functions returning a Win32 error code, where
 //                               0 would mean success -- the registry, ETW,
 //                               iphlpapi, DNS, configuration manager, SSPI
@@ -137,6 +139,37 @@ UINT WINAPI SubstituteGetCaretBlinkTime() {
   return 530;
 }
 
+// The credential prompts return a Win32 error code, and zero -- "the user
+// typed something" -- would send the caller on with no credentials to read.
+// Chrome asks before it shows a saved password.
+DWORD WINAPI ReturnCancelled() {
+  return ERROR_CANCELLED;
+}
+
+// The printer list: the stubs leave the last error as it was, which Chrome
+// reads to tell "no printers" from "the call failed". There are no printers.
+BOOL WINAPI SubstituteEnumPrinters(DWORD flags,
+                                   void* name,
+                                   DWORD level,
+                                   BYTE* printers,
+                                   DWORD size,
+                                   DWORD* needed,
+                                   DWORD* returned) {
+  if (needed) {
+    *needed = 0;
+  }
+  if (returned) {
+    *returned = 0;
+  }
+  ::SetLastError(ERROR_SUCCESS);
+  return TRUE;
+}
+
+BOOL WINAPI SubstituteGetDefaultPrinter(void* buffer, DWORD* size) {
+  ::SetLastError(ERROR_FILE_NOT_FOUND);
+  return FALSE;
+}
+
 struct Substitute {
   const char* name;
   FARPROC proc;
@@ -155,6 +188,20 @@ const Substitute kSubstitutes[] = {
     {"GetSysColor", reinterpret_cast<FARPROC>(&SubstituteGetSysColor)},
     {"GetCaretBlinkTime",
      reinterpret_cast<FARPROC>(&SubstituteGetCaretBlinkTime)},
+    {"CredUIPromptForWindowsCredentialsW",
+     reinterpret_cast<FARPROC>(&ReturnCancelled)},
+    {"CredUIPromptForWindowsCredentialsA",
+     reinterpret_cast<FARPROC>(&ReturnCancelled)},
+    {"CredUIPromptForCredentialsW",
+     reinterpret_cast<FARPROC>(&ReturnCancelled)},
+    {"CredUIPromptForCredentialsA",
+     reinterpret_cast<FARPROC>(&ReturnCancelled)},
+    {"EnumPrintersW", reinterpret_cast<FARPROC>(&SubstituteEnumPrinters)},
+    {"EnumPrintersA", reinterpret_cast<FARPROC>(&SubstituteEnumPrinters)},
+    {"GetDefaultPrinterW",
+     reinterpret_cast<FARPROC>(&SubstituteGetDefaultPrinter)},
+    {"GetDefaultPrinterA",
+     reinterpret_cast<FARPROC>(&SubstituteGetDefaultPrinter)},
 };
 
 FARPROC SubstituteFor(const char* name) {
@@ -201,6 +248,10 @@ constexpr Rule kNameRules[] = {
     {"GetThemeSysSize", Failure::kZero},
     // In shell32 and shlwapi, returning an HRESULT.
     {"SHGetKnownFolder", Failure::kHresult},
+    {"SHGetSpecialFolderLocation", Failure::kHresult},
+    // Zero would hand Chrome a null IApplicationAssociationRegistration to
+    // ask which browser is the default, at every start.
+    {"SHCreateAssociationRegistration", Failure::kHresult},
     {"SHGetFolderPath", Failure::kHresult},
     {"SHCreateItem", Failure::kHresult},
     {"SHCreateShellItemArray", Failure::kHresult},
@@ -226,6 +277,15 @@ constexpr Rule kNameRules[] = {
     {"AssocQueryString", Failure::kHresult},
     {"HashData", Failure::kHresult},
     {"IUnknown_", Failure::kHresult},
+    // The print dialog (comdlg32): zero is S_OK.
+    {"PrintDlgEx", Failure::kHresult},
+    // In secur32, but returning a BOOLEAN: the error code would read as TRUE.
+    {"GetUserNameEx", Failure::kZero},
+    {"GetComputerObjectName", Failure::kZero},
+    {"TranslateName", Failure::kZero},
+    // LSA (secur32, advapi32): an NTSTATUS, failing only when negative.
+    {"LsaNtStatusToWinError", Failure::kErrorCode},
+    {"Lsa", Failure::kHresult},
     // The registry and ETW (advapi32, shlwapi): there 0 is ERROR_SUCCESS.
     {"RegisterEventSource", Failure::kZero},  // a HANDLE; before "Reg"
     {"RegisterServiceCtrlHandler", Failure::kZero},
@@ -273,7 +333,7 @@ constexpr Rule kDllRules[] = {
     {"urlmon", Failure::kHresult},       {"wer", Failure::kHresult},
     {"iphlpapi", Failure::kErrorCode},   {"dnsapi", Failure::kErrorCode},
     {"cfgmgr32", Failure::kErrorCode},   {"pdh", Failure::kErrorCode},
-    {"secur32", Failure::kErrorCode},    {"ncrypt", Failure::kErrorCode},
+    {"secur32", Failure::kErrorCode},    {"ncrypt", Failure::kHresult},
     {"powrprof", Failure::kErrorCode},   {"dhcpcsvc", Failure::kErrorCode},
     {"msi", Failure::kErrorCode},        {"rpcrt4", Failure::kErrorCode},
     {"netapi32", Failure::kErrorCode},   {"rstrtmgr", Failure::kErrorCode},
