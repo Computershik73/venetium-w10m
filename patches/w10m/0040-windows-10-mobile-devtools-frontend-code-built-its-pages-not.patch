@@ -1,0 +1,59 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Sun, 18 Oct 2026 02:47:08 +0400
+Subject: [PATCH] Windows 10 Mobile: DevTools' frontend code built, its pages
+ not packed
+
+Chrome's browser layer calls DevToolsWindow, DevToolsUI and the DevTools
+features everywhere, without asking whether the frontend is built, so
+enable_devtools_frontend is on again for the phone (it was off while
+the engine was content alone). Its pages stay out of resources.pak:
+megabytes of a mapped file in a 2 GB address space, for a window a phone
+does not open.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ chrome/browser/resources/BUILD.gn     | 5 ++++-
+ content/browser/devtools/features.gni | 9 ++++-----
+ 2 files changed, 8 insertions(+), 6 deletions(-)
+
+diff --git a/chrome/browser/resources/BUILD.gn b/chrome/browser/resources/BUILD.gn
+index 66dcefc52441197089ad4189199e15a4585af627..190dfd196726433623c22f802ff75cdb6346e3ca 100644
+--- a/chrome/browser/resources/BUILD.gn
++++ b/chrome/browser/resources/BUILD.gn
+@@ -2,6 +2,7 @@
+ # Use of this source code is governed by a BSD-style license that can be
+ # found in the LICENSE file.
+ 
++import("//build/config/win/w10m.gni")
+ import("//chrome/browser/buildflags.gni")
+ import("//chrome/common/features.gni")
+ import("//components/compose/features.gni")
+@@ -471,7 +472,9 @@ repack("dev_ui_paks") {
+     sources += [ "$root_gen_dir/chrome/tab_strip_internals_resources.pak" ]
+   }
+ 
+-  if (enable_devtools_frontend) {
++  # Not on Windows 10 Mobile: DevTools' pages are megabytes of a pak that is
++  # mapped into a 2 GB address space for a window a phone does not open.
++  if (enable_devtools_frontend && !is_w10m_target) {
+     sources +=
+         [ "$root_gen_dir/content/browser/devtools/devtools_resources.pak" ]
+   }
+diff --git a/content/browser/devtools/features.gni b/content/browser/devtools/features.gni
+index dded7a65880265356edd8cff5066e75238041594..d6610e9d1a56d06479bfdaf2db8c52a6396959ec 100644
+--- a/content/browser/devtools/features.gni
++++ b/content/browser/devtools/features.gni
+@@ -5,8 +5,7 @@
+ import("//build/config/chrome_build.gni")
+ 
+ # iOS and Fuchsia don't support DevTools front-end.
+-import("//build/config/win/w10m.gni")
+-
+-# Not on Windows 10 Mobile either: the phone browser has no DevTools window,
+-# and the frontend is a TypeScript build (node, esbuild) of its own.
+-enable_devtools_frontend = !is_ios && !is_fuchsia && !is_w10m
++# (Windows 10 Mobile builds the frontend's code, which Chrome's browser layer
++# calls everywhere, but leaves its pages out of resources.pak:
++# chrome/browser/resources/BUILD.gn.)
++enable_devtools_frontend = !is_ios && !is_fuchsia
