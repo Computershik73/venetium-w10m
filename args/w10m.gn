@@ -64,11 +64,10 @@ enable_pdf = true
 # The PDF viewer prints through //printing (a PDF to save, on a phone).
 enable_printing = true
 # But not PDF forms' scripts (V8 in PDFium: a second V8 isolate for every
-# PDF open, in a 2 GB address space), XFA forms (500 files of PDFium) or the
-# viewer's ink annotations.
+# PDF open, in a 2 GB address space) or XFA forms (500 files of PDFium).
+# (The viewer's ink stays: without it the viewer's TypeScript fails its lint.)
 pdf_enable_v8 = false
 pdf_enable_xfa = false
-enable_pdf_ink2 = false
 enable_widevine = false
 enable_media_foundation_widevine_cdm = false
 enable_vr = false
