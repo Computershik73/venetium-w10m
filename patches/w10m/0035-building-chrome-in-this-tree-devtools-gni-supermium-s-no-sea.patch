@@ -1,0 +1,67 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Sun, 18 Oct 2026 00:19:55 +0400
+Subject: [PATCH] Building //chrome in this tree: devtools' gni, Supermium's
+ "No Search"
+
+- chrome/browser/devtools/BUILD.gn used enable_service_discovery from
+  //chrome/common/features.gni, imported only with the devtools frontend.
+- Supermium's --ungoogled-supermium puts the "nosearch" engine in Google's
+  place (components/search_engines/template_url_data_util.cc), whose
+  definition comes from ungoogled-chromium's patches, which this tree
+  does not carry: defined here, id 117.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ chrome/browser/devtools/BUILD.gn                   |  4 +++-
+ .../definitions/prepopulated_engines.json          | 14 +++++++++++++-
+ 2 files changed, 16 insertions(+), 2 deletions(-)
+
+diff --git a/chrome/browser/devtools/BUILD.gn b/chrome/browser/devtools/BUILD.gn
+index 802955898f7d6153e7021a2857ddc457e833a75e..53d12d039b42331214d446f1e1ed11a9cff569e2 100644
+--- a/chrome/browser/devtools/BUILD.gn
++++ b/chrome/browser/devtools/BUILD.gn
+@@ -6,8 +6,10 @@ import("//content/browser/devtools/features.gni")
+ import("//extensions/buildflags/buildflags.gni")
+ import("//printing/buildflags/buildflags.gni")
+ 
++# (Windows 10 Mobile builds Chrome without the DevTools frontend, and the
++# list of sources below asks chrome/common/features.gni either way.)
++import("//chrome/common/features.gni")
+ if (enable_devtools_frontend) {
+-  import("//chrome/common/features.gni")
+   import("//tools/grit/grit_rule.gni")
+ }
+ 
+diff --git a/third_party/search_engines_data/resources/definitions/prepopulated_engines.json b/third_party/search_engines_data/resources/definitions/prepopulated_engines.json
+index 0865e26a306f036f2747a5cdcb8c1e66b26959ab..95ce94ff3e26f24a9fa37a0bd2559a2379318a46 100644
+--- a/third_party/search_engines_data/resources/definitions/prepopulated_engines.json
++++ b/third_party/search_engines_data/resources/definitions/prepopulated_engines.json
+@@ -22,7 +22,7 @@
+     // use a lower number. This number is used by UMA stats and must be updated
+     // to include the full range or else not all engines will be counted in
+     // stats.
+-    "kMaxPrepopulatedEngineID": 116,
++    "kMaxPrepopulatedEngineID": 117,
+ 
+     // Increment this if you change the data in ways that mean users with
+     // existing data should get a new version. Otherwise, existing data may
+@@ -118,6 +118,18 @@
+       "id": 68
+     },
+ 
++    // Supermium's --ungoogled-supermium puts this in Google's place
++    // (components/search_engines/template_url_data_util.cc). Its definition
++    // comes from ungoogled-chromium's patches, which this tree does not carry.
++    "nosearch": {
++      "name": "No Search",
++      "keyword": "nosearch",
++      "favicon_url": "",
++      "search_url": "http://{searchTerms}",
++      "type": "SEARCH_ENGINE_OTHER",
++      "id": 117
++    },
++
+     "duckduckgo": {
+       "name": "DuckDuckGo",
+       "keyword": "duckduckgo.com",

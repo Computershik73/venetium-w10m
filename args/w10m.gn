@@ -59,8 +59,10 @@ dawn_enable_opengles = false
 
 # --- what a single-process phone embedder does not have ---------------------
 enable_nacl = false
-enable_pdf = false
-enable_printing = false
+# Chrome's own interface (//chrome) is not built without the PDF viewer.
+enable_pdf = true
+# The PDF viewer prints through //printing (a PDF to save, on a phone).
+enable_printing = true
 enable_widevine = false
 enable_media_foundation_widevine_cdm = false
 enable_vr = false

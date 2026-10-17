@@ -24,6 +24,18 @@ group("venetium_w10m") {
   ]
 }
 
+# A look at Chrome's own browser layer (//chrome) under this target: what it
+# takes to build, before the engine carries Chrome's interface.
+group("chrome_probe") {
+  deps = [
+    "//chrome:dependencies",
+    "//chrome/app:chrome_dll_resources",
+    "//chrome/app:command_ids",
+    "//chrome/browser:chrome_content_browser_client",
+    "//chrome/browser/lifetime",
+  ]
+}
+
 # A toolchain check: base, V8 and the content layer, nothing of ours.
 group("probe") {
   deps = [

@@ -1,0 +1,224 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Sun, 18 Oct 2026 00:19:47 +0400
+Subject: [PATCH] Windows 10 Mobile: Chrome's views on the engine's one aura
+ root
+
+The phone gives an app one window (the shell's panel) and the engine one
+aura root in it, with no HWND. Chrome's widgets become NativeWidgetAura
+windows under that root, as on ChromeOS:
+- ChromeViewsDelegate::CreateNativeWidget and CreateNativeWidget always
+  make a NativeWidgetAura, with the root as context when none is given;
+  a DesktopNativeWidgetAura that slips through is fatal at once, naming
+  the widget, rather than a second compositor nobody shows.
+- The maximized browser window draws no title bar or caption buttons
+  (WindowManagerProvidesTitleBar); dialogs keep theirs.
+- No status tray (StatusTrayWin CHECKs a window class it cannot register).
+- Tabs are not dragged out into windows of their own.
+- The main browser window's minimum width is 320 DIP, not 500: a phone
+  held upright is 360 to 412 wide.
+- No Win32 system menu on a long press beside the tabs, and no Move,
+  Size, Minimize, Maximize or Restore items in the views system menu.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../browser/ui/views/chrome_views_delegate.h  |  4 ++++
+ .../ui/views/chrome_views_delegate_win.cc     | 16 +++++++++++++++
+ .../ui/views/frame/browser_frame_view.cc      |  5 +++++
+ .../views/frame/layout/browser_view_layout.h  |  6 ++++++
+ .../views/frame/system_menu_model_builder.cc  |  4 +++-
+ .../browser/ui/views/native_widget_factory.cc | 20 +++++++++++++++++++
+ .../ui/views/status_icons/status_tray_win.cc  |  7 +++++++
+ .../tabs/dragging/tab_drag_controller.cc      |  6 ++++++
+ .../desktop_native_widget_aura.cc             |  8 ++++++++
+ 9 files changed, 75 insertions(+), 1 deletion(-)
+
+diff --git a/chrome/browser/ui/views/chrome_views_delegate.h b/chrome/browser/ui/views/chrome_views_delegate.h
+index c695c48d0c2672499bae2bcf1dbdc54d02822dbe..f51254648f837638382953cddb2c41af61fdb759 100644
+--- a/chrome/browser/ui/views/chrome_views_delegate.h
++++ b/chrome/browser/ui/views/chrome_views_delegate.h
+@@ -52,6 +52,10 @@ class ChromeViewsDelegate : public views::ViewsDelegate {
+                              base::OnceClosure callback) override;
+ #endif
+ 
++#if defined(VENETIUM_W10M)
++  bool WindowManagerProvidesTitleBar(bool maximized) override;
++#endif
++
+ #if BUILDFLAG(IS_LINUX)
+   bool WindowManagerProvidesTitleBar(bool maximized) override;
+   gfx::ImageSkia* GetDefaultWindowIcon() const override;
+diff --git a/chrome/browser/ui/views/chrome_views_delegate_win.cc b/chrome/browser/ui/views/chrome_views_delegate_win.cc
+index a376c75811adb7c9c2f9f7dc663193b819b86f0f..85ecdd62d1249a36ab0d88870d4fff3a85a910fd 100644
+--- a/chrome/browser/ui/views/chrome_views_delegate_win.cc
++++ b/chrome/browser/ui/views/chrome_views_delegate_win.cc
+@@ -121,9 +121,24 @@ HICON ChromeViewsDelegate::GetSmallWindowIcon() const {
+   return GetSmallAppIcon();
+ }
+ 
++#if defined(VENETIUM_W10M)
++// The browser window fills the phone's screen, always maximized, and the
++// phone has no title bar to drag or buttons to press: none is drawn for it.
++// Dialogs, which are not maximized, keep their title and close button.
++bool ChromeViewsDelegate::WindowManagerProvidesTitleBar(bool maximized) {
++  return maximized;
++}
++#endif
++
+ views::NativeWidget* ChromeViewsDelegate::CreateNativeWidget(
+     views::Widget::InitParams* params,
+     views::internal::NativeWidgetDelegate* delegate) {
++#if defined(VENETIUM_W10M)
++  // No top-level windows of the system's on Windows 10 Mobile: every widget
++  // is a window under the engine's one aura root (native_widget_factory.cc).
++  return ::CreateNativeWidget(NativeWidgetType::kNativeWidgetAura, params,
++                              delegate);
++#else
+   // Check the force_software_compositing flag only on Windows. If this flag is
+   // on, it means that the widget being created wants to use the software
+   // compositor which requires a top level window. We cannot have a mixture of
+@@ -158,6 +173,7 @@ views::NativeWidget* ChromeViewsDelegate::CreateNativeWidget(
+   }
+ 
+   return ::CreateNativeWidget(native_widget_type, params, delegate);
++#endif  // defined(VENETIUM_W10M)
+ }
+ 
+ int ChromeViewsDelegate::GetAppbarAutohideEdges(HMONITOR monitor,
+diff --git a/chrome/browser/ui/views/frame/browser_frame_view.cc b/chrome/browser/ui/views/frame/browser_frame_view.cc
+index 719db8798e926a284a8a39330a3345f29e15ef19..bfada104d20b514ae6782944300f4726fbb9a953 100644
+--- a/chrome/browser/ui/views/frame/browser_frame_view.cc
++++ b/chrome/browser/ui/views/frame/browser_frame_view.cc
+@@ -387,6 +387,11 @@ views::View::Views BrowserFrameView::GetChildrenInZOrder() {
+ // use the gesture recognizer to turn it into a LONG_TAP gesture and handle it
+ // here. See https://crbug.com/40841210 for more info.
+ void BrowserFrameView::OnGestureEvent(ui::GestureEvent* event) {
++#if defined(VENETIUM_W10M)
++  // No system menu without a window of the system's (Windows 10 Mobile): a
++  // long press beside the tabs is left to the views under it.
++  return;
++#endif
+   gfx::Point event_loc = event->location();
+   // This opens the title bar system context menu on long press in the titlebar.
+   // NonClientHitTest returns HTCAPTION if `event_loc` is in the empty space on
+diff --git a/chrome/browser/ui/views/frame/layout/browser_view_layout.h b/chrome/browser/ui/views/frame/layout/browser_view_layout.h
+index 4d5b544dffe675594cfece613564a217ea7c1fba..af045a50af7bc0f0ea961f6e882d8714cc1e529b 100644
+--- a/chrome/browser/ui/views/frame/layout/browser_view_layout.h
++++ b/chrome/browser/ui/views/frame/layout/browser_view_layout.h
+@@ -101,7 +101,13 @@ class BrowserViewLayout : public views::LayoutManager {
+   // very small window, even on large monitors (which is why a minimum height is
+   // not specified). This value is used for the main browser window only, not
+   // for popups.
++#if defined(VENETIUM_W10M)
++  // A phone held upright is 360 to 412 DIPs wide; the toolbar folds what
++  // does not fit into its overflow menu.
++  static constexpr int kMainBrowserContentsMinimumWidth = 320;
++#else
+   static constexpr int kMainBrowserContentsMinimumWidth = 500;
++#endif
+ 
+   // The minimum width of the contents area itself. Applies even when side
+   // panels are open and prevents zero or negative contents sizes.
+diff --git a/chrome/browser/ui/views/frame/system_menu_model_builder.cc b/chrome/browser/ui/views/frame/system_menu_model_builder.cc
+index 0f9cfbf7882450d8e5a1307606eb10fa5da2473b..52e196a71633668dc07e46d58dadc758eb441c12 100644
+--- a/chrome/browser/ui/views/frame/system_menu_model_builder.cc
++++ b/chrome/browser/ui/views/frame/system_menu_model_builder.cc
+@@ -112,7 +112,9 @@ void SystemMenuModelBuilder::BuildMenu(ui::SimpleMenuModel* model) {
+ 
+ void SystemMenuModelBuilder::BuildSystemMenuForBrowserWindow(
+     ui::SimpleMenuModel* model) {
+-#if BUILDFLAG(IS_WIN)
++  // Windows 10 Mobile: a window that fills the phone's screen is not moved,
++  // sized, minimized or restored.
++#if BUILDFLAG(IS_WIN) && !defined(VENETIUM_W10M)
+   if (features::IsMenuSimplificationEnabled()) {
+     AddItemWithIconMaybe(model, IDC_RESTORE_WINDOW, IDS_RESTORE_WINDOW_MENU_WIN,
+                          views::kChromeRestoreIcon);
+diff --git a/chrome/browser/ui/views/native_widget_factory.cc b/chrome/browser/ui/views/native_widget_factory.cc
+index 24b84fafdcc80da4f31cb267ec3ad377fe361954..807fd446b5c75fc538cadbd835ff98f7e322b1f2 100644
+--- a/chrome/browser/ui/views/native_widget_factory.cc
++++ b/chrome/browser/ui/views/native_widget_factory.cc
+@@ -10,10 +10,30 @@
+ #include "ui/views/widget/desktop_aura/desktop_native_widget_aura.h"
+ #include "ui/views/widget/native_widget_aura.h"
+ 
++#if defined(VENETIUM_W10M)
++#include "ui/aura/env.h"
++#include "ui/aura/window_tree_host.h"
++#endif
++
+ views::NativeWidget* CreateNativeWidget(
+     NativeWidgetType type,
+     views::Widget::InitParams* params,
+     views::internal::NativeWidgetDelegate* delegate) {
++#if defined(VENETIUM_W10M)
++  // Windows 10 Mobile gives an app one window, the shell's panel, and the
++  // engine one aura root in it, with no HWND behind it. Every widget is a
++  // window under that root, as on ChromeOS: a desktop widget would make a
++  // window tree host of its own, with nothing to show it.
++  type = NativeWidgetType::kNativeWidgetAura;
++  if (params->context) {
++    params->context = params->context->GetRootWindow();
++  }
++  if (!params->parent && !params->context) {
++    const auto& hosts = aura::Env::GetInstance()->window_tree_hosts();
++    CHECK(!hosts.empty()) << "a widget before the engine's root window";
++    params->context = hosts.front()->window();
++  }
++#endif
+   // While the majority of the time, context wasn't plumbed through due to the
+   // existence of a global WindowParentingClient, if this window is toplevel,
+   // it's possible that there is no contextual state that we can use.
+diff --git a/chrome/browser/ui/views/status_icons/status_tray_win.cc b/chrome/browser/ui/views/status_icons/status_tray_win.cc
+index 2b6da989844d79dee86195848318ec96eb32c6b4..747c77d6f34f2f04e7722a3f27beabfc643a044f 100644
+--- a/chrome/browser/ui/views/status_icons/status_tray_win.cc
++++ b/chrome/browser/ui/views/status_icons/status_tray_win.cc
+@@ -243,5 +243,12 @@ void StatusTrayWin::SetStatusTrayStateChangerProxyForTest(
+ }
+ 
+ std::unique_ptr<StatusTray> StatusTray::Create() {
++#if defined(VENETIUM_W10M)
++  // Windows 10 Mobile has no notification area, and StatusTrayWin CHECKs
++  // the window class it cannot register there. Chrome goes without a tray,
++  // as on Android.
++  return nullptr;
++#else
+   return std::make_unique<StatusTrayWin>();
++#endif
+ }
+diff --git a/chrome/browser/ui/views/tabs/dragging/tab_drag_controller.cc b/chrome/browser/ui/views/tabs/dragging/tab_drag_controller.cc
+index e4862f8b3c69e3104cb0b307c70260241d50ac1b..4b61306fe08a4a583ee292f0cbd7b4cc1c3ca4aa 100644
+--- a/chrome/browser/ui/views/tabs/dragging/tab_drag_controller.cc
++++ b/chrome/browser/ui/views/tabs/dragging/tab_drag_controller.cc
+@@ -466,6 +466,12 @@ TabDragController::Liveness TabDragController::Init(
+       ref->detach_behavior_ = DetachBehavior::kNotDetachable;
+     }
+   }
++#if defined(VENETIUM_W10M)
++  // On a phone's one screen a tab dragged out of the strip would become a
++  // window that covers the first, with nothing to drag it by: tabs only
++  // change places.
++  ref->detach_behavior_ = DetachBehavior::kNotDetachable;
++#endif
+ #endif  // BUILDFLAG(IS_MAC)
+ 
+   ref->source_context_emptiness_tracker_ =
+diff --git a/ui/views/widget/desktop_aura/desktop_native_widget_aura.cc b/ui/views/widget/desktop_aura/desktop_native_widget_aura.cc
+index 41725080f2ac007e30266ff83e859578b9e8887d..8ea6728abd462c545de54a48728c04f0e3696f19 100644
+--- a/ui/views/widget/desktop_aura/desktop_native_widget_aura.cc
++++ b/ui/views/widget/desktop_aura/desktop_native_widget_aura.cc
+@@ -569,6 +569,14 @@ Widget::Widgets DesktopNativeWidgetAura::GetOwnedDesktopWidgets() {
+ ////////////////////////////////////////////////////////////////////////////////
+ // DesktopNativeWidgetAura, internal::NativeWidgetPrivate implementation:
+ void DesktopNativeWidgetAura::InitNativeWidget(Widget::InitParams params) {
++#if defined(VENETIUM_W10M)
++  // On Windows 10 Mobile every widget is a NativeWidgetAura under the
++  // engine's one root (chrome/browser/ui/views/native_widget_factory.cc). A
++  // desktop widget would bring a second compositor with nothing to show it,
++  // whose frames the engine would take for the root's: better to know at
++  // once which one slipped through.
++  LOG(FATAL) << "a desktop widget on Windows 10 Mobile: " << params.name;
++#endif
+   ownership_ = params.ownership;
+   widget_type_ = params.type;
+   name_ = params.name;
