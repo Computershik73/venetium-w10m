@@ -61,6 +61,29 @@ VenetiumW10m.exe (cl.exe, C++/WinRT, XAML)          venetium_engine.dll (clang-c
   into `base::PathService` before anything asks `SHGetKnownFolderPath`, which the
   phone does not have.
 
+### Chrome's own interface (in progress)
+
+As gecko-w10m moved from a XAML shell to Firefox drawing its own interface, the
+engine now carries Chrome's browser layer (`//chrome`) and runs Chrome's own
+startup, single-process, in the same DLL; the shell's address bar, tabs and menu
+give way to Chrome's, drawn into the same panel. `--vw-ui=shell` (engine switches)
+keeps the XAML interface, and two runs that end before Chrome's window has shown
+bring it back by themselves (`browser/vw_interface_guard.h`).
+
+* `chrome/vw_chrome_run.cc` does what `chrome.exe` and `chrome_elf.dll` do before
+  `ChromeMain` (install details, per-user; Chrome's switches; the profile in
+  `LocalState\User Data`); `chrome/vw_chrome_elf.cc` answers `chrome_elf`'s exports.
+* `VwChromeMainDelegate` / `VwChromeBrowserClient` / `VwChromeRendererClient`
+  subclass Chrome's; `VwChromeExtraParts` adds the engine's stages: the frame sink,
+  the phone's screen, the window Chrome's interface goes into, the shell's queue.
+* Every Chrome widget is a `NativeWidgetAura` under the engine's one aura root,
+  as on ChromeOS (patch 0034); `browser/vw_window_manager.cc` is ash in small
+  (containers, focus and activation, maximized windows, tooltips, modality).
+* What the shell asks of tabs goes to `VwChromeHost` (`browser/vw_chrome_bridge.h`):
+  URLs from outside, the back button, suspend, tab discarding, quit.
+* Chrome's resources (`resources.pak`, `chrome_100/200_percent.pak`, two locales)
+  are built into `out/w10m/vw_chrome` and packaged beside the DLL.
+
 ## The base tree
 
 The engine is Chromium **150.0.7871.222** (Google's lite source tarball), plus
