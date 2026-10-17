@@ -53,8 +53,13 @@ VW_EXPORT void venetium_w10m_set_logger(venetium_w10m_log_fn fn) {
 }
 
 VW_EXPORT void venetium_w10m_quit(void) {
-  Post(base::BindOnce(
-      [](VwBrowser*) { venetium_w10m::QuitBrowserMainLoop(); }));
+  Post(base::BindOnce([](VwBrowser* browser) {
+    if (browser->chrome()) {
+      browser->chrome()->Quit();
+    } else {
+      venetium_w10m::QuitBrowserMainLoop();
+    }
+  }));
 }
 
 VW_EXPORT void venetium_w10m_app_state(int32_t suspended) {

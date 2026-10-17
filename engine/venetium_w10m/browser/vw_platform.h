@@ -23,6 +23,7 @@
 #include <memory>
 #include <string>
 
+#include "base/functional/callback.h"
 #include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/time/time.h"
@@ -108,16 +109,23 @@ class VwPlatform {
  public:
   // |window_manager|: Chrome's own interface runs in the host, and the
   // windows it opens are managed as a window manager would
-  // (vw_window_manager.h). Otherwise the host holds the shell's tabs' pages
-  // and their popups, and needs no more than one focused window.
+  // (vw_window_manager.h), whose |windows_changed| says when a window came,
+  // went or changed. Otherwise the host holds the shell's tabs' pages and
+  // their popups, and needs no more than one focused window.
   VwPlatform(const gfx::Size& content_pixels,
              const gfx::Size& screen_pixels,
              float scale,
-             bool window_manager = false);
+             bool window_manager = false,
+             base::RepeatingClosure windows_changed = {});
   ~VwPlatform();
 
   // The one there is, UI thread; null before it is made and after it goes.
   static VwPlatform* Get();
+
+  // The phone's screen as display::Screen, before the platform exists
+  // (Chrome's interface: before Chrome makes a desktop one). The platform
+  // takes it over, and it stays for the rest of the process.
+  static void InstallScreen(const gfx::Size& screen_pixels, float scale);
 
   VwWindowTreeHost* host() { return host_.get(); }
   aura::Window* root() { return host_->window(); }
@@ -152,7 +160,9 @@ class VwPlatform {
   base::TimeTicks EventTime(int64_t time_qpc);
   void Dispatch(ui::Event* event);
 
-  std::unique_ptr<VwScreen> screen_;
+  // Owned unless InstallScreen made it; |screen_| is it either way.
+  std::unique_ptr<VwScreen> owned_screen_;
+  raw_ptr<VwScreen> screen_ = nullptr;
   std::unique_ptr<VwWindowTreeHost> host_;
   std::unique_ptr<aura::client::FocusClient> focus_client_;
   std::unique_ptr<aura::client::DefaultCaptureClient> capture_client_;

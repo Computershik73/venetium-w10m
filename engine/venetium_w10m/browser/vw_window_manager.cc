@@ -56,10 +56,12 @@ class VwWindowManager::Layout : public aura::LayoutManager,
 
   Layout(aura::Window* container,
          Kind kind,
-         base::RepeatingCallback<void(bool)> fullscreen_changed)
+         base::RepeatingCallback<void(bool)> fullscreen_changed,
+         base::RepeatingClosure windows_changed)
       : container_(container),
         kind_(kind),
-        fullscreen_changed_(std::move(fullscreen_changed)) {}
+        fullscreen_changed_(std::move(fullscreen_changed)),
+        windows_changed_(std::move(windows_changed)) {}
   Layout(const Layout&) = delete;
   Layout& operator=(const Layout&) = delete;
   ~Layout() override = default;
@@ -76,6 +78,7 @@ class VwWindowManager::Layout : public aura::LayoutManager,
     }
     Place(child);
     UpdateFullscreen();
+    Changed();
   }
   void OnWillRemoveWindowFromLayout(aura::Window* child) override {
     if (observations_.IsObservingSource(child)) {
@@ -84,10 +87,12 @@ class VwWindowManager::Layout : public aura::LayoutManager,
   }
   void OnWindowRemovedFromLayout(aura::Window* child) override {
     UpdateFullscreen();
+    Changed();
   }
   void OnChildWindowVisibilityChanged(aura::Window* child,
                                       bool visible) override {
     UpdateFullscreen();
+    Changed();
   }
   void SetChildBounds(aura::Window* child,
                       const gfx::Rect& requested_bounds) override {
@@ -101,10 +106,17 @@ class VwWindowManager::Layout : public aura::LayoutManager,
     if (key == aura::client::kShowStateKey) {
       Place(window);
       UpdateFullscreen();
+      Changed();
     }
   }
 
  private:
+  void Changed() {
+    if (windows_changed_) {
+      windows_changed_.Run();
+    }
+  }
+
   gfx::Rect Target(const aura::Window* child, const gfx::Rect& requested) {
     const gfx::Rect area(container_->bounds().size());
     if (kind_ == Kind::kFill || FillsTheScreen(child)) {
@@ -141,6 +153,7 @@ class VwWindowManager::Layout : public aura::LayoutManager,
   raw_ptr<aura::Window> container_;
   const Kind kind_;
   base::RepeatingCallback<void(bool)> fullscreen_changed_;
+  base::RepeatingClosure windows_changed_;
   bool fullscreen_ = false;
   base::ScopedMultiSourceObservation<aura::Window, aura::WindowObserver>
       observations_{this};
@@ -205,17 +218,25 @@ class VwWindowManager::Rules : public wm::BaseFocusRules {
 
 VwWindowManager::VwWindowManager(
     aura::Window* root,
-    base::RepeatingCallback<void(bool)> fullscreen_changed)
-    : root_(root) {
-  root_->SetLayoutManager(std::make_unique<Layout>(
-      root_, Layout::Kind::kFill, base::RepeatingCallback<void(bool)>()));
+    base::RepeatingCallback<void(bool)> fullscreen_changed,
+    base::RepeatingClosure windows_changed)
+    : root_(root), windows_changed_(std::move(windows_changed)) {
+  root_->SetLayoutManager(
+      std::make_unique<Layout>(root_, Layout::Kind::kFill,
+                               base::RepeatingCallback<void(bool)>(),
+                               base::RepeatingClosure()));
   windows_ = MakeContainer("VwWindowsContainer");
   menus_ = MakeContainer("VwMenusContainer");
   top_ = MakeContainer("VwTopContainer");
   windows_->SetLayoutManager(std::make_unique<Layout>(
-      windows_, Layout::Kind::kWindows, std::move(fullscreen_changed)));
+      windows_, Layout::Kind::kWindows, std::move(fullscreen_changed),
+      windows_changed_));
+  menus_->SetLayoutManager(std::make_unique<Layout>(
+      menus_, Layout::Kind::kWindows, base::RepeatingCallback<void(bool)>(),
+      windows_changed_));
   top_->SetLayoutManager(std::make_unique<Layout>(
-      top_, Layout::Kind::kWindows, base::RepeatingCallback<void(bool)>()));
+      top_, Layout::Kind::kWindows, base::RepeatingCallback<void(bool)>(),
+      windows_changed_));
 
   // The first of the root's event handlers: a window-modal dialog takes the
   // events of the window it belongs to before anything else sees them.
@@ -226,6 +247,7 @@ VwWindowManager::VwWindowManager(
   wm::SetActivationClient(root_, focus_controller_.get());
   // A tap activates the window it lands in, and focuses it.
   root_->AddPreTargetHandler(focus_controller_.get());
+  focus_controller_->AddObserver(this);
 
   parenting_ = std::make_unique<Parenting>(this);
   aura::client::SetWindowParentingClient(root_, parenting_.get());
@@ -251,11 +273,21 @@ VwWindowManager::~VwWindowManager() {
   tooltips_.reset();
   aura::client::SetWindowParentingClient(root_, nullptr);
   parenting_.reset();
+  focus_controller_->RemoveObserver(this);
   root_->RemovePreTargetHandler(focus_controller_.get());
   wm::SetActivationClient(root_, nullptr);
   aura::client::SetFocusClient(root_, nullptr);
   focus_controller_.reset();
   modality_.reset();
+}
+
+void VwWindowManager::OnWindowActivated(
+    wm::ActivationChangeObserver::ActivationReason reason,
+    aura::Window* gained_active,
+    aura::Window* lost_active) {
+  if (windows_changed_) {
+    windows_changed_.Run();
+  }
 }
 
 aura::Window* VwWindowManager::MakeContainer(const char* name) {

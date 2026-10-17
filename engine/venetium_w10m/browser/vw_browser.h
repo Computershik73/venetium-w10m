@@ -3,6 +3,11 @@
 // The browser on its UI thread: the window (VwPlatform), the tabs, which one
 // is on screen, and the answers to what the shell asks of them. Lives from
 // BrowserMainParts::PreMainMessageLoopRun to PostMainMessageLoopRun.
+//
+// When Chrome's own interface runs, Chrome has the tabs: this keeps the
+// window, the clipboard and the memory arbiter, and passes what the shell
+// asks of tabs to Chrome (VwChromeBridge). It lives from Chrome's
+// PreProfileInit to PostMainMessageLoopRun then.
 
 #ifndef VENETIUM_W10M_BROWSER_VW_BROWSER_H_
 #define VENETIUM_W10M_BROWSER_VW_BROWSER_H_
@@ -18,6 +23,7 @@
 #include "base/memory/weak_ptr.h"
 #include "base/time/time.h"
 #include "url/gurl.h"
+#include "venetium_w10m/browser/vw_chrome_bridge.h"
 #include "venetium_w10m/browser/vw_clipboard.h"
 #include "venetium_w10m/browser/vw_dialogs.h"
 #include "venetium_w10m/browser/vw_engine.h"
@@ -35,7 +41,11 @@ class VwTab;
 
 class VwBrowser {
  public:
-  VwBrowser(VwBrowserContext* context, const EngineConfig& config);
+  // |chrome|: Chrome's own interface runs, and has the tabs; |context| is
+  // null then.
+  VwBrowser(VwBrowserContext* context,
+            const EngineConfig& config,
+            std::unique_ptr<VwChromeBridge> chrome = nullptr);
   VwBrowser(const VwBrowser&) = delete;
   VwBrowser& operator=(const VwBrowser&) = delete;
   ~VwBrowser();
@@ -45,6 +55,8 @@ class VwBrowser {
   VwClipboard* clipboard() { return &clipboard_; }
   VwBrowserContext* context() { return context_; }
   VwMemory* memory() { return &memory_; }
+  // Null unless Chrome's own interface runs.
+  VwChromeBridge* chrome() { return chrome_.get(); }
 
   // A new tab under |id| (from VwEngine::NextTabId), showing |url| unless it
   // is empty.
@@ -95,6 +107,8 @@ class VwBrowser {
  private:
   VwTab* AddTab(std::unique_ptr<VwTab> tab, bool select);
   void PublishSelection();
+  // A window came, went, or changed in the platform's window manager.
+  void OnWindowsChanged();
   // The tab on screen opened |tab| (window.open) or was opened by it, and
   // the two can still reach each other from script.
   bool TiedToSelected(VwTab* tab);
@@ -106,6 +120,8 @@ class VwBrowser {
   raw_ptr<VwBrowserContext> context_;
   std::unique_ptr<VwPlatform> platform_;
   VwDialogs dialogs_;
+  // After the platform: Chrome's windows are in its root.
+  std::unique_ptr<VwChromeBridge> chrome_;
   std::map<int32_t, std::unique_ptr<VwTab>> tabs_;
   // Tabs in the order they were selected, newest last: closing the visible
   // tab goes back to the one seen before it.

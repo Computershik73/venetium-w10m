@@ -88,6 +88,8 @@ struct Events {
   // Chrome's menu asked for something of the shell's (1 About, 2 the log,
   // 3 engine switches, 4 copy the logs).
   std::function<void(int32_t command)> shellCommand;
+  // Chrome asks for a file to be opened, or a folder shown.
+  std::function<void(std::wstring path, bool folder)> openPath;
   // venetium_w10m_run returned: the engine has ended, for good.
   std::function<void(int32_t code)> engineStopped;
 };
@@ -147,6 +149,7 @@ class EngineHost {
                             int32_t mode);
   static void OnClipboardSet(const char* text);
   static void OnShellCommand(int32_t command);
+  static void OnOpenPath(const char* path, int32_t folder);
 
   HMODULE module_ = nullptr;
   Api api_;

@@ -67,6 +67,28 @@ int VwBrowserMainParts::PreEarlyInitialization() {
 
 int VwBrowserMainParts::PreMainMessageLoopRun() {
   NoteF("browser: main loop starting");
+  TuneBrowserProcess();
+  VwEngine* engine = VwEngine::Get();
+  const EngineConfig config = engine->config();
+  browser_context_ =
+      std::make_unique<VwBrowserContext>(config.profile_dir, config.cache_dir);
+  browser_ = std::make_unique<VwBrowser>(browser_context_.get(), config);
+
+  // The first tab, before the shell's queued requests run: an "open this
+  // URL" that arrived while the engine was starting then goes into a tab of
+  // its own.
+  const GURL first = config.initial_url.empty()
+                         ? GURL("about:blank")
+                         : VwBrowser::ResolveText(config.initial_url);
+  browser_->CreateTab(engine->NextTabId(), first, true, 0);
+
+  engine->BrowserStarted(browser_.get(),
+                         base::SingleThreadTaskRunner::GetCurrentDefault());
+  NoteF("browser: ready");
+  return content::RESULT_CODE_NORMAL_EXIT;
+}
+
+void TuneBrowserProcess() {
   // Timers to the millisecond on a battery too. base asks winmm for a 1 ms
   // timer period only on external power and for 8 ms on a battery
   // (base/time/time_win.cc), which is what a phone runs on -- and every
@@ -92,24 +114,6 @@ int VwBrowserMainParts::PreMainMessageLoopRun() {
           discardable_memory::DiscardableSharedMemoryManager::Get()) {
     discardable->SetMaxBytes(64 * 1024 * 1024);
   }
-  VwEngine* engine = VwEngine::Get();
-  const EngineConfig config = engine->config();
-  browser_context_ =
-      std::make_unique<VwBrowserContext>(config.profile_dir, config.cache_dir);
-  browser_ = std::make_unique<VwBrowser>(browser_context_.get(), config);
-
-  // The first tab, before the shell's queued requests run: an "open this
-  // URL" that arrived while the engine was starting then goes into a tab of
-  // its own.
-  const GURL first = config.initial_url.empty()
-                         ? GURL("about:blank")
-                         : VwBrowser::ResolveText(config.initial_url);
-  browser_->CreateTab(engine->NextTabId(), first, true, 0);
-
-  engine->BrowserStarted(browser_.get(),
-                         base::SingleThreadTaskRunner::GetCurrentDefault());
-  NoteF("browser: ready");
-  return content::RESULT_CODE_NORMAL_EXIT;
 }
 
 void VwBrowserMainParts::WillRunMainMessageLoop(

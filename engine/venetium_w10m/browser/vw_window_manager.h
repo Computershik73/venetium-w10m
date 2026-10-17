@@ -26,6 +26,7 @@
 
 #include "base/functional/callback.h"
 #include "base/memory/raw_ptr.h"
+#include "ui/wm/public/activation_change_observer.h"
 
 namespace aura {
 class Window;
@@ -47,15 +48,24 @@ class WindowModalityController;
 
 namespace venetium_w10m {
 
-class VwWindowManager {
+class VwWindowManager : public wm::ActivationChangeObserver {
  public:
   // |fullscreen_changed| hears whether any window is fullscreen, when that
   // changes (the shell hides the phone's status bar for it).
+  // |windows_changed| hears of a window that came, went, was shown or
+  // hidden, was activated, or went into or out of fullscreen: what the
+  // phone's back button would act on may be different.
   VwWindowManager(aura::Window* root,
-                  base::RepeatingCallback<void(bool)> fullscreen_changed);
+                  base::RepeatingCallback<void(bool)> fullscreen_changed,
+                  base::RepeatingClosure windows_changed);
   VwWindowManager(const VwWindowManager&) = delete;
   VwWindowManager& operator=(const VwWindowManager&) = delete;
-  ~VwWindowManager();
+  ~VwWindowManager() override;
+
+  // wm::ActivationChangeObserver:
+  void OnWindowActivated(wm::ActivationChangeObserver::ActivationReason reason,
+                         aura::Window* gained_active,
+                         aura::Window* lost_active) override;
 
   wm::FocusController* focus_controller() { return focus_controller_.get(); }
   aura::Window* windows_container() { return windows_; }
@@ -69,6 +79,7 @@ class VwWindowManager {
   bool IsContainer(const aura::Window* window) const;
 
   raw_ptr<aura::Window> root_;
+  base::RepeatingClosure windows_changed_;
   // Owned by the root window.
   raw_ptr<aura::Window> windows_ = nullptr;
   raw_ptr<aura::Window> menus_ = nullptr;

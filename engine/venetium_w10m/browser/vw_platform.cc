@@ -55,6 +55,10 @@ constexpr int kMaxCompositorFrameAsks = 120;
 
 VwPlatform* g_platform = nullptr;
 
+// Made by InstallScreen, never destroyed: Chrome asks display::Screen for
+// the display until the process ends.
+VwScreen* g_installed_screen = nullptr;
+
 // A page in fullscreen, or Chrome's window: the shell hides the status bar.
 void TellFullscreen(bool on) {
   VwEngine::Get()->fullscreen.store(on);
@@ -276,17 +280,35 @@ VwPlatform* VwPlatform::Get() {
   return g_platform;
 }
 
+// static
+void VwPlatform::InstallScreen(const gfx::Size& screen_pixels, float scale) {
+  if (g_installed_screen) {
+    g_installed_screen->Update(screen_pixels, scale);
+    return;
+  }
+  g_installed_screen = new VwScreen(screen_pixels, scale);
+  display::Screen::SetScreenInstance(g_installed_screen);
+}
+
 VwPlatform::VwPlatform(const gfx::Size& content_pixels,
                        const gfx::Size& screen_pixels,
                        float scale,
-                       bool window_manager)
+                       bool window_manager,
+                       base::RepeatingClosure windows_changed)
     : screen_pixels_(screen_pixels), scale_(scale) {
   g_platform = this;
   // The screen first: the host asks it for the scale as soon as it is
   // initialised.
-  screen_ = std::make_unique<VwScreen>(
-      screen_pixels.IsEmpty() ? content_pixels : screen_pixels, scale);
-  display::Screen::SetScreenInstance(screen_.get());
+  const gfx::Size screen_size =
+      screen_pixels.IsEmpty() ? content_pixels : screen_pixels;
+  if (g_installed_screen) {
+    screen_ = g_installed_screen;
+    screen_->Update(screen_size, scale);
+  } else {
+    owned_screen_ = std::make_unique<VwScreen>(screen_size, scale);
+    screen_ = owned_screen_.get();
+    display::Screen::SetScreenInstance(screen_);
+  }
 
   const gfx::Rect bounds(content_pixels.IsEmpty() ? gfx::Size(720, 1100)
                                                   : content_pixels);
@@ -299,7 +321,8 @@ VwPlatform::VwPlatform(const gfx::Size& content_pixels,
 
   if (window_manager) {
     window_manager_ = std::make_unique<VwWindowManager>(
-        root(), base::BindRepeating(&TellFullscreen));
+        root(), base::BindRepeating(&TellFullscreen),
+        std::move(windows_changed));
   } else {
     focus_client_ = std::make_unique<VwFocusClient>();
     aura::client::SetFocusClient(root(), focus_client_.get());
@@ -421,8 +444,11 @@ VwPlatform::~VwPlatform() {
   host_.reset();
   focus_client_.reset();
   input_method_.reset();
-  display::Screen::SetScreenInstance(nullptr);
-  screen_.reset();
+  screen_ = nullptr;
+  if (owned_screen_) {
+    display::Screen::SetScreenInstance(nullptr);
+    owned_screen_.reset();
+  }
   g_platform = nullptr;
 }
 

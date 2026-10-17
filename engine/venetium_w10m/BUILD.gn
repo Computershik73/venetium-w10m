@@ -9,6 +9,7 @@
 # here (--root-target), so only the engine and what it needs is in the graph.
 
 import("//build/config/win/w10m.gni")
+import("//chrome/chrome_paks.gni")
 import("//tools/grit/repack.gni")
 import("//tools/v8_context_snapshot/v8_context_snapshot.gni")
 
@@ -19,6 +20,7 @@ assert(is_win && current_cpu == "arm" && is_w10m,
 # Everything the package needs from this build.
 group("venetium_w10m") {
   deps = [
+    ":chrome_paks",
     ":venetium_engine",
     ":venetium_engine_pak",
   ]
@@ -47,7 +49,13 @@ group("probe") {
 
 shared_library("venetium_engine") {
   output_name = "venetium_engine"
-  defines = [ "VENETIUM_W10M_ENGINE_IMPLEMENTATION" ]
+  defines = [
+    "VENETIUM_W10M_ENGINE_IMPLEMENTATION",
+
+    # Chrome's own interface is in the engine (chrome/), as well as the
+    # shell's (--vw-ui=shell).
+    "VW_CHROME_INTERFACE",
+  ]
 
   sources = [
     "app/vw_content_client.cc",
@@ -63,6 +71,7 @@ shared_library("venetium_engine") {
     "browser/vw_browser_context.h",
     "browser/vw_browser_main_parts.cc",
     "browser/vw_browser_main_parts.h",
+    "browser/vw_chrome_bridge.h",
     "browser/vw_clipboard.cc",
     "browser/vw_clipboard.h",
     "browser/vw_dialogs.cc",
@@ -89,6 +98,8 @@ shared_library("venetium_engine") {
     "browser/vw_tab.h",
     "browser/vw_vsync.cc",
     "browser/vw_vsync.h",
+    "browser/vw_window_manager.cc",
+    "browser/vw_window_manager.h",
     "capi/venetium_w10m_capi.cc",
     "capi/venetium_w10m_capi.h",
     "common/vw_delay_load.cc",
@@ -98,6 +109,28 @@ shared_library("venetium_engine") {
     "common/vw_user_agent.h",
     "renderer/vw_renderer_client.cc",
     "renderer/vw_renderer_client.h",
+
+    # Chrome's own interface: Chrome's startup as chrome.dll runs it (its
+    # main delegate is compiled here, as it is into chrome.dll), and the
+    # engine's pieces fitted to it.
+    "//chrome/app/chrome_main_delegate.cc",
+    "//chrome/app/chrome_main_delegate.h",
+    "//chrome/app/startup_timestamps.h",
+    "chrome/vw_browser_native_widget.cc",
+    "chrome/vw_browser_native_widget.h",
+    "chrome/vw_chrome_browser_client.cc",
+    "chrome/vw_chrome_browser_client.h",
+    "chrome/vw_chrome_elf.cc",
+    "chrome/vw_chrome_extra_parts.cc",
+    "chrome/vw_chrome_extra_parts.h",
+    "chrome/vw_chrome_host.cc",
+    "chrome/vw_chrome_host.h",
+    "chrome/vw_chrome_main_delegate.cc",
+    "chrome/vw_chrome_main_delegate.h",
+    "chrome/vw_chrome_renderer_client.cc",
+    "chrome/vw_chrome_renderer_client.h",
+    "chrome/vw_chrome_run.cc",
+    "chrome/vw_chrome_run.h",
   ]
 
   deps = [
@@ -135,9 +168,38 @@ shared_library("venetium_engine") {
     "//gpu/config",
     "//ui/wm",
     "//url",
+
+    # What chrome.dll is made of (//chrome:chrome_dll), less chrome_elf
+    # (a DLL of its own: chrome/vw_chrome_elf.cc answers for it) and
+    # install_static's secondary module (which imports from chrome_elf).
+    "//chrome:dependencies",
+    "//chrome/app:chrome_dll_resources",
+    "//chrome/app:command_ids",
+    "//chrome/app/theme:chrome_unscaled_resources",
+    "//chrome/browser:chrome_content_browser_client",
+    "//chrome/browser:chrome_process_singleton",
+    "//chrome/browser:process_singleton",
+    "//chrome/browser:startup_data",
+    "//chrome/browser/lifetime",
+    "//chrome/browser/win:isolated_browser_support",
+    "//chrome/common:buildflags",
+    "//chrome/common:version_header",
+    "//chrome/common/profiler",
+    "//chrome/install_static:install_static_util",
+    "//components/crash/core/app",
+    "//components/memory_system",
+    "//components/policy:generated",
+    "//components/webapps/isolated_web_apps:scheme",
+    "//crypto",
+    "//net:net_resources",
+    "//third_party/cld_3/src/src:cld_3",
+    "//third_party/wtl",
+    "//ui/compositor",
+    "//ui/views",
   ]
 
   data_deps = [
+    ":chrome_paks",
     ":venetium_engine_pak",
     "//third_party/icu:icudata",
   ]
@@ -170,6 +232,45 @@ shared_library("venetium_engine") {
     "/DELAYLOAD:version.dll",
     "/DELAYLOAD:winmm.dll",
     "/DELAYLOAD:ws2_32.dll",
+  ]
+}
+
+# Chrome's resources, for its interface: resources.pak, the 100% and 200%
+# scale sets (a phone at 350% scales the 200% bitmaps; most of Chrome's
+# icons are vectors) and the locales the shell speaks -- not Chrome's 228.
+# Into vw_chrome/ under the build directory; the package puts them beside
+# the engine DLL, where Chrome looks for them (DIR_ASSETS).
+_vw_chrome_paks_dir = "$root_out_dir/vw_chrome"
+
+chrome_repack_percent("chrome_paks_100_percent") {
+  percent = "100"
+  output_dir = _vw_chrome_paks_dir
+}
+
+chrome_repack_percent("chrome_paks_200_percent") {
+  percent = "200"
+  output_dir = _vw_chrome_paks_dir
+}
+
+chrome_extra_paks("chrome_paks_extra") {
+  output_dir = _vw_chrome_paks_dir
+}
+
+chrome_repack_locales("chrome_paks_locales") {
+  input_locales = [
+    "en-US",
+    "ru",
+  ]
+  output_locales = input_locales
+  output_dir = "$_vw_chrome_paks_dir/locales"
+}
+
+group("chrome_paks") {
+  public_deps = [
+    ":chrome_paks_100_percent",
+    ":chrome_paks_200_percent",
+    ":chrome_paks_extra",
+    ":chrome_paks_locales",
   ]
 }
 

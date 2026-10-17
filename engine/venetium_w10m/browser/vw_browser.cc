@@ -26,25 +26,44 @@
 
 namespace venetium_w10m {
 
-VwBrowser::VwBrowser(VwBrowserContext* context, const EngineConfig& config)
+VwBrowser::VwBrowser(VwBrowserContext* context,
+                     const EngineConfig& config,
+                     std::unique_ptr<VwChromeBridge> chrome)
     : context_(context),
       platform_(std::make_unique<VwPlatform>(
           config.size,
           config.screen,
-          static_cast<float>(config.scale))) {}
+          static_cast<float>(config.scale),
+          /*window_manager=*/chrome != nullptr,
+          base::BindRepeating(&VwBrowser::OnWindowsChanged,
+                              base::Unretained(this)))),
+      chrome_(std::move(chrome)) {}
 
 VwBrowser::~VwBrowser() {
   // Tabs first: their WebContents' windows live in the platform's root.
   while (!tabs_.empty()) {
     tabs_.erase(tabs_.begin());
   }
+  chrome_.reset();
   platform_.reset();
+}
+
+void VwBrowser::OnWindowsChanged() {
+  if (chrome_) {
+    chrome_->UpdateBackState();
+  }
 }
 
 VwTab* VwBrowser::CreateTab(int32_t id,
                             const GURL& url,
                             bool select,
                             int32_t opener) {
+  if (chrome_) {
+    if (url.is_valid()) {
+      chrome_->OpenUrl(url);
+    }
+    return nullptr;
+  }
   content::WebContents::CreateParams params(context_);
   params.initially_hidden = !select;
   std::unique_ptr<content::WebContents> contents =
@@ -218,6 +237,11 @@ GURL VwBrowser::ResolveText(const std::string& text) {
 }
 
 void VwBrowser::NavigateText(int32_t id, const std::string& text) {
+  if (chrome_) {
+    // Chrome has its own address bar; text from the shell opens a tab.
+    CreateTab(0, ResolveText(text), true, 0);
+    return;
+  }
   VwTab* target = tab(id);
   if (!target) {
     target = selected();
@@ -234,6 +258,10 @@ void VwBrowser::NavigateText(int32_t id, const std::string& text) {
 }
 
 void VwBrowser::BackButton() {
+  if (chrome_) {
+    chrome_->Back();
+    return;
+  }
   VwTab* tab = selected();
   if (!tab) {
     return;
@@ -275,6 +303,9 @@ void VwBrowser::AppStateChanged(bool suspended) {
   platform_->SetActive(!suspended);
   if (!suspended) {
     NoteF("app resumed");
+    if (chrome_) {
+      chrome_->Resumed();
+    }
     memory_.OnAppState(false);
     return;
   }
@@ -285,11 +316,15 @@ void VwBrowser::AppStateChanged(bool suspended) {
   // The phone usually ends a suspended app without another word: cookies and
   // local storage are written out now.
   NoteF("app suspending: flushing storage");
-  content::StoragePartition* partition =
-      context_->GetDefaultStoragePartition();
-  partition->GetCookieManagerForBrowserProcess()->FlushCookieStore(
-      base::DoNothing());
-  partition->Flush();
+  if (chrome_) {
+    chrome_->Suspending();
+  } else {
+    content::StoragePartition* partition =
+        context_->GetDefaultStoragePartition();
+    partition->GetCookieManagerForBrowserProcess()->FlushCookieStore(
+        base::DoNothing());
+    partition->Flush();
+  }
   memory_.OnAppState(true);
 }
 
@@ -332,6 +367,9 @@ const char* VwBrowser::WhyKept(VwTab* tab, base::TimeDelta spare) {
 }
 
 int VwBrowser::UnloadableTabs(base::TimeDelta spare) {
+  if (chrome_) {
+    return chrome_->DiscardableTabs(spare);
+  }
   int count = 0;
   for (auto& [id, tab] : tabs_) {
     if (id != selected_ && !WhyKept(tab.get(), spare)) {
@@ -344,6 +382,9 @@ int VwBrowser::UnloadableTabs(base::TimeDelta spare) {
 int VwBrowser::UnloadBackgroundTabs(int limit,
                                     base::TimeDelta spare,
                                     const char* cause) {
+  if (chrome_) {
+    return chrome_->DiscardBackgroundTabs(limit, spare, cause);
+  }
   std::vector<VwTab*> candidates;
   for (auto& [id, tab] : tabs_) {
     if (id != selected_ && !WhyKept(tab.get(), spare)) {
@@ -375,6 +416,10 @@ int VwBrowser::UnloadBackgroundTabs(int limit,
 }
 
 void VwBrowser::NoteKeptTabs(base::TimeDelta spare) {
+  if (chrome_) {
+    Note("memory: no background tab to discard");
+    return;
+  }
   std::string kept;
   int unloaded = 0;
   for (auto& [id, tab] : tabs_) {

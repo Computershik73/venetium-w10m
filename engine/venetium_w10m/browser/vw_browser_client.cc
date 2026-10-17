@@ -91,6 +91,15 @@ void VwContentBrowserClient::OverrideWebPreferences(
     content::WebContents* web_contents,
     content::SiteInstance& main_frame_site,
     blink::web_pref::WebPreferences* prefs) {
+  // The tab's own mode, which changes together with a reload of its page;
+  // the switch's while the tab is being made.
+  VwTab* tab = VwTab::FromWebContents(web_contents);
+  ApplyPhoneWebPreferences(
+      !(tab ? tab->desktop() : VwEngine::Get()->desktop_mode.load()), prefs);
+}
+
+void ApplyPhoneWebPreferences(bool mobile,
+                              blink::web_pref::WebPreferences* prefs) {
   // A touch screen, whatever GetSystemMetrics says on a phone (its user32 is
   // a stub): pages get touch events and (pointer: coarse).
   prefs->touch_event_feature_detection_enabled = true;
@@ -104,11 +113,6 @@ void VwContentBrowserClient::OverrideWebPreferences(
   // How Chrome for Android lays out pages: <meta name=viewport> honoured,
   // pages without one laid out at 980 CSS pixels and zoomed to fit, pinch and
   // double-tap zoom. The desktop-site switch turns all of this off.
-  // The tab's own mode, which changes together with a reload of its page;
-  // the switch's while the tab is being made.
-  VwTab* tab = VwTab::FromWebContents(web_contents);
-  const bool mobile =
-      !(tab ? tab->desktop() : VwEngine::Get()->desktop_mode.load());
   prefs->viewport_enabled = true;
   prefs->viewport_meta_enabled = mobile;
   prefs->viewport_style = mobile ? blink::mojom::ViewportStyle::kMobile

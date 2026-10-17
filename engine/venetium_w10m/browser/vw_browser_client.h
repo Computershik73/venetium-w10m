@@ -10,6 +10,10 @@
 #include "base/memory/raw_ptr.h"
 #include "content/public/browser/content_browser_client.h"
 
+namespace blink::web_pref {
+struct WebPreferences;
+}  // namespace blink::web_pref
+
 namespace venetium_w10m {
 
 class VwBrowserMainParts;
@@ -17,6 +21,11 @@ class VwBrowserMainParts;
 // The locale the engine runs in, and the Accept-Language list made from it.
 std::string ApplicationLocale();
 std::string AcceptLanguages();
+
+// A phone's touch screen, and pages laid out as Chrome for Android lays
+// them out -- unless |mobile| is false (the desktop site).
+void ApplyPhoneWebPreferences(bool mobile,
+                              blink::web_pref::WebPreferences* prefs);
 
 class VwContentBrowserClient : public content::ContentBrowserClient {
  public:

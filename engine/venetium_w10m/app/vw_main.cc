@@ -41,6 +41,10 @@
 #include "venetium_w10m/capi/venetium_w10m_capi.h"
 #include "venetium_w10m/common/vw_log.h"
 
+#if defined(VW_CHROME_INTERFACE)
+#include "venetium_w10m/chrome/vw_chrome_run.h"
+#endif
+
 namespace venetium_w10m {
 
 namespace {
@@ -552,6 +556,17 @@ extern "C" VW_EXPORT int32_t venetium_w10m_run(
 
   SetUpCommandLine(engine_config);
   SetUpPaths(engine_config);
+
+#if defined(VW_CHROME_INTERFACE)
+  if (ChromeInterface(engine_config.switches, engine_config.profile_dir)) {
+    base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
+    AddChromeSwitches(engine_config, command_line);
+    NoteF("command line for Chrome: %s",
+          base::WideToUTF8(command_line->GetCommandLineString()));
+    SetUpChromePaths(engine_config);
+    return RunChrome(ThisModule());
+  }
+#endif
 
   VwMainDelegate delegate;
   content::ContentMainParams params(&delegate);

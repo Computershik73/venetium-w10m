@@ -232,6 +232,9 @@ typedef struct {
   // Chrome's menu asked for something the shell does: 1 About, 2 the log,
   // 3 the engine switches, 4 copy the logs to Pictures.
   void (*shell_command)(int32_t command);
+  // Chrome asks for a file to be opened (folder 0: a download, with the
+  // app that takes it) or a folder to be shown (folder 1). UTF-8 path.
+  void (*open_path)(const char* path, int32_t folder);
 } venetium_w10m_events;
 
 VW_EXPORT void venetium_w10m_set_event_sink(const venetium_w10m_events* sink);

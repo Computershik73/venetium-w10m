@@ -545,6 +545,31 @@ void MainPage::WireEngineEvents() {
         break;
     }
   };
+  events.openPath = [this](std::wstring path, bool folder) {
+    Log::Write(folder ? L"open folder" : L"open file", path);
+    [](MainPage* page, std::wstring path, bool folder)
+        -> winrt::fire_and_forget {
+      bool opened = false;
+      try {
+        if (folder) {
+          auto dir = co_await StorageFolder::GetFolderFromPathAsync(path);
+          opened = co_await Launcher::LaunchFolderAsync(dir);
+        } else {
+          auto file = co_await StorageFile::GetFileFromPathAsync(path);
+          LauncherOptions options;
+          // No app for the type: the phone offers to look for one.
+          options.DisplayApplicationPicker(false);
+          opened = co_await Launcher::LaunchFileAsync(file, options);
+        }
+      } catch (winrt::hresult_error const& e) {
+        Log::Write(L"open: failed", std::wstring(e.message()));
+      }
+      if (!opened) {
+        page->ShowNotice(L"Nothing opens " +
+                         path.substr(path.find_last_of(L'\\') + 1));
+      }
+    }(this, std::move(path), folder);
+  };
   events.engineStopped = [this](int32_t code) { OnEngineStopped(code); };
   EngineHost::Get().SetEvents(std::move(events));
 }
@@ -597,8 +622,11 @@ void MainPage::Start(std::wstring initialUrl) {
   }
   // The panel the engine presents into, before it starts.
   if (Api().set_panel) Api().set_panel(winrt::get_abi(engineView_->Panel()));
-  params.initialUrl =
-      Narrow(initialUrl.empty() ? Settings::HomePage() : initialUrl);
+  // Chrome's interface opens what Chrome's own startup settings say (the
+  // new tab page, or the last session): only a URL from outside is passed.
+  params.initialUrl = Narrow(initialUrl.empty() && !chromeUi_
+                                 ? Settings::HomePage()
+                                 : initialUrl);
   ::CreateDirectoryW(params.profileDir.c_str(), nullptr);
 
   engineView_->WhenRoomKnown([this, params]() {

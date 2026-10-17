@@ -45,6 +45,11 @@ class VwBrowserMainParts : public content::BrowserMainParts {
 // Ends the browser's main loop (venetium_w10m_quit). UI thread.
 void QuitBrowserMainLoop();
 
+// What the browser process is told before the main loop, whoever runs it
+// (the shell's tabs or Chrome's interface): precise timers on a battery
+// too, and a ceiling on discardable memory. UI thread.
+void TuneBrowserProcess();
+
 }  // namespace venetium_w10m
 
 #endif  // VENETIUM_W10M_BROWSER_VW_BROWSER_MAIN_PARTS_H_

@@ -153,6 +153,7 @@ bool EngineHost::Load(winrt::Windows::UI::Core::CoreDispatcher const& dispatcher
       &EngineHost::OnDownloadDone, &EngineHost::OnDialog,
       &EngineHost::OnPermission,  &EngineHost::OnFileChooser,
       &EngineHost::OnClipboardSet, &EngineHost::OnShellCommand,
+      &EngineHost::OnOpenPath,
   };
   if (api_.set_event_sink) {
     api_.set_event_sink(&kEvents);
@@ -282,6 +283,12 @@ void EngineHost::OnClipboardSet(const char* text) {
 void EngineHost::OnShellCommand(int32_t command) {
   Get().Post([command]() {
     if (Get().events_.shellCommand) Get().events_.shellCommand(command);
+  });
+}
+
+void EngineHost::OnOpenPath(const char* path, int32_t folder) {
+  Get().Post([path = Widen(path), folder]() {
+    if (Get().events_.openPath) Get().events_.openPath(path, folder != 0);
   });
 }
 

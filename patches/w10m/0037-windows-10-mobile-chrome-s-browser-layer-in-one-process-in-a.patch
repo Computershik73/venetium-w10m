@@ -1,0 +1,501 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Sun, 18 Oct 2026 00:47:01 +0400
+Subject: [PATCH] Windows 10 Mobile: Chrome's browser layer in one process, in
+ an app
+
+What Chrome's own startup and first pages need on the phone, from a
+research pass over //chrome as it would run there (single-process, inside
+the engine DLL, no window system):
+- //chrome/common leaves out Chrome's delay-load failure hook: the
+  engine's turns a missing function into a failing call, Chrome's would
+  end the process (and the two would not link together).
+- ProcessSingleton::Create is true at once: one app instance, Chrome a
+  DLL in it, and no message window to find or be found through (it
+  CHECKed one).
+- The status tray exists but shows nowhere, with icons that do nothing:
+  several owners dereference the tray and its icons (WebUSB/HID device
+  icons, Glic), so it is no longer null.
+- No incognito, guest or second profile: the one in-process renderer
+  serves one storage partition (RenderProcessHostImpl CHECKs).
+- A single-process renderer is not a PDF renderer: Supermium's
+  pdf::IsPdfRenderer() says so of it, which took DOM storage and the
+  default CSP away from every page.
+- The PDF viewer finds its PDF as its own child frame (the one process is
+  never marked as a PDF renderer's).
+- Web Serial goes without a device monitor instead of observing null.
+- No jump list; no startup metrics (default browser via shell32, IFEO,
+  WMI, TPM key operations), which nobody reads in this build.
+- Printing: no print compositor (it would set up fonts and discardable
+  memory for the whole process again), one page a sheet (N-up runs
+  PDFium a second time in-process and CHECKs), and the printing and PDF
+  services keep the renderer's discardable allocator.
+- URLs of other apps, downloaded files and their folders go to a handler
+  the embedder sets (platform_util::SetW10mOpenHandler): the shell opens
+  them with the Windows Runtime launcher.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ ...chrome_browser_main_extra_parts_metrics.cc |  7 +++-
+ chrome/browser/platform_util.h                | 13 +++++++
+ chrome/browser/platform_util_win.cc           | 34 +++++++++++++++++
+ chrome/browser/prefs/incognito_mode_prefs.cc  |  8 ++++
+ chrome/browser/process_singleton_win.cc       |  8 ++++
+ chrome/browser/profiles/profiles_state.cc     | 11 ++++++
+ .../ui/views/status_icons/status_tray_win.cc  | 38 +++++++++++++++++--
+ .../webui/print_preview/print_preview_ui.cc   |  7 ++++
+ chrome/browser/win/jumplist_updater.cc        |  4 ++
+ chrome/common/BUILD.gn                        |  7 +++-
+ .../chrome_content_renderer_client.cc         | 17 ++++++++-
+ chrome/services/pdf/pdf_service.cc            |  8 ++++
+ chrome/services/printing/printing_service.cc  |  8 ++++
+ components/pdf/browser/pdf_frame_util.cc      | 11 ++++++
+ .../printing/browser/print_manager_utils.cc   |  8 ++++
+ .../serial/serial_device_enumerator_win.cc    |  8 +++-
+ 16 files changed, 187 insertions(+), 10 deletions(-)
+
+diff --git a/chrome/browser/metrics/chrome_browser_main_extra_parts_metrics.cc b/chrome/browser/metrics/chrome_browser_main_extra_parts_metrics.cc
+index a5ecdd00d2ce8f66772912b651f3a38302ec79fd..d37c48fcbad41a231f85ac4223046970a3b02d2e 100644
+--- a/chrome/browser/metrics/chrome_browser_main_extra_parts_metrics.cc
++++ b/chrome/browser/metrics/chrome_browser_main_extra_parts_metrics.cc
+@@ -1108,7 +1108,12 @@ void ChromeBrowserMainExtraPartsMetrics::PostBrowserStart() {
+                              base::BindOnce(&RecordLinuxDistro));
+ #endif
+ 
+-#if BUILDFLAG(IS_WIN)
++#if defined(VENETIUM_W10M)
++  // Not on Windows 10 Mobile: nobody reads these metrics (reporting is off
++  // in this build), and gathering them asks the shell which browser is the
++  // default, the registry for compatibility layers, WMI and the TPM -- a
++  // phone's CPU at start-up for nothing.
++#elif BUILDFLAG(IS_WIN)
+   // RecordStartupMetrics calls into shell_integration::GetDefaultBrowser(),
+   // which requires a COM thread on Windows.
+   base::ThreadPool::CreateCOMSTATaskRunner(kBestEffortTaskTraits)
+diff --git a/chrome/browser/platform_util.h b/chrome/browser/platform_util.h
+index 3b223314d75e7a3f4f1aa215ed70505c0ac9dccd..424909f78991d5a3dc7718abc49109ff04313872 100644
+--- a/chrome/browser/platform_util.h
++++ b/chrome/browser/platform_util.h
+@@ -5,6 +5,8 @@
+ #ifndef CHROME_BROWSER_PLATFORM_UTIL_H_
+ #define CHROME_BROWSER_PLATFORM_UTIL_H_
+ 
++#include <string>
++
+ #include "base/functional/callback_forward.h"
+ #include "build/build_config.h"
+ #include "chrome/common/buildflags.h"
+@@ -83,6 +85,17 @@ void OpenExternal(Profile* profile, const GURL& url);
+ void OpenExternal(const GURL& url);
+ #endif
+ 
++#if defined(VENETIUM_W10M)
++// Windows 10 Mobile has no ShellExecute and no Explorer: the app's shell
++// opens what Chrome hands out -- a URL of another app's (mailto:, tel:,
++// ms-settings:), a downloaded file, the folder a download is in -- through
++// the Windows Runtime launcher. The embedder sets the handler, which may be
++// called on any thread; with none set, nothing is opened.
++enum class W10mOpen { kUrl, kFile, kFolder };
++using W10mOpenHandler = void (*)(W10mOpen what, const std::string& target);
++void SetW10mOpenHandler(W10mOpenHandler handler);
++#endif
++
+ // Get the top level window for the native view. This can return NULL.
+ gfx::NativeWindow GetTopLevel(gfx::NativeView view);
+ 
+diff --git a/chrome/browser/platform_util_win.cc b/chrome/browser/platform_util_win.cc
+index 3b1c0fddde6841188a1f5ccecd44132fe5fd3ba9..54361f85b21c80c658fa713096d735112bc4bfc3 100644
+--- a/chrome/browser/platform_util_win.cc
++++ b/chrome/browser/platform_util_win.cc
+@@ -36,6 +36,18 @@ namespace platform_util {
+ 
+ namespace {
+ 
++#if defined(VENETIUM_W10M)
++W10mOpenHandler g_w10m_open = nullptr;
++
++void HandToShell(W10mOpen what, const std::string& target) {
++  if (g_w10m_open) {
++    g_w10m_open(what, target);
++  } else {
++    LOG(WARNING) << "Nothing opens " << target;
++  }
++}
++#endif
++
+ void ShowItemInFolderOnWorkerThread(const base::FilePath& full_path) {
+   base::ScopedBlockingCall scoped_blocking_call(FROM_HERE,
+                                                 base::BlockingType::MAY_BLOCK);
+@@ -116,7 +128,17 @@ void OpenExternalOnWorkerThread(const GURL& url) {
+ 
+ }  // namespace
+ 
++#if defined(VENETIUM_W10M)
++void SetW10mOpenHandler(W10mOpenHandler handler) {
++  g_w10m_open = handler;
++}
++#endif
++
+ void ShowItemInFolder(Profile* profile, const base::FilePath& full_path) {
++#if defined(VENETIUM_W10M)
++  HandToShell(W10mOpen::kFolder, full_path.DirName().AsUTF8Unsafe());
++  return;
++#endif
+   base::ThreadPool::CreateCOMSTATaskRunner(
+       {base::MayBlock(), base::TaskPriority::USER_BLOCKING})
+       ->PostTask(FROM_HERE,
+@@ -131,11 +153,19 @@ void PlatformOpenVerifiedItem(const base::FilePath& path, OpenItemType type) {
+                                                 base::BlockingType::MAY_BLOCK);
+   switch (type) {
+     case OPEN_FILE:
++#if defined(VENETIUM_W10M)
++      HandToShell(W10mOpen::kFile, path.AsUTF8Unsafe());
++#else
+       ui::win::OpenFileViaShell(path);
++#endif
+       break;
+ 
+     case OPEN_FOLDER:
++#if defined(VENETIUM_W10M)
++      HandToShell(W10mOpen::kFolder, path.AsUTF8Unsafe());
++#else
+       ui::win::OpenFolderViaShell(path);
++#endif
+       break;
+   }
+ }
+@@ -144,6 +174,10 @@ void PlatformOpenVerifiedItem(const base::FilePath& path, OpenItemType type) {
+ 
+ void OpenExternal(const GURL& url) {
+   DCHECK_CURRENTLY_ON(BrowserThread::UI);
++#if defined(VENETIUM_W10M)
++  HandToShell(W10mOpen::kUrl, url.spec());
++  return;
++#endif
+ 
+   base::ThreadPool::CreateCOMSTATaskRunner(
+       {base::MayBlock(), base::TaskPriority::USER_BLOCKING})
+diff --git a/chrome/browser/prefs/incognito_mode_prefs.cc b/chrome/browser/prefs/incognito_mode_prefs.cc
+index 1760e5e9568cd99d6354f28061e8b50d24141d7c..e4f1a71fedeafe6b98028530fcef4165e88b28d9 100644
+--- a/chrome/browser/prefs/incognito_mode_prefs.cc
++++ b/chrome/browser/prefs/incognito_mode_prefs.cc
+@@ -124,6 +124,13 @@ IncognitoModeAvailability IncognitoModePrefs::GetAvailabilityInternal(
+     const PrefService* pref_service,
+     GetAvailabilityMode mode) {
+   DCHECK(pref_service);
++#if defined(VENETIUM_W10M)
++  // Windows 10 Mobile runs Chrome in one process, whose one renderer serves
++  // one profile's storage only (RenderProcessHostImpl CHECKs that the sites
++  // it hosts share a storage partition): an incognito window, a guest
++  // session or a second profile would need a renderer of its own.
++  return IncognitoModeAvailability::kDisabled;
++#else
+   int pref_value = pref_service->GetInteger(
+       policy::policy_prefs::kIncognitoModeAvailability);
+   IncognitoModeAvailability result = kDefaultAvailability;
+@@ -137,6 +144,7 @@ IncognitoModeAvailability IncognitoModePrefs::GetAvailabilityInternal(
+     return IncognitoModeAvailability::kDisabled;
+   }
+   return result;
++#endif  // defined(VENETIUM_W10M)
+ }
+ 
+ // static
+diff --git a/chrome/browser/process_singleton_win.cc b/chrome/browser/process_singleton_win.cc
+index 026f480ebe1d47af8b949d6a076a2d053022bda2..5ae840102b9e7683618916b81400038e687ae584 100644
+--- a/chrome/browser/process_singleton_win.cc
++++ b/chrome/browser/process_singleton_win.cc
+@@ -370,6 +370,14 @@ ProcessSingleton::NotifyOtherProcessOrCreate() {
+ bool ProcessSingleton::Create() {
+   TRACE_EVENT0("startup", "ProcessSingleton::Create");
+ 
++#if defined(VENETIUM_W10M)
++  // Windows 10 Mobile runs one instance of an app, and Chrome is a DLL in
++  // it: there is no other browser process to find or to be found by, and no
++  // window to do either through (the message window cannot be made there).
++  // This process is the single one.
++  return true;
++#endif
++
+   static const wchar_t kMutexName[] = L"Local\\ChromeProcessSingletonStartup!";
+ 
+   remote_window_ = FindRunningChromeWindow(user_data_dir_);
+diff --git a/chrome/browser/profiles/profiles_state.cc b/chrome/browser/profiles/profiles_state.cc
+index f7e623e42ac67c45cfd8c49d793b1d52186ddde4..3c77680928e9d143c5c7a5f791a26bfe4cc20774 100644
+--- a/chrome/browser/profiles/profiles_state.cc
++++ b/chrome/browser/profiles/profiles_state.cc
+@@ -213,6 +213,13 @@ bool IsGuestModeRequested(const base::CommandLine& command_line,
+ }
+ 
+ bool IsProfileCreationAllowed() {
++#if defined(VENETIUM_W10M)
++  // Windows 10 Mobile runs Chrome in one process, whose one renderer serves
++  // one profile's storage only (RenderProcessHostImpl CHECKs that the sites
++  // it hosts share a storage partition): an incognito window, a guest
++  // session or a second profile would need a renderer of its own.
++  return false;
++#endif
+   const PrefService* const pref_service = g_browser_process->local_state();
+   DCHECK(pref_service);
+   return pref_service->GetBoolean(prefs::kBrowserAddPersonEnabled);
+@@ -220,6 +227,10 @@ bool IsProfileCreationAllowed() {
+ 
+ // Whether guest mode is globally disabled (for all entry points and users).
+ bool IsGuestModeGloballyDisabledInternal() {
++#if defined(VENETIUM_W10M)
++  // One profile only (see IsProfileCreationAllowed).
++  return true;
++#endif
+   const PrefService* const pref_service = g_browser_process->local_state();
+   DCHECK(pref_service);
+   return !pref_service->GetBoolean(prefs::kBrowserGuestModeEnabled);
+diff --git a/chrome/browser/ui/views/status_icons/status_tray_win.cc b/chrome/browser/ui/views/status_icons/status_tray_win.cc
+index 747c77d6f34f2f04e7722a3f27beabfc643a044f..00ebb468d1ead2719ebd169c8e034ab56d4f8184 100644
+--- a/chrome/browser/ui/views/status_icons/status_tray_win.cc
++++ b/chrome/browser/ui/views/status_icons/status_tray_win.cc
+@@ -242,12 +242,42 @@ void StatusTrayWin::SetStatusTrayStateChangerProxyForTest(
+   state_changer_proxy_ = std::move(proxy);
+ }
+ 
++#if defined(VENETIUM_W10M)
++namespace {
++
++// Windows 10 Mobile has no notification area, and StatusTrayWin CHECKs the
++// window class it cannot register there. Chrome still gets a tray and its
++// icons -- several owners take them for granted (the WebUSB and WebHID
++// device icons, Glic's) -- which show nowhere.
++class StatusIconW10m : public StatusIcon {
++ public:
++  void SetImage(const gfx::ImageSkia& image) override {}
++  void SetToolTip(const std::u16string& tool_tip) override {}
++  void DisplayBalloon(const gfx::ImageSkia& icon,
++                      const std::u16string& title,
++                      const std::u16string& contents,
++                      const message_center::NotifierId& notifier_id) override {}
++
++ protected:
++  void UpdatePlatformContextMenu(StatusIconMenuModel* model) override {}
++};
++
++class StatusTrayW10m : public StatusTray {
++ protected:
++  std::unique_ptr<StatusIcon> CreatePlatformStatusIcon(
++      StatusTray::StatusIconType type,
++      const gfx::ImageSkia& image,
++      const std::u16string& tool_tip) override {
++    return std::make_unique<StatusIconW10m>();
++  }
++};
++
++}  // namespace
++#endif  // defined(VENETIUM_W10M)
++
+ std::unique_ptr<StatusTray> StatusTray::Create() {
+ #if defined(VENETIUM_W10M)
+-  // Windows 10 Mobile has no notification area, and StatusTrayWin CHECKs
+-  // the window class it cannot register there. Chrome goes without a tray,
+-  // as on Android.
+-  return nullptr;
++  return std::make_unique<StatusTrayW10m>();
+ #else
+   return std::make_unique<StatusTrayWin>();
+ #endif
+diff --git a/chrome/browser/ui/webui/print_preview/print_preview_ui.cc b/chrome/browser/ui/webui/print_preview/print_preview_ui.cc
+index 18593bc686a7f7c0f0a2ca60651b9f6141c45298..9e29291a4fa09640330e4078a15bc5ea2d18042c 100644
+--- a/chrome/browser/ui/webui/print_preview/print_preview_ui.cc
++++ b/chrome/browser/ui/webui/print_preview/print_preview_ui.cc
+@@ -867,7 +867,14 @@ void PrintPreviewUI::DidStartPreview(mojom::DidStartPreviewParamsPtr params,
+ 
+   pages_to_render_ = params->pages_to_render;
+   pages_to_render_index_ = 0;
++#if defined(VENETIUM_W10M)
++  // Several pages to a sheet are put together by PDFium in a utility, a
++  // thread of the one process on Windows 10 Mobile, where the preview's own
++  // PDF plugin has PDFium already: it CHECKs. One page a sheet.
++  pages_per_sheet_ = 1;
++#else
+   pages_per_sheet_ = params->pages_per_sheet;
++#endif
+   page_size_ = ToFlooredSize(params->page_size);
+   ClearAllPreviewData();
+ 
+diff --git a/chrome/browser/win/jumplist_updater.cc b/chrome/browser/win/jumplist_updater.cc
+index c00e5d3ed7bc9ab9b516e51c572961685e2bbe41..e98bb158dc79a61c1efe6067c30a295a6828abae 100644
+--- a/chrome/browser/win/jumplist_updater.cc
++++ b/chrome/browser/win/jumplist_updater.cc
+@@ -110,6 +110,10 @@ JumpListUpdater::~JumpListUpdater() = default;
+ 
+ // static
+ bool JumpListUpdater::IsEnabled() {
++#if defined(VENETIUM_W10M)
++  // No taskbar on Windows 10 Mobile, and no jump list to fill.
++  return false;
++#endif
+   // Do not create custom JumpLists in tests. See http://crbug.com/40372575.
+   return !base::CommandLine::ForCurrentProcess()->HasSwitch(
+       switches::kTestType);
+diff --git a/chrome/common/BUILD.gn b/chrome/common/BUILD.gn
+index 1179b1f75c02a1331e85f97091052f2014108b4f..2582b08484fbbd0ce675e48fa717aeb9280e56b1 100644
+--- a/chrome/common/BUILD.gn
++++ b/chrome/common/BUILD.gn
+@@ -5,6 +5,7 @@
+ import("//build/buildflag_header.gni")
+ import("//build/config/chrome_build.gni")
+ import("//build/util/process_version.gni")
++import("//build/config/win/w10m.gni")
+ import("//chrome/browser/downgrade/buildflags.gni")
+ import("//chrome/common/features.gni")
+ import("//components/cdm/common/playready.gni")
+@@ -103,7 +104,11 @@ source_set("ini_parser") {
+ 
+ group("common") {
+   public_deps = [ ":common_lib" ]
+-  if (is_win) {
++
++  # Windows 10 Mobile: the engine DLL has its own delay-load failure hook,
++  # which turns a function the phone lacks into a failing call; Chrome's
++  # would end the process for it.
++  if (is_win && !is_w10m_target) {
+     public_deps += [ "//chrome/common/win:delay_load_hooks" ]
+   }
+ }
+diff --git a/chrome/renderer/chrome_content_renderer_client.cc b/chrome/renderer/chrome_content_renderer_client.cc
+index e177eded759db56089c655d8364e0bc660e785d2..395c25ff43df006ba3fcc1b7f81f7bb1ee7c133e 100644
+--- a/chrome/renderer/chrome_content_renderer_client.cc
++++ b/chrome/renderer/chrome_content_renderer_client.cc
+@@ -302,6 +302,19 @@ using UsesKeyboardAccessoryForSuggestions =
+ namespace {
+ 
+ #if BUILDFLAG(ENABLE_PDF)
++// A renderer that shows PDFs and nothing else. Supermium's
++// pdf::IsPdfRenderer() says so of a single-process renderer too, which hosts
++// every page there is: on Windows 10 Mobile, where Chrome always runs in one
++// process, that left every page without DOM storage or the default CSP.
++bool IsPdfOnlyRenderer() {
++#if defined(VENETIUM_W10M)
++  return base::CommandLine::ForCurrentProcess()->HasSwitch(
++      switches::kPdfRenderer);
++#else
++  return pdf::IsPdfRenderer();
++#endif
++}
++
+ std::vector<url::Origin> GetAdditionalPdfInternalPluginAllowedOrigins() {
+   return {url::Origin::Create(GURL(chrome::kChromeUIPrintURL))};
+ }
+@@ -875,7 +888,7 @@ bool ChromeContentRendererClient::IsDomStorageDisabled() const {
+   // opaque origins). This avoids a renderer kill by the browser process which
+   // isn't expecting PDF renderer processes to ever use DOM storage
+   // interfaces. See https://crbug.com/357014503.
+-  return pdf::IsPdfRenderer();
++  return IsPdfOnlyRenderer();
+ #else
+   return false;
+ #endif
+@@ -1614,7 +1627,7 @@ void ChromeContentRendererClient::AppendContentSecurityPolicy(
+   // TODO(crbug.com/40792950): Lock down the CSP once style and script are no
+   // longer injected inline by `pdf::PluginResponseWriter`. That class may be a
+   // better place to define such CSP, or we may continue doing so here.
+-  if (pdf::IsPdfRenderer())
++  if (IsPdfOnlyRenderer())
+     return;
+ #endif  // BUILDFLAG(ENABLE_PDF)
+ 
+diff --git a/chrome/services/pdf/pdf_service.cc b/chrome/services/pdf/pdf_service.cc
+index d7944a34d6a57d95e244b139d6706ff8d12521fa..88ca060dfc7d50d8ba5eac058aa9d6ea12d9e0e0 100644
+--- a/chrome/services/pdf/pdf_service.cc
++++ b/chrome/services/pdf/pdf_service.cc
+@@ -36,6 +36,14 @@ PdfService::PdfService(mojo::PendingReceiver<mojom::PdfService> receiver)
+       discardable_memory::ClientDiscardableSharedMemoryManager>(
+       std::move(manager_remote),
+       content::UtilityThread::Get()->GetIOTaskRunner());
++#if defined(VENETIUM_W10M)
++  // In one process (Windows 10 Mobile) the renderer's allocator is the
++  // process's, and stays when this service ends: this one would be freed
++  // under it.
++  if (base::DiscardableMemoryAllocator::HasInstance()) {
++    return;
++  }
++#endif
+   base::DiscardableMemoryAllocator::SetInstance(
+       discardable_shared_memory_manager_.get());
+ }
+diff --git a/chrome/services/printing/printing_service.cc b/chrome/services/printing/printing_service.cc
+index fa7d6943833a0c5064255192efd0e11446b2c79b..d37f191d5933d73dcbf3688473b647a46f8fa823 100644
+--- a/chrome/services/printing/printing_service.cc
++++ b/chrome/services/printing/printing_service.cc
+@@ -55,6 +55,14 @@ PrintingService::PrintingService(
+       discardable_memory::ClientDiscardableSharedMemoryManager>(
+       std::move(manager_remote),
+       content::UtilityThread::Get()->GetIOTaskRunner());
++#if defined(VENETIUM_W10M)
++  // In one process (Windows 10 Mobile) the renderer's allocator is the
++  // process's, and stays when this service ends: this one would be freed
++  // under it.
++  if (base::DiscardableMemoryAllocator::HasInstance()) {
++    return;
++  }
++#endif
+   base::DiscardableMemoryAllocator::SetInstance(
+       discardable_shared_memory_manager_.get());
+ }
+diff --git a/components/pdf/browser/pdf_frame_util.cc b/components/pdf/browser/pdf_frame_util.cc
+index e9202a662665c607a1d65175b701d2fb48cb6223..809a40c1c8707bf0c6add6df38547613b1421d2e 100644
+--- a/components/pdf/browser/pdf_frame_util.cc
++++ b/components/pdf/browser/pdf_frame_util.cc
+@@ -56,6 +56,17 @@ content::RenderFrameHost* FindPdfChildFrame(
+   }
+ 
+   content::RenderFrameHost* pdf_rfh = nullptr;
++#if defined(VENETIUM_W10M)
++  // Windows 10 Mobile runs Chrome in one process, which is never marked as
++  // a PDF renderer's: the PDF is the viewer's own child frame.
++  extension_host->ForEachRenderFrameHost(
++      [&pdf_rfh, extension_host](content::RenderFrameHost* rfh) {
++        if (!pdf_rfh && rfh->GetParent() == extension_host) {
++          pdf_rfh = rfh;
++        }
++      });
++  return pdf_rfh;
++#endif
+   extension_host->ForEachRenderFrameHost(
+       [&pdf_rfh](content::RenderFrameHost* rfh) {
+         if (!rfh->GetProcess()->IsPdf()) {
+diff --git a/components/printing/browser/print_manager_utils.cc b/components/printing/browser/print_manager_utils.cc
+index 6580d7dce4ff1cb8c711a4f2263fe5eec404c3ef..e8930d319c8445597347ab9081a04ca26057db06 100644
+--- a/components/printing/browser/print_manager_utils.cc
++++ b/components/printing/browser/print_manager_utils.cc
+@@ -30,6 +30,14 @@ bool IsOopifEnabled() {
+ 
+ void CreateCompositeClientIfNeeded(content::WebContents* web_contents,
+                                    const std::string& user_agent) {
++#if defined(VENETIUM_W10M)
++  // Windows 10 Mobile runs Chrome in one process, where the print
++  // compositor -- a utility service, there a thread -- would set up fonts
++  // and discardable memory for the whole process a second time (Skia CHECKs
++  // the one, the other is freed under the renderer when it ends). Without
++  // it the renderer makes the PDF itself, as on Android.
++  return;
++#endif
+   // TODO(crbug.com/40657857): Once ShouldPdfCompositorBeEnabledForOopifs()
+   // always returns true, just remove the check altogether.
+   if (site_isolation::SiteIsolationPolicy::
+diff --git a/services/device/serial/serial_device_enumerator_win.cc b/services/device/serial/serial_device_enumerator_win.cc
+index bfda528baaf47145dce39366b58a5b6b307dcaae..36af30ad86106cef8cc0bd7b83460bb821fb3b75 100644
+--- a/services/device/serial/serial_device_enumerator_win.cc
++++ b/services/device/serial/serial_device_enumerator_win.cc
+@@ -162,8 +162,12 @@ class SerialDeviceEnumeratorWin::UiThreadHelper
+     // GUID_DEVINTERFACE_SERENUM_BUS_ENUMERATOR for enumeration because it
+     // doesn't seem to make a difference and ports which aren't enumerable by
+     // device interface don't generate WM_DEVICECHANGE events.
+-    device_observation_.Observe(
+-        DeviceMonitorWin::GetForDeviceInterface(GUID_DEVINTERFACE_COMPORT));
++    // There is no monitor where no message window can be made (Windows 10
++    // Mobile): ports are then not watched for coming and going.
++    if (DeviceMonitorWin* monitor =
++            DeviceMonitorWin::GetForDeviceInterface(GUID_DEVINTERFACE_COMPORT)) {
++      device_observation_.Observe(monitor);
++    }
+   }
+ 
+   // Disallow copy and assignment.

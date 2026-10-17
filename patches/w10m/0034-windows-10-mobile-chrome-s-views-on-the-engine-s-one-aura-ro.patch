@@ -30,8 +30,8 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  .../browser/ui/views/native_widget_factory.cc | 20 +++++++++++++++++++
  .../ui/views/status_icons/status_tray_win.cc  |  7 +++++++
  .../tabs/dragging/tab_drag_controller.cc      |  6 ++++++
- .../desktop_native_widget_aura.cc             |  8 ++++++++
- 9 files changed, 75 insertions(+), 1 deletion(-)
+ .../desktop_native_widget_aura.cc             |  9 +++++++++
+ 9 files changed, 76 insertions(+), 1 deletion(-)
 
 diff --git a/chrome/browser/ui/views/chrome_views_delegate.h b/chrome/browser/ui/views/chrome_views_delegate.h
 index c695c48d0c2672499bae2bcf1dbdc54d02822dbe..f51254648f837638382953cddb2c41af61fdb759 100644
@@ -204,10 +204,18 @@ index e4862f8b3c69e3104cb0b307c70260241d50ac1b..4b61306fe08a4a583ee292f0cbd7b4cc
  
    ref->source_context_emptiness_tracker_ =
 diff --git a/ui/views/widget/desktop_aura/desktop_native_widget_aura.cc b/ui/views/widget/desktop_aura/desktop_native_widget_aura.cc
-index 41725080f2ac007e30266ff83e859578b9e8887d..8ea6728abd462c545de54a48728c04f0e3696f19 100644
+index 41725080f2ac007e30266ff83e859578b9e8887d..560b529c7f703b408cec276e02893b901756f57d 100644
 --- a/ui/views/widget/desktop_aura/desktop_native_widget_aura.cc
 +++ b/ui/views/widget/desktop_aura/desktop_native_widget_aura.cc
-@@ -569,6 +569,14 @@ Widget::Widgets DesktopNativeWidgetAura::GetOwnedDesktopWidgets() {
+@@ -9,6 +9,7 @@
+ #include <utility>
+ 
+ #include "base/auto_reset.h"
++#include "base/logging.h"
+ #include "base/functional/bind.h"
+ #include "base/functional/callback_helpers.h"
+ #include "base/memory/raw_ptr.h"
+@@ -569,6 +570,14 @@ Widget::Widgets DesktopNativeWidgetAura::GetOwnedDesktopWidgets() {
  ////////////////////////////////////////////////////////////////////////////////
  // DesktopNativeWidgetAura, internal::NativeWidgetPrivate implementation:
  void DesktopNativeWidgetAura::InitNativeWidget(Widget::InitParams params) {
