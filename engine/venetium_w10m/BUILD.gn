@@ -107,6 +107,7 @@ shared_library("venetium_engine") {
     "common/vw_delay_load.cc",
     "common/vw_log.cc",
     "common/vw_log.h",
+    "common/vw_rt_divide.cc",
     "common/vw_user_agent.cc",
     "common/vw_user_agent.h",
     "renderer/vw_renderer_client.cc",
