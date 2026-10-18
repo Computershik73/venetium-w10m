@@ -1,0 +1,41 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Sun, 18 Oct 2026 20:42:41 +0400
+Subject: [PATCH] Windows 10 Mobile: no full-screen console check
+
+Windows 10 Mobile's kernel32 has no GetConsoleDisplayMode, and Chrome's
+browser layer brings in IsFullScreenConsoleMode (presentation-mode
+detection for notifications), whose load-time import of it kept the
+engine DLL from loading at all (LoadPackagedLibrary error 127, the
+shell's import probe naming it). There are no consoles on a phone.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ ui/base/fullscreen_win.cc | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/ui/base/fullscreen_win.cc b/ui/base/fullscreen_win.cc
+index 5a18bd1618869ae94a9eb1563e3245bb57f47e6c..d85eb9e0e9f7e5b39c8a79ee7b5f2a74db6903e2 100644
+--- a/ui/base/fullscreen_win.cc
++++ b/ui/base/fullscreen_win.cc
+@@ -56,6 +56,12 @@ bool IsFullScreenWindowMode() {
+ }
+ 
+ bool IsFullScreenConsoleMode() {
++#if defined(VENETIUM_W10M)
++  // No consoles on Windows 10 Mobile, whose kernel32 has no
++  // GetConsoleDisplayMode either: imported, it kept the engine DLL from
++  // loading at all.
++  return false;
++#else
+   // We detect this by attaching the current process to the console of the
+   // foreground window and then checking if it is in full screen mode.
+   DWORD pid = 0;
+@@ -71,6 +77,7 @@ bool IsFullScreenConsoleMode() {
+   ::FreeConsole();
+ 
+   return (modes & (CONSOLE_FULLSCREEN | CONSOLE_FULLSCREEN_HARDWARE)) != 0;
++#endif  // defined(VENETIUM_W10M)
+ }
+ 
+ }  // namespace
