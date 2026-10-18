@@ -110,7 +110,8 @@ if [ -f "$ENGINE_OUT/venetium_engine.dll" ]; then
   # Chrome's own resources, for its interface (engine/venetium_w10m/BUILD.gn,
   # chrome_paks): beside the DLL, where Chrome looks for them (DIR_ASSETS).
   if [ -d "$ENGINE_OUT/vw_chrome" ]; then
-    cp -r "$ENGINE_OUT/vw_chrome/." "$STAGE/"
+    (cd "$ENGINE_OUT/vw_chrome" && find . -name '*.pak' | while read -r f; do
+       mkdir -p "$STAGE/$(dirname "$f")" && cp "$f" "$STAGE/$f"; done)
     echo "    Chrome's resources: $(cd "$ENGINE_OUT/vw_chrome" && find . -name '*.pak' | sort | tr '\n' ' ')"
   fi
 else
