@@ -77,6 +77,9 @@ void AddChromeSwitches(const EngineConfig& config,
   // Chrome's toolbar and tabs sized for fingers. Chrome reads it once.
   command_line->AppendSwitchASCII(switches::kTopChromeTouchUi,
                                   switches::kTopChromeTouchUiEnabled);
+  // A phone's toolbar, as Chrome for Android's: no profile button beside
+  // the address bar (Supermium's switch; one profile, no sign-in here).
+  command_line->AppendSwitchASCII("show-avatar-button", "never");
   // No system proxy to poll for (WinHTTP's is a stub here).
   command_line->AppendSwitch(switches::kNoProxyServer);
   // A renderer that is in this process cannot be ended for a bad message.

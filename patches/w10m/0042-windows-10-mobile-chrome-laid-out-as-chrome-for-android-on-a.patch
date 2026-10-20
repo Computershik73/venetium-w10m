@@ -1,0 +1,125 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Tue, 20 Oct 2026 19:01:03 +0400
+Subject: [PATCH] Windows 10 Mobile: Chrome laid out as Chrome for Android on a
+ phone
+
+On a 411 DIP wide screen the address bar had little room left between
+back, forward, reload, the profile button and the menu, at 48 DIP each.
+As Chrome for Android does on a phone:
+- no tab strip; the tab search button beside the address bar is how the
+  tabs are reached (features::HasTabSearchToolbarButton, which Glic
+  otherwise gates);
+- no back button (the phone's own key), no reload button, and Forward
+  off by default (its pref);
+- Forward and Reload first in the app menu.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ chrome/browser/ui/browser_ui_prefs.cc           |  6 ++++++
+ chrome/browser/ui/tab_search_feature.cc         |  6 ++++++
+ chrome/browser/ui/toolbar/app_menu_model.cc     | 11 +++++++++++
+ chrome/browser/ui/views/frame/browser_view.cc   |  6 ++++++
+ chrome/browser/ui/views/toolbar/toolbar_view.cc | 12 ++++++++++++
+ 5 files changed, 41 insertions(+)
+
+diff --git a/chrome/browser/ui/browser_ui_prefs.cc b/chrome/browser/ui/browser_ui_prefs.cc
+index c5d48d196da2f7b9dcad76d09bf66adf06bad9ce..f7bebbe146ee69a783190bd7cb2aac115d70bdcb 100644
+--- a/chrome/browser/ui/browser_ui_prefs.cc
++++ b/chrome/browser/ui/browser_ui_prefs.cc
+@@ -123,8 +123,14 @@ void RegisterBrowserUserPrefs(user_prefs::PrefRegistrySyncable* registry) {
+   registry->RegisterBooleanPref(prefs::kSplitViewDragAndDropEnabled, true,
+                                 pref_registration_flags);
+ 
++#if defined(VENETIUM_W10M)
++  // A phone's toolbar has no room for it; Forward is in the menu.
++  registry->RegisterBooleanPref(prefs::kShowForwardButton, false,
++                                pref_registration_flags);
++#else
+   registry->RegisterBooleanPref(prefs::kShowForwardButton, true,
+                                 pref_registration_flags);
++#endif
+   registry->RegisterInt64Pref(prefs::kBookmarkBarHoverCount, 0);
+   registry->RegisterInt64Pref(prefs::kBookmarkBarNavigationCount, 0);
+   registry->RegisterTimePref(prefs::kBookmarkBarPreviousInitialRenderOnNtpTime,
+diff --git a/chrome/browser/ui/tab_search_feature.cc b/chrome/browser/ui/tab_search_feature.cc
+index d30b61b26f15324edcd5f2d576a3e864787c4432..6dd4ba2c86008725a05a484a26048fad49a4f0c3 100644
+--- a/chrome/browser/ui/tab_search_feature.cc
++++ b/chrome/browser/ui/tab_search_feature.cc
+@@ -10,8 +10,14 @@
+ 
+ namespace features {
+ bool HasTabSearchToolbarButton() {
++#if defined(VENETIUM_W10M)
++  // Windows 10 Mobile shows no tab strip: this button, beside the address
++  // bar, is how the tabs are reached, as Chrome for Android's tab switcher.
++  return true;
++#else
+   // It is important that this value not change at runtime in production. Any
+   // future updates to this function must maintain that property.
+   return glic::GlicEnabling::IsEnabledByGlobalCriteria();
++#endif
+ }
+ }  // namespace features
+diff --git a/chrome/browser/ui/toolbar/app_menu_model.cc b/chrome/browser/ui/toolbar/app_menu_model.cc
+index 8222917f2bb9e1b4c644b45c0c373228b6792a78..21f4e89bd696528bed597c5637fd204a5fa926d2 100644
+--- a/chrome/browser/ui/toolbar/app_menu_model.cc
++++ b/chrome/browser/ui/toolbar/app_menu_model.cc
+@@ -2091,6 +2091,17 @@ void AppMenuModel::Build() {
+   // Build (and, by extension, Init) should only be called once.
+   DCHECK_EQ(0u, GetItemCount());
+ 
++#if defined(VENETIUM_W10M)
++  // What Chrome for Android's menu starts with, whose toolbar has no room
++  // for them either.
++  AddItemWithStringIdAndVectorIcon(this, IDC_FORWARD,
++                                   IDS_CONTENT_CONTEXT_FORWARD,
++                                   vector_icons::kArrowForwardIcon);
++  AddItemWithStringIdAndVectorIcon(this, IDC_RELOAD, IDS_CONTENT_CONTEXT_RELOAD,
++                                   vector_icons::kRefreshIcon);
++  AddSeparator(ui::NORMAL_SEPARATOR);
++#endif
++
+   if (app_menu_icon_controller_ &&
+       app_menu_icon_controller_->GetTypeAndSeverity().type ==
+           AppMenuIconController::IconType::kUpgradeNotification) {
+diff --git a/chrome/browser/ui/views/frame/browser_view.cc b/chrome/browser/ui/views/frame/browser_view.cc
+index 3bacb333b963b5919c44672902995b4295fb86f0..8d31976bcb903ae3dcc1a08192d44279ae1c340f 100644
+--- a/chrome/browser/ui/views/frame/browser_view.cc
++++ b/chrome/browser/ui/views/frame/browser_view.cc
+@@ -1348,6 +1348,12 @@ bool BrowserView::ShouldDrawTabStrokes() const {
+ }
+ 
+ bool BrowserView::ShouldDrawTabStrip() const {
++#if defined(VENETIUM_W10M)
++  // No tab strip on a phone, as in Chrome for Android: the tabs are still
++  // there, reached through the tabs button beside the address bar
++  // (features::HasTabSearchToolbarButton).
++  return false;
++#endif
+   // Return false if this window does not normally display a tabstrip or if the
+   // tabstrip is currently hidden, e.g. because we're in fullscreen.
+   if (!browser_->SupportsWindowFeature(
+diff --git a/chrome/browser/ui/views/toolbar/toolbar_view.cc b/chrome/browser/ui/views/toolbar/toolbar_view.cc
+index e37ae1a3b9527d4595c26b44fafcf1993104662a..94f34e163b51449a8fed7cef9b0749c16e8b5f71 100644
+--- a/chrome/browser/ui/views/toolbar/toolbar_view.cc
++++ b/chrome/browser/ui/views/toolbar/toolbar_view.cc
+@@ -439,6 +439,18 @@ void ToolbarView::Init() {
+         browser_, base::BindRepeating(callback, browser_, IDC_HOME)));
+   }
+ 
++#if defined(VENETIUM_W10M)
++  // Windows 10 Mobile lays Chrome out as Chrome for Android does on a
++  // phone: the address bar, the tabs button and the menu, and no more. Back is the
++  // phone's own key; Forward and Reload are in the menu.
++  if (back_) {
++    back_->SetVisible(false);
++  }
++  if (reload_) {
++    reload_->SetVisible(false);
++  }
++#endif
++
+   if (!features::IsWebUISplitTabsButtonEnabled()) {
+     split_tabs_ =
+         AddChildView(std::make_unique<SplitTabsToolbarButton>(browser_));
