@@ -26,6 +26,7 @@
 
 #include <delayimp.h>
 #include <string.h>
+#include <wctype.h>
 
 #include <atomic>
 #include <iterator>
@@ -139,6 +140,32 @@ UINT WINAPI SubstituteGetCaretBlinkTime() {
   return 530;
 }
 
+// Upper case, in place or of one character (a pointer whose high word is
+// zero is a character). Zero would end the string -- or be the character.
+LPWSTR WINAPI SubstituteCharUpperW(LPWSTR text) {
+  const uintptr_t value = reinterpret_cast<uintptr_t>(text);
+  if ((value >> 16) == 0) {
+    return reinterpret_cast<LPWSTR>(
+        static_cast<uintptr_t>(towupper(static_cast<wchar_t>(value))));
+  }
+  for (wchar_t* c = text; *c; ++c) {
+    *c = towupper(*c);
+  }
+  return text;
+}
+
+LPWSTR WINAPI SubstituteCharLowerW(LPWSTR text) {
+  const uintptr_t value = reinterpret_cast<uintptr_t>(text);
+  if ((value >> 16) == 0) {
+    return reinterpret_cast<LPWSTR>(
+        static_cast<uintptr_t>(towlower(static_cast<wchar_t>(value))));
+  }
+  for (wchar_t* c = text; *c; ++c) {
+    *c = towlower(*c);
+  }
+  return text;
+}
+
 // The credential prompts return a Win32 error code, and zero -- "the user
 // typed something" -- would send the caller on with no credentials to read.
 // Chrome asks before it shows a saved password.
@@ -188,6 +215,8 @@ const Substitute kSubstitutes[] = {
     {"GetSysColor", reinterpret_cast<FARPROC>(&SubstituteGetSysColor)},
     {"GetCaretBlinkTime",
      reinterpret_cast<FARPROC>(&SubstituteGetCaretBlinkTime)},
+    {"CharUpperW", reinterpret_cast<FARPROC>(&SubstituteCharUpperW)},
+    {"CharLowerW", reinterpret_cast<FARPROC>(&SubstituteCharLowerW)},
     {"CredUIPromptForWindowsCredentialsW",
      reinterpret_cast<FARPROC>(&ReturnCancelled)},
     {"CredUIPromptForWindowsCredentialsA",
@@ -361,7 +390,22 @@ FARPROC WINAPI OnDelayLoadFailure(unsigned reason, PDelayLoadInfo info) {
     venetium_w10m::NoteF("delay-load: %s is not on this phone, its calls fail",
                          dll);
     // Any module will do as the DLL's stand-in: GetProcAddress on it fails
-    // for every name, and each name comes back here as dliFailGetProc.
+    // for every name, and each name comes back here as dliFailGetProc. This
+    // one, pinned first: when two threads load the same DLL at once, the
+    // delay-load helper keeps one handle and FreeLibrary()s the other --
+    // which, the engine being the stand-in, unloaded the engine under every
+    // thread running it (two threads asking for pdh.dll did, on Chrome's
+    // first menu). A pinned module is never unloaded.
+    static const bool pinned = [] {
+      HMODULE self = nullptr;
+      return ::GetModuleHandleExW(
+                 GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                     GET_MODULE_HANDLE_EX_FLAG_PIN,
+                 reinterpret_cast<LPCWSTR>(&__ImageBase), &self) != 0;
+    }();
+    if (!pinned) {
+      venetium_w10m::Note("delay-load: the engine could not be pinned");
+    }
     return reinterpret_cast<FARPROC>(&__ImageBase);
   }
   if (reason == dliFailGetProc) {
