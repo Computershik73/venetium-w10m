@@ -619,6 +619,15 @@ void MainPage::Start(std::wstring initialUrl) {
   if (Api().ui_owner &&
       Api().ui_owner(params.switches.c_str(), params.profileDir.c_str()) == 1) {
     EnterChromeUi();
+    // Chrome's interface, and the pages' prefers-color-scheme, in the
+    // phone's theme, as Chrome for Android follows Android's.
+    try {
+      UISettings settings;
+      if (settings.GetColorValue(UIColorType::Background).R < 128) {
+        params.switches += " --force-dark-mode";
+      }
+    } catch (winrt::hresult_error const&) {
+    }
   }
   // The panel the engine presents into, before it starts.
   if (Api().set_panel) Api().set_panel(winrt::get_abi(engineView_->Panel()));

@@ -1,0 +1,465 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Tue, 20 Oct 2026 19:29:20 +0400
+Subject: [PATCH] Windows 10 Mobile: Chrome for Android's toolbar and menu
+
+The toolbar as on Chrome for Android: home, the address bar, a new tab
+button and the tab count in a rounded square, the menu. The count opens
+the list of tabs (tab search, anchored to it), so tab search's own
+toolbar icon goes again. Home is on by default.
+
+The menu as Chrome for Android's, instead of the desktop's: a first row
+of round icons -- back, forward, bookmark, download (save the page) and
+reload -- then a new tab; history and clearing browsing data; downloads,
+bookmarks and recent tabs; settings and help; and the shell's own
+submenu. No incognito (one process, one profile's storage).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ chrome/browser/ui/browser_ui_prefs.cc         |   6 +
+ chrome/browser/ui/tab_search_feature.cc       |   6 -
+ chrome/browser/ui/toolbar/app_menu_model.cc   |  89 ++++++++++----
+ chrome/browser/ui/toolbar/app_menu_model.h    |  10 ++
+ chrome/browser/ui/views/toolbar/app_menu.cc   |  79 ++++++++++++
+ chrome/browser/ui/views/toolbar/app_menu.h    |   3 +
+ .../browser/ui/views/toolbar/toolbar_view.cc  | 115 ++++++++++++++++++
+ 7 files changed, 277 insertions(+), 31 deletions(-)
+
+diff --git a/chrome/browser/ui/browser_ui_prefs.cc b/chrome/browser/ui/browser_ui_prefs.cc
+index f7bebbe146ee69a783190bd7cb2aac115d70bdcb..78b39b8f642d529708bd1450afff566ad8e4e4d7 100644
+--- a/chrome/browser/ui/browser_ui_prefs.cc
++++ b/chrome/browser/ui/browser_ui_prefs.cc
+@@ -118,8 +118,14 @@ void RegisterBrowserUserPrefs(user_prefs::PrefRegistrySyncable* registry) {
+ 
+   registry->RegisterBooleanPref(prefs::kHomePageIsNewTabPage, true,
+                                 pref_registration_flags);
++#if defined(VENETIUM_W10M)
++  // Chrome for Android's toolbar starts with it.
++  registry->RegisterBooleanPref(prefs::kShowHomeButton, true,
++                                pref_registration_flags);
++#else
+   registry->RegisterBooleanPref(prefs::kShowHomeButton, false,
+                                 pref_registration_flags);
++#endif
+   registry->RegisterBooleanPref(prefs::kSplitViewDragAndDropEnabled, true,
+                                 pref_registration_flags);
+ 
+diff --git a/chrome/browser/ui/tab_search_feature.cc b/chrome/browser/ui/tab_search_feature.cc
+index 6dd4ba2c86008725a05a484a26048fad49a4f0c3..d30b61b26f15324edcd5f2d576a3e864787c4432 100644
+--- a/chrome/browser/ui/tab_search_feature.cc
++++ b/chrome/browser/ui/tab_search_feature.cc
+@@ -10,14 +10,8 @@
+ 
+ namespace features {
+ bool HasTabSearchToolbarButton() {
+-#if defined(VENETIUM_W10M)
+-  // Windows 10 Mobile shows no tab strip: this button, beside the address
+-  // bar, is how the tabs are reached, as Chrome for Android's tab switcher.
+-  return true;
+-#else
+   // It is important that this value not change at runtime in production. Any
+   // future updates to this function must maintain that property.
+   return glic::GlicEnabling::IsEnabledByGlobalCriteria();
+-#endif
+ }
+ }  // namespace features
+diff --git a/chrome/browser/ui/toolbar/app_menu_model.cc b/chrome/browser/ui/toolbar/app_menu_model.cc
+index 21f4e89bd696528bed597c5637fd204a5fa926d2..cd9766d92a4bb2f41c326b0ea18e1c21bb53e192 100644
+--- a/chrome/browser/ui/toolbar/app_menu_model.cc
++++ b/chrome/browser/ui/toolbar/app_menu_model.cc
+@@ -1306,6 +1306,67 @@ void AppMenuModel::SetW10mShellCommandHandler(
+ }
+ #endif  // defined(VENETIUM_W10M)
+ 
++#if defined(VENETIUM_W10M)
++// Chrome for Android's menu on a phone, as near as Chrome's commands come:
++// back, forward, bookmark, download and reload in a row of icons; then a new
++// tab; history and clearing it; downloads, bookmarks and recent tabs;
++// settings and help; and the shell's own. Incognito is not here: one
++// process serves one profile's storage.
++void AppMenuModel::BuildPhoneMenu() {
++  phone_navigation_model_ =
++      std::make_unique<ui::ButtonMenuItemModel>(IDS_CONTENT_CONTEXT_BACK, this);
++  phone_navigation_model_->AddGroupItemWithStringId(IDC_BACK,
++                                                    IDS_CONTENT_CONTEXT_BACK);
++  phone_navigation_model_->AddGroupItemWithStringId(
++      IDC_FORWARD, IDS_CONTENT_CONTEXT_FORWARD);
++  phone_navigation_model_->AddGroupItemWithStringId(
++      IDC_BOOKMARK_THIS_TAB, IDS_STAR_VIEW_MENU_ADD_BOOKMARK);
++  phone_navigation_model_->AddGroupItemWithStringId(IDC_SAVE_PAGE,
++                                                    IDS_SAVE_PAGE);
++  phone_navigation_model_->AddGroupItemWithStringId(IDC_RELOAD,
++                                                    IDS_CONTENT_CONTEXT_RELOAD);
++  AddButtonItem(kW10mNavigationRow, phone_navigation_model_.get());
++
++  AddItemWithStringIdAndVectorIcon(this, IDC_NEW_TAB, IDS_NEW_TAB, kAddIcon);
++  AddSeparator(ui::NORMAL_SEPARATOR);
++
++  AddItemWithStringIdAndVectorIcon(this, IDC_SHOW_HISTORY, IDS_HISTORY_MENU,
++                                   kHistoryIcon);
++  AddItemWithStringIdAndVectorIcon(this, IDC_CLEAR_BROWSING_DATA,
++                                   IDS_CLEAR_BROWSING_DATA, kDeleteIcon);
++  AddSeparator(ui::NORMAL_SEPARATOR);
++
++  AddItemWithStringIdAndVectorIcon(this, IDC_SHOW_DOWNLOADS,
++                                   IDS_SHOW_DOWNLOADS, kDownloadIcon);
++  AddItemWithStringIdAndVectorIcon(this, IDC_SHOW_BOOKMARK_MANAGER,
++                                   IDS_BOOKMARKS_AND_LISTS_MENU, kStarIcon);
++  auto recent_tabs = std::make_unique<RecentTabsSubMenuModel>(provider_,
++                                                              browser_);
++  recent_tabs->RegisterLogMenuMetricsCallback(base::BindRepeating(
++      &AppMenuModel::LogMenuMetrics, base::Unretained(this)));
++  sub_menus_.push_back(std::move(recent_tabs));
++  AddSubMenuWithStringIdAndVectorIcon(this, IDC_RECENT_TABS_MENU,
++                                      IDS_RECENT_TABS_MENU,
++                                      sub_menus_.back().get(), kDevicesIcon);
++  AddSeparator(ui::NORMAL_SEPARATOR);
++
++  AddItemWithStringIdAndVectorIcon(this, IDC_OPTIONS, IDS_SETTINGS,
++                                   kSettingsIcon);
++  AddItemWithStringIdAndVectorIcon(this, IDC_HELP_PAGE_VIA_MENU,
++                                   IDS_HELP_PAGE, kHelpCustomIcon);
++  AddSeparator(ui::NORMAL_SEPARATOR);
++
++  // The app's shell has an About, a log and engine switches of its own.
++  auto shell = std::make_unique<ui::SimpleMenuModel>(this);
++  shell->AddItem(kW10mShellCommandFirst, u"About this port");
++  shell->AddItem(kW10mShellCommandFirst + 1, u"Log");
++  shell->AddItem(kW10mShellCommandFirst + 2, u"Engine switches (restart)");
++  shell->AddItem(kW10mShellCommandFirst + 3, u"Copy logs to Pictures");
++  sub_menus_.push_back(std::move(shell));
++  AddSubMenu(kW10mShellSubmenu, u"Windows 10 Mobile", sub_menus_.back().get());
++}
++#endif  // defined(VENETIUM_W10M)
++
+ void AppMenuModel::ExecuteCommand(int command_id, int event_flags) {
+ #if defined(VENETIUM_W10M)
+   if (IsW10mShellCommand(command_id)) {
+@@ -2092,14 +2153,8 @@ void AppMenuModel::Build() {
+   DCHECK_EQ(0u, GetItemCount());
+ 
+ #if defined(VENETIUM_W10M)
+-  // What Chrome for Android's menu starts with, whose toolbar has no room
+-  // for them either.
+-  AddItemWithStringIdAndVectorIcon(this, IDC_FORWARD,
+-                                   IDS_CONTENT_CONTEXT_FORWARD,
+-                                   vector_icons::kArrowForwardIcon);
+-  AddItemWithStringIdAndVectorIcon(this, IDC_RELOAD, IDS_CONTENT_CONTEXT_RELOAD,
+-                                   vector_icons::kRefreshIcon);
+-  AddSeparator(ui::NORMAL_SEPARATOR);
++  BuildPhoneMenu();
++  return;
+ #endif
+ 
+   if (app_menu_icon_controller_ &&
+@@ -2371,23 +2426,7 @@ void AppMenuModel::Build() {
+       this, IDC_OPTIONS, IDS_SETTINGS,
+       features::IsRoundedIconsEnabled() ? kSettingsIcon : kSettingsMenuOldIcon);
+ 
+-#if defined(VENETIUM_W10M)
+-  {
+-    auto shell = std::make_unique<ui::SimpleMenuModel>(this);
+-    shell->AddItem(kW10mShellCommandFirst, u"About this port");
+-    shell->AddItem(kW10mShellCommandFirst + 1, u"Log");
+-    shell->AddItem(kW10mShellCommandFirst + 2, u"Engine switches (restart)");
+-    shell->AddItem(kW10mShellCommandFirst + 3, u"Copy logs to Pictures");
+-    sub_menus_.push_back(std::move(shell));
+-    AddSubMenu(kW10mShellSubmenu, u"Windows 10 Mobile",
+-               sub_menus_.back().get());
+-  }
+-  // The phone closes apps; Exit would only end the engine under the shell.
+-  const bool show_exit = false;
+-#else
+-  const bool show_exit = browser_defaults::kShowExitMenuItem;
+-#endif
+-  if (show_exit) {
++  if (browser_defaults::kShowExitMenuItem) {
+     AddItemWithStringIdAndVectorIcon(
+         this, IDC_EXIT, IDS_EXIT,
+         features::IsRoundedIconsEnabled() ? kExitToAppIcon : kExitMenuOldIcon);
+diff --git a/chrome/browser/ui/toolbar/app_menu_model.h b/chrome/browser/ui/toolbar/app_menu_model.h
+index 93e33f368b2e82d79f664593a008ce92f53321c3..aa96eb3080a199134d67d584b9795c19da94781e 100644
+--- a/chrome/browser/ui/toolbar/app_menu_model.h
++++ b/chrome/browser/ui/toolbar/app_menu_model.h
+@@ -199,6 +199,10 @@ class AppMenuModel : public ui::SimpleMenuModel,
+   // switches, 4 copy the logs.
+   using W10mShellCommandHandler = void (*)(int command);
+   static void SetW10mShellCommandHandler(W10mShellCommandHandler handler);
++
++  // The first row of the phone's menu, as Chrome for Android's: back,
++  // forward, bookmark, download and reload as icons (AppMenu draws it).
++  static constexpr int kW10mNavigationRow = 40989;
+ #endif
+ 
+   DECLARE_CLASS_ELEMENT_IDENTIFIER_VALUE(kCreateNewTabGroupTopLevel);
+@@ -351,6 +355,12 @@ class AppMenuModel : public ui::SimpleMenuModel,
+   // Other submenus.
+   std::vector<std::unique_ptr<ui::SimpleMenuModel>> sub_menus_;
+ 
++#if defined(VENETIUM_W10M)
++  // Chrome for Android's menu, built instead of the desktop's.
++  void BuildPhoneMenu();
++  std::unique_ptr<ui::ButtonMenuItemModel> phone_navigation_model_;
++#endif
++
+   raw_ptr<ui::AcceleratorProvider> provider_;  // weak
+ 
+   const raw_ptr<Browser> browser_;  // weak
+diff --git a/chrome/browser/ui/views/toolbar/app_menu.cc b/chrome/browser/ui/views/toolbar/app_menu.cc
+index 6900c2bab12d3b69c7ce2159b0d46c45066daec8..7b0807cae5419713b05e4d34122468483994992d 100644
+--- a/chrome/browser/ui/views/toolbar/app_menu.cc
++++ b/chrome/browser/ui/views/toolbar/app_menu.cc
+@@ -26,6 +26,9 @@
+ #include "build/build_config.h"
+ #include "chrome/app/chrome_command_ids.h"
+ #include "chrome/app/vector_icons/vector_icons.h"
++#if defined(VENETIUM_W10M)
++#include "components/vector_icons/vector_icons.h"
++#endif
+ #include "chrome/browser/bookmarks/bookmark_merged_surface_service.h"
+ #include "chrome/browser/bookmarks/bookmark_merged_surface_service_factory.h"
+ #include "chrome/browser/browser_process.h"
+@@ -683,6 +686,72 @@ BEGIN_METADATA(AppMenu, CutCopyPasteView)
+ ADD_READONLY_PROPERTY_METADATA(int, MaxChildViewPreferredWidth)
+ END_METADATA
+ 
++#if defined(VENETIUM_W10M)
++// PhoneNavigationView ---------------------------------------------------------
++
++// Chrome for Android's first menu row: back, forward, bookmark, download and
++// reload, as round icon buttons spread across the menu.
++class AppMenu::PhoneNavigationView : public AppMenuView {
++  METADATA_HEADER(PhoneNavigationView, AppMenuView)
++
++ public:
++  PhoneNavigationView(AppMenu* menu, ButtonMenuItemModel* menu_model)
++      : AppMenuView(menu, menu_model) {
++    static constexpr int kNames[] = {
++        IDS_CONTENT_CONTEXT_BACK, IDS_CONTENT_CONTEXT_FORWARD,
++        IDS_STAR_VIEW_MENU_ADD_BOOKMARK, IDS_SAVE_PAGE,
++        IDS_CONTENT_CONTEXT_RELOAD};
++    const gfx::VectorIcon* const icons[] = {
++        &vector_icons::kArrowBackIcon, &vector_icons::kArrowForwardIcon,
++        &kStarIcon, &kDownloadIcon, &vector_icons::kRefreshIcon};
++    const auto cancel_and_evaluate =
++        [](AppMenu* menu, ButtonMenuItemModel* menu_model, size_t index) {
++          menu->CancelAndEvaluate(menu_model, index);
++        };
++    const size_t count =
++        std::min<size_t>(menu_model->GetItemCount(), std::size(icons));
++    for (size_t i = 0; i < count; ++i) {
++      CreateButtonWithAccessibleName(
++          base::BindRepeating(cancel_and_evaluate, base::Unretained(menu),
++                              menu_model, i),
++          kNames[i], InMenuButtonBackground::ButtonType::kRoundedButton, i,
++          kNames[i], /*add_accelerator_text=*/false,
++          /*use_accessible_name_as_tooltip_text=*/true, *icons[i]);
++    }
++  }
++  PhoneNavigationView(const PhoneNavigationView&) = delete;
++  PhoneNavigationView& operator=(const PhoneNavigationView&) = delete;
++
++  // Overridden from View.
++  gfx::Size CalculatePreferredSize(
++      const views::SizeBounds& available_size) const override {
++    // The height is the menu item's.
++    return {kButtonExtent * static_cast<int>(children().size()), 0};
++  }
++
++  void Layout(PassKey) override {
++    // As many equal columns as there are buttons, each holding a round
++    // button of its own size.
++    const int count = static_cast<int>(children().size());
++    if (!count) {
++      return;
++    }
++    const int column = width() / count;
++    const int extent = std::min({kButtonExtent, column, height()});
++    for (int i = 0; i < count; ++i) {
++      children()[i]->SetBounds(i * column + (column - extent) / 2,
++                               (height() - extent) / 2, extent, extent);
++    }
++  }
++
++ private:
++  static constexpr int kButtonExtent = 48;
++};
++
++BEGIN_METADATA(AppMenu, PhoneNavigationView)
++END_METADATA
++#endif  // defined(VENETIUM_W10M)
++
+ // ZoomView --------------------------------------------------------------------
+ 
+ // ZoomView contains the various zoom controls: two buttons to increase/decrease
+@@ -1636,6 +1705,16 @@ void AppMenu::PopulateMenu(MenuItemView* parent, MenuModel* model) {
+         break;
+       }
+ 
++#if defined(VENETIUM_W10M)
++      case AppMenuModel::kW10mNavigationRow: {
++        ui::ButtonMenuItemModel* submodel = model->GetButtonMenuItemAt(i);
++        item->set_vertical_margin(8);
++        item->AddChildView(std::make_unique<PhoneNavigationView>(this, submodel));
++        item->set_children_use_full_width(true);
++        break;
++      }
++#endif
++
+       case IDC_ZOOM_MENU: {
+         ui::ButtonMenuItemModel* submodel = model->GetButtonMenuItemAt(i);
+         DCHECK_EQ(IDC_ZOOM_MINUS, submodel->GetCommandIdAt(0));
+diff --git a/chrome/browser/ui/views/toolbar/app_menu.h b/chrome/browser/ui/views/toolbar/app_menu.h
+index 63aa030ad4fc86a5eed3c6728926fea114cdbf49..6d6b0a2e0daaea345f317a4f24d88251ef28050b 100644
+--- a/chrome/browser/ui/views/toolbar/app_menu.h
++++ b/chrome/browser/ui/views/toolbar/app_menu.h
+@@ -137,6 +137,9 @@ class AppMenu final : public views::MenuDelegate,
+ 
+  private:
+   class CutCopyPasteView;
++#if defined(VENETIUM_W10M)
++  class PhoneNavigationView;
++#endif
+   class RecentTabsMenuModelDelegate;
+   class ZoomView;
+ 
+diff --git a/chrome/browser/ui/views/toolbar/toolbar_view.cc b/chrome/browser/ui/views/toolbar/toolbar_view.cc
+index 94f34e163b51449a8fed7cef9b0749c16e8b5f71..beac08704d884c68f0a76a1b5425958fc7b16058 100644
+--- a/chrome/browser/ui/views/toolbar/toolbar_view.cc
++++ b/chrome/browser/ui/views/toolbar/toolbar_view.cc
+@@ -54,6 +54,17 @@
+ #include "chrome/browser/ui/global_error/global_error_service_factory.h"
+ #include "chrome/browser/ui/intent_picker_tab_helper.h"
+ #include "chrome/browser/ui/layout_constants.h"
++#if defined(VENETIUM_W10M)
++#include "base/strings/string_number_conversions.h"
++#include "cc/paint/paint_flags.h"
++#include "chrome/app/vector_icons/vector_icons.h"
++#include "chrome/browser/ui/tabs/tab_strip_model.h"
++#include "chrome/browser/ui/tabs/tab_strip_model_observer.h"
++#include "chrome/browser/ui/views/tab_search_bubble_host.h"
++#include "ui/gfx/canvas.h"
++#include "ui/gfx/font_list.h"
++#include "ui/gfx/geometry/rect_conversions.h"
++#endif
+ #include "chrome/browser/ui/omnibox/omnibox_view.h"
+ #include "chrome/browser/ui/page_action/page_action_properties_provider.h"
+ #include "chrome/browser/ui/tab_search_feature.h"
+@@ -250,6 +261,102 @@ bool IsPositionInWindowCaptionForView(const views::View* view,
+ 
+ DEFINE_CLASS_ELEMENT_IDENTIFIER_VALUE(ToolbarView, kToolbarElementId);
+ 
++#if defined(VENETIUM_W10M)
++namespace {
++
++// "+" beside the address bar: a new tab.
++class PhoneNewTabButton : public ToolbarButton {
++  METADATA_HEADER(PhoneNewTabButton, ToolbarButton)
++
++ public:
++  explicit PhoneNewTabButton(PressedCallback callback)
++      : ToolbarButton(std::move(callback)) {
++    SetVectorIcons(kAddIcon, kAddIcon);
++    SetTooltipText(l10n_util::GetStringUTF16(IDS_TOOLTIP_NEW_TAB));
++    GetViewAccessibility().SetName(
++        l10n_util::GetStringUTF16(IDS_TOOLTIP_NEW_TAB));
++  }
++};
++
++BEGIN_METADATA(PhoneNewTabButton)
++END_METADATA
++
++// The number of tabs in a rounded square, as Chrome for Android's tab
++// switcher button. It opens the list of tabs (tab search, anchored here).
++class PhoneTabCounterButton : public ToolbarButton,
++                              public TabStripModelObserver {
++  METADATA_HEADER(PhoneTabCounterButton, ToolbarButton)
++
++ public:
++  explicit PhoneTabCounterButton(Browser* browser) : browser_(browser) {
++    tab_search_ = std::make_unique<TabSearchBubbleHost>(this, browser);
++    SetTooltipText(l10n_util::GetStringUTF16(IDS_ACCNAME_TAB_SEARCH));
++    GetViewAccessibility().SetName(
++        l10n_util::GetStringUTF16(IDS_ACCNAME_TAB_SEARCH));
++    browser_->tab_strip_model()->AddObserver(this);
++    Count();
++  }
++  PhoneTabCounterButton(const PhoneTabCounterButton&) = delete;
++  PhoneTabCounterButton& operator=(const PhoneTabCounterButton&) = delete;
++  ~PhoneTabCounterButton() override = default;
++
++  // TabStripModelObserver:
++  void OnTabStripModelChanged(
++      TabStripModel* tab_strip_model,
++      const TabStripModelChange& change,
++      const TabStripSelectionChange& selection) override {
++    Count();
++  }
++
++  // ToolbarButton:
++  gfx::Size CalculatePreferredSize(
++      const views::SizeBounds& available_size) const override {
++    const int extent =
++        GetLayoutConstant(LayoutConstant::kToolbarButtonHeight);
++    return gfx::Size(extent, extent);
++  }
++  void PaintButtonContents(gfx::Canvas* canvas) override {
++    const ui::ColorProvider* colors = GetColorProvider();
++    if (!colors) {
++      return;
++    }
++    const SkColor color = colors->GetColor(kColorToolbarButtonIcon);
++    const float side = std::min(width(), height()) * 0.45f;
++    const gfx::RectF box((width() - side) / 2, (height() - side) / 2, side,
++                         side);
++    cc::PaintFlags flags;
++    flags.setAntiAlias(true);
++    flags.setStyle(cc::PaintFlags::kStroke_Style);
++    flags.setStrokeWidth(2);
++    flags.setColor(color);
++    canvas->DrawRoundRect(box, side / 5, flags);
++    const gfx::FontList font = gfx::FontList().DeriveWithSizeDelta(
++        static_cast<int>(side * 0.55f) - gfx::FontList().GetFontSize())
++                                   .DeriveWithWeight(gfx::Font::Weight::BOLD);
++    canvas->DrawStringRectWithFlags(text_, font, color,
++                                    gfx::ToEnclosingRect(box),
++                                    gfx::Canvas::TEXT_ALIGN_CENTER);
++  }
++
++ private:
++  void Count() {
++    const int count = browser_->tab_strip_model()->count();
++    // Chrome for Android's face for a hundred tabs and more.
++    text_ = count < 100 ? base::NumberToString16(count) : u":D";
++    SchedulePaint();
++  }
++
++  raw_ptr<Browser> browser_;
++  std::unique_ptr<TabSearchBubbleHost> tab_search_;
++  std::u16string text_;
++};
++
++BEGIN_METADATA(PhoneTabCounterButton)
++END_METADATA
++
++}  // namespace
++#endif  // defined(VENETIUM_W10M)
++
+ ToolbarView::ToolbarView(Browser* browser, BrowserView* browser_view)
+     : AnimationDelegateViews(this),
+       browser_(browser),
+@@ -475,6 +582,14 @@ void ToolbarView::Init() {
+     location_bar_ = toolbar_webview_->GetLocationBar();
+   }
+ 
++#if defined(VENETIUM_W10M)
++  // Beside the address bar, as on Chrome for Android: a new tab, and the
++  // number of tabs, which opens the list of them.
++  AddChildView(std::make_unique<PhoneNewTabButton>(
++      base::BindRepeating(callback, browser_, IDC_NEW_TAB)));
++  AddChildView(std::make_unique<PhoneTabCounterButton>(browser_));
++#endif
++
+   bool is_glic_left_of_profile =
+       features::kGlicToolbarButtonLocationParam.Get() ==
+           features::GlicToolbarButtonLocation::kLeftOfProfileChip ||

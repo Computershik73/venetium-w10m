@@ -206,7 +206,8 @@ void ChoosePresentation(EngineConfig* config, uint64_t ram_mb) {
     // what a driver cannot do must not have a way of presenting tried again.
     if (token != "--vw-gpu=retry" && token != "--vw-present=bitmap" &&
         token != "--vw-codecs=all" && token != "--vw-discard=off" &&
-        token != "--vw-video=software" && token != "--vw-trim=off") {
+        token != "--vw-video=software" && token != "--vw-trim=off" &&
+        token != "--force-dark-mode") {
       made_of += ' ';
       made_of += token;
     }
