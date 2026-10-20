@@ -1,0 +1,158 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Tue, 20 Oct 2026 21:34:25 +0400
+Subject: [PATCH] Venetium 0048 (v1.2): 8-byte aligned cppgc collection
+ backings on ARM32
+
+From Venetium v1.2 (github.com/hamed7ir/venetium 92b73dd), patches/0048-arm32-cppgc-backing-alignment.patch.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../heap_hash_table_backing.h                 | 18 ++++++++++++++---
+ .../collection_support/heap_vector_backing.h  | 20 ++++++++++++++++---
+ .../platform/heap/collection_support/utils.h  | 18 +++++++++++++++++
+ .../platform/heap/heap_allocator_impl.h       |  8 +++++++-
+ 4 files changed, 57 insertions(+), 7 deletions(-)
+
+diff --git a/third_party/blink/renderer/platform/heap/collection_support/heap_hash_table_backing.h b/third_party/blink/renderer/platform/heap/collection_support/heap_hash_table_backing.h
+index e15da1e8912138c4b6708d6fc59914a4778af610..2e4df9b79350a010483bbdcc9dd2ad9675135258 100644
+--- a/third_party/blink/renderer/platform/heap/collection_support/heap_hash_table_backing.h
++++ b/third_party/blink/renderer/platform/heap/collection_support/heap_hash_table_backing.h
+@@ -26,8 +26,12 @@
+ 
+ namespace blink {
+ 
++// Venetium 0048: carry alignof(ValueType) so the element array this tag aliases is
++// 8-byte aligned on ARM32 (see kVenetiumBackingAlignment in utils.h). No-op off
++// ARM32.
+ template <typename Table>
+-class HeapHashTableBacking final
++class alignas(internal::kVenetiumBackingAlignment<typename Table::ValueType>)
++    HeapHashTableBacking final
+     : public GarbageCollected<HeapHashTableBacking<Table>> {
+   using ClassType = HeapHashTableBacking<Table>;
+   using ValueType = typename Table::ValueType;
+@@ -64,7 +68,11 @@ class HeapHashTableBacking final
+   static cppgc::AdditionalBytes GetAdditionalBytes(size_t wanted_array_size) {
+     // HHTB is an empty class that's purely used with inline storage. Since its
+     // sizeof(HHTB) == 1, we need to subtract its size to avoid wasting storage.
+-    static_assert(sizeof(ClassType) == 1, "Class declaration changed");
++    // Venetium 0048: with alignas (ARM32, 8-byte-aligned ValueType) sizeof(HHTB)
++    // == 8; an 8-aligned ValueType has sizeof >= 8 >= sizeof(ClassType), so
++    // wanted_array_size never underflows below.
++    static_assert(sizeof(ClassType) == internal::kVenetiumBackingAlignment<ValueType>,
++                  "Class declaration changed");
+     DCHECK_GE(wanted_array_size, sizeof(ClassType));
+     return cppgc::AdditionalBytes{wanted_array_size - sizeof(ClassType)};
+   }
+@@ -118,7 +126,11 @@ template <typename Table>
+ struct CompactionTraits<blink::HeapHashTableBacking<Table>> {
+   static constexpr bool SupportsCompaction() {
+     using ValueTraits = typename Table::ValueTraits;
+-    return ValueTraits::kSupportsCompaction;
++    // Venetium 0048: keep 8-byte-aligned-element backings out of compaction on ARM32
++    // so they can use the 8-aligned default-space path (cppgc forbids non-default
++    // alignment in compaction spaces). No-op off ARM32. See heap_vector_backing.h.
++    return ValueTraits::kSupportsCompaction &&
++           kVenetiumBackingAlignment<typename Table::ValueType> == 1;
+   }
+ };
+ 
+diff --git a/third_party/blink/renderer/platform/heap/collection_support/heap_vector_backing.h b/third_party/blink/renderer/platform/heap/collection_support/heap_vector_backing.h
+index 32a34f7e6b297f6b19410bf0222547e0eb5d8957..e8a24767496d529b5c54bb8f66351da3cb020a49 100644
+--- a/third_party/blink/renderer/platform/heap/collection_support/heap_vector_backing.h
++++ b/third_party/blink/renderer/platform/heap/collection_support/heap_vector_backing.h
+@@ -35,8 +35,11 @@ inline bool VTableInitialized(const void* object_payload) {
+ 
+ }  // namespace internal
+ 
++// Venetium 0048: carry alignof(T) so the element array this tag aliases is
++// 8-byte aligned on ARM32 (see kVenetiumBackingAlignment in utils.h). No-op off
++// ARM32.
+ template <typename T, typename Traits = VectorTraits<T>>
+-class HeapVectorBacking final
++class alignas(internal::kVenetiumBackingAlignment<T>) HeapVectorBacking final
+     : public GarbageCollected<HeapVectorBacking<T, Traits>> {
+  public:
+   using ClassType = HeapVectorBacking<T, Traits>;
+@@ -73,7 +76,11 @@ class HeapVectorBacking final
+   static cppgc::AdditionalBytes GetAdditionalBytes(size_t wanted_array_size) {
+     // HVB is an empty class that's purely used with inline storage. Since its
+     // sizeof(HVB) == 1, we need to subtract its size to avoid wasting storage.
+-    static_assert(sizeof(ClassType) == 1, "Class declaration changed");
++    // Venetium 0048: with alignas (ARM32, 8-byte-aligned T) sizeof(HVB) == 8; the
++    // subtraction below still yields the exact wanted size because an 8-aligned T
++    // has sizeof(T) >= 8 >= sizeof(ClassType), so wanted_array_size never underflows.
++    static_assert(sizeof(ClassType) == internal::kVenetiumBackingAlignment<T>,
++                  "Class declaration changed");
+     DCHECK_GE(wanted_array_size, sizeof(ClassType));
+     return cppgc::AdditionalBytes{wanted_array_size - sizeof(ClassType)};
+   }
+@@ -125,7 +132,14 @@ namespace internal {
+ template <typename T>
+ struct CompactionTraits<blink::HeapVectorBacking<T>> {
+   static constexpr bool SupportsCompaction() {
+-    return blink::HeapVectorBacking<T>::TraitsType::kCanMoveWithMemcpy;
++    // Venetium 0048: an element needing 8-byte alignment on ARM32
++    // (kVenetiumBackingAlignment<T> == 8) cannot live in a compaction space - cppgc
++    // forbids non-default alignment for compactable objects. Keep such backings out
++    // of compaction so they take the 8-aligned default-space path instead; the
++    // movable-reference registration keys off this same predicate, so it stays
++    // consistent. No-op off ARM32 (kVenetiumBackingAlignment is always 1 there).
++    return blink::HeapVectorBacking<T>::TraitsType::kCanMoveWithMemcpy &&
++           kVenetiumBackingAlignment<T> == 1;
+   }
+ };
+ }  // namespace internal
+diff --git a/third_party/blink/renderer/platform/heap/collection_support/utils.h b/third_party/blink/renderer/platform/heap/collection_support/utils.h
+index 354aea6852f7989179e23ded8351acc12aabf265..823d5d798ed2f5f5120cd819a4cbb68945276084 100644
+--- a/third_party/blink/renderer/platform/heap/collection_support/utils.h
++++ b/third_party/blink/renderer/platform/heap/collection_support/utils.h
+@@ -5,10 +5,28 @@
+ #ifndef THIRD_PARTY_BLINK_RENDERER_PLATFORM_HEAP_COLLECTION_SUPPORT_UTILS_H_
+ #define THIRD_PARTY_BLINK_RENDERER_PLATFORM_HEAP_COLLECTION_SUPPORT_UTILS_H_
+ 
++#include "build/build_config.h"  // Venetium 0048: ARCH_CPU_ARMEL.
+ #include "third_party/blink/renderer/platform/wtf/allocator/allocator.h"
+ 
+ namespace blink::internal {
+ 
++// Venetium 0048: alignment to request for a cppgc collection backing whose
++// address aliases an array of `ElementT`. The backing tag types are empty
++// (alignof 1), so cppgc would align them only to kDefaultAlignment = sizeof(void*)
++// = 4 on 32-bit, and 8-byte members (double / int64) in the elements then fault on
++// ARM32's LDRD/STRD/VLDR (STATUS_DATATYPE_MISALIGNMENT). x86-32 tolerates the
++// unaligned access and 64-bit already uses kDefaultAlignment = 8, so this is a
++// no-op (1) off ARM32. On ARM32 it returns 8 for 8-byte-aligned elements - the
++// most cppgc supports on 32-bit - and 1 otherwise. Individual GarbageCollected
++// objects are unaffected (cppgc uses their real alignof).
++template <typename ElementT>
++inline constexpr size_t kVenetiumBackingAlignment =
++#if defined(ARCH_CPU_ARMEL)
++    (alignof(ElementT) > 4 ? 8u : 1u);
++#else
++    1u;
++#endif
++
+ // Internal only. Specifies whether a collection type should be GarbageCollected
+ // or DISALLOW_NEW().
+ enum class HeapCollectionType { kGCed, kDisallowNew };
+diff --git a/third_party/blink/renderer/platform/heap/heap_allocator_impl.h b/third_party/blink/renderer/platform/heap/heap_allocator_impl.h
+index c456d24f96560163e5e91a9b7f4d6b636dddcdf1..d6b35bf7837a0601c4ad85acdb07cdfb8e3b8fa4 100644
+--- a/third_party/blink/renderer/platform/heap/heap_allocator_impl.h
++++ b/third_party/blink/renderer/platform/heap/heap_allocator_impl.h
+@@ -237,7 +237,13 @@ class PLATFORM_EXPORT HeapAllocator {
+                                  const T* const* backing_slot) {
+     using BackingType = HeapVectorBacking<T>;
+ 
+-    if constexpr (BackingType::TraitsType::kCanMoveWithMemcpy) {
++    // Venetium 0048: gate on CompactionTraits (as the hash-table paths do) rather
++    // than kCanMoveWithMemcpy directly, so a backing kept out of compaction for
++    // alignment (8-byte elements on ARM32, see collection_support) is not registered
++    // as a movable slot - RegisterMovableReference asserts the backing is on a
++    // compactable space, and such a backing no longer is. Off ARM32 this is identical
++    // to kCanMoveWithMemcpy (kVenetiumBackingAlignment is always 1 there).
++    if constexpr (internal::CompactionTraits<BackingType>::SupportsCompaction()) {
+       visitor->RegisterMovableReference(const_cast<const BackingType**>(
+           reinterpret_cast<const BackingType* const*>(backing_slot)));
+     }

@@ -1,0 +1,160 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Tue, 20 Oct 2026 21:34:24 +0400
+Subject: [PATCH] Venetium 0032 (v1.2): ANGLE remembers shaders that failed to
+ compile
+
+From Venetium v1.2 (github.com/hamed7ir/venetium 92b73dd), patches/0032-angle-cache-failed-shader-compiles.patch.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../renderer/d3d/ProgramExecutableD3D.cpp     | 68 +++++++++++++++++--
+ .../renderer/d3d/ProgramExecutableD3D.h       | 12 ++++
+ 2 files changed, 74 insertions(+), 6 deletions(-)
+
+diff --git a/third_party/angle/src/libANGLE/renderer/d3d/ProgramExecutableD3D.cpp b/third_party/angle/src/libANGLE/renderer/d3d/ProgramExecutableD3D.cpp
+index 5d545a61bfc85712434439510d23e38c4353bade..1a9c54748bbd1ae3aa7cd185ffa96b9e91302c88 100644
+--- a/third_party/angle/src/libANGLE/renderer/d3d/ProgramExecutableD3D.cpp
++++ b/third_party/angle/src/libANGLE/renderer/d3d/ProgramExecutableD3D.cpp
+@@ -1210,6 +1210,13 @@ angle::Result ProgramExecutableD3D::getVertexExecutableForCachedInputLayout(
+         mImage2DUniforms[gl::ShaderType::Vertex], mImage2DBindLayoutCache[gl::ShaderType::Vertex],
+         static_cast<unsigned int>(mPixelShaderKey.size()));
+ 
++    // Venetium 0032: this HLSL already failed to compile once; return "no executable" without recompiling.
++    if (mFailedVertexHLSL.count(finalVertexHLSL) != 0)
++    {
++        *outExectuable = nullptr;
++        return angle::Result::Continue;
++    }
++
+     // Generate new vertex executable
+     ShaderExecutableD3D *vertexExecutable = nullptr;
+ 
+@@ -1227,10 +1234,19 @@ angle::Result ProgramExecutableD3D::getVertexExecutableForCachedInputLayout(
+             new D3DVertexExecutable(mCachedInputLayout, mCachedVertexSignature, vertexExecutable)));
+         mCachedVertexExecutableIndex = mVertexExecutables.size() - 1;
+     }
+-    else if (!infoLog)
++    else
+     {
+-        ERR() << "Error compiling dynamic vertex executable:" << std::endl
+-              << tempInfoLog.str() << std::endl;
++        // Venetium 0032: remember this HLSL (ANGLE_TRY above already returned on a device-lost Stop, so this is a
++        // deterministic compile failure), and log the source + message once so the next device run hands it back.
++        bool firstTime = mFailedVertexHLSL.insert(finalVertexHLSL).second;
++        if (!infoLog && firstTime)
++        {
++            ERR() << "Error compiling dynamic vertex executable (Venetium 0032: caching this signature, will not retry):"
++                  << std::endl
++                  << tempInfoLog.str() << std::endl
++                  << "--- HLSL (once) ---" << std::endl
++                  << finalVertexHLSL << std::endl;
++        }
+     }
+ 
+     *outExectuable = vertexExecutable;
+@@ -1273,6 +1289,16 @@ angle::Result ProgramExecutableD3D::getGeometryExecutableForPrimitiveType(
+         mHasMultiviewEnabled, renderer->canSelectViewInVertexShader(),
+         usesGeometryShaderForPointSpriteEmulation(renderer), mGeometryShaderPreamble);
+ 
++    // Venetium 0032: this geometry HLSL already failed a (non-device-lost) compile once; skip the recompile.
++    if (mFailedGeometryHLSL.count(geometryHLSL) != 0)
++    {
++        if (outExecutable)
++        {
++            *outExecutable = nullptr;
++        }
++        return angle::Result::Continue;
++    }
++
+     gl::InfoLog tempInfoLog;
+     gl::InfoLog *currentInfoLog = infoLog ? infoLog : &tempInfoLog;
+ 
+@@ -1287,6 +1313,19 @@ angle::Result ProgramExecutableD3D::getGeometryExecutableForPrimitiveType(
+         ERR() << "Error compiling dynamic geometry executable:" << std::endl
+               << tempInfoLog.str() << std::endl;
+     }
++    // Venetium 0032: cache only a deterministic compile failure (no executable, result Continue), never a device-lost Stop.
++    else if (geometryExecutable == nullptr && result == angle::Result::Continue)
++    {
++        bool firstTime = mFailedGeometryHLSL.insert(geometryHLSL).second;
++        if (!infoLog && firstTime)
++        {
++            ERR() << "Error compiling dynamic geometry executable (Venetium 0032: caching this signature, will not retry):"
++                  << std::endl
++                  << tempInfoLog.str() << std::endl
++                  << "--- HLSL (once) ---" << std::endl
++                  << geometryHLSL << std::endl;
++        }
++    }
+ 
+     if (geometryExecutable != nullptr)
+     {
+@@ -1322,6 +1361,14 @@ angle::Result ProgramExecutableD3D::getPixelExecutableForCachedOutputLayout(
+         mImage2DBindLayoutCache[gl::ShaderType::Fragment],
+         static_cast<unsigned int>(mPixelShaderKey.size()));
+ 
++    // Venetium 0032: this HLSL already failed to compile once; return "no executable" without recompiling. This is the hot
++    // path on the device (every draw that needs one of the too-large Skia programs), so skipping the compile removes the stall.
++    if (mFailedPixelHLSL.count(finalPixelHLSL) != 0)
++    {
++        *outExecutable = nullptr;
++        return angle::Result::Continue;
++    }
++
+     // Generate new pixel executable
+     ShaderExecutableD3D *pixelExecutable = nullptr;
+ 
+@@ -1340,10 +1387,19 @@ angle::Result ProgramExecutableD3D::getPixelExecutableForCachedOutputLayout(
+             pixelExecutable)));
+         mCachedPixelExecutableIndex = mPixelExecutables.size() - 1;
+     }
+-    else if (!infoLog)
++    else
+     {
+-        ERR() << "Error compiling dynamic pixel executable:" << std::endl
+-              << tempInfoLog.str() << std::endl;
++        // Venetium 0032: remember this HLSL (ANGLE_TRY above already returned on a device-lost Stop, so this is a
++        // deterministic compile failure), and log the source + message once so the next device run hands it back.
++        bool firstTime = mFailedPixelHLSL.insert(finalPixelHLSL).second;
++        if (!infoLog && firstTime)
++        {
++            ERR() << "Error compiling dynamic pixel executable (Venetium 0032: caching this signature, will not retry):"
++                  << std::endl
++                  << tempInfoLog.str() << std::endl
++                  << "--- HLSL (once) ---" << std::endl
++                  << finalPixelHLSL << std::endl;
++        }
+     }
+ 
+     *outExecutable = pixelExecutable;
+diff --git a/third_party/angle/src/libANGLE/renderer/d3d/ProgramExecutableD3D.h b/third_party/angle/src/libANGLE/renderer/d3d/ProgramExecutableD3D.h
+index ad9cf340fdc119273a2fc9e7ddc700f24b375137..d06aa1fad623b329f648402e045cb529506b758d 100644
+--- a/third_party/angle/src/libANGLE/renderer/d3d/ProgramExecutableD3D.h
++++ b/third_party/angle/src/libANGLE/renderer/d3d/ProgramExecutableD3D.h
+@@ -9,6 +9,9 @@
+ #ifndef LIBANGLE_RENDERER_D3D_PROGRAMEXECUTABLED3D_H_
+ #define LIBANGLE_RENDERER_D3D_PROGRAMEXECUTABLED3D_H_
+ 
++#include <set>
++#include <string>
++
+ #include "compiler/translator/hlsl/blocklayoutHLSL.h"
+ #include "libANGLE/ProgramExecutable.h"
+ #include "libANGLE/formatutils.h"
+@@ -444,6 +447,15 @@ class ProgramExecutableD3D : public ProgramExecutableImpl
+     angle::PackedEnumMap<gl::PrimitiveMode, std::unique_ptr<ShaderExecutableD3D>>
+         mGeometryExecutables;
+ 
++    // Venetium 0032: the exact generated HLSL of a dynamic executable whose compile returned no executable (a deterministic
++    // compile failure, e.g. a Skia program that needs more arithmetic slots than ps_2_0 allows on the device's D3D9/SM2). A
++    // repeat of the same HLSL returns "no executable" at once, skipping the (seconds-long, always-failing) recompile. Keyed by
++    // the HLSL string, which is identical for repeats and distinct per signature. Device-lost errors (angle::Result::Stop) are
++    // not recorded here.
++    std::set<std::string> mFailedVertexHLSL;
++    std::set<std::string> mFailedPixelHLSL;
++    std::set<std::string> mFailedGeometryHLSL;
++
+     gl::ShaderMap<std::string> mShaderHLSL;
+     gl::ShaderMap<CompilerWorkaroundsD3D> mShaderWorkarounds;
+ 

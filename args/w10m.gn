@@ -9,7 +9,14 @@ is_w10m = true                    # build/config/win/w10m.gni (patches/w10m)
 is_debug = false
 dcheck_always_on = false
 is_component_build = false
-is_official_build = false
+# As Venetium v1.2 (its developer's advice, for speed): an official build. It
+# defines OFFICIAL_BUILD -- compact CHECKs (no message, a crash at the CHECK),
+# zero instead of pattern stack-variable init, no PartitionAlloc thread-cache
+# statistics, report-only DUMP_WILL_BE_CHECKs, V8 logging level 0, Rust
+# codegen-units=1 -- and links with /OPT:REF. The explicit use_thin_lto,
+# chrome_pgo_phase and symbol_level below keep official's defaults (ThinLTO,
+# PGO, full symbols) off.
+is_official_build = true
 
 # Disk and link time: a phone build is debugged from its own log, as
 # gecko-w10m's is. symbol_level 1 (Venetium) needs ~15 GB more and lld-link
@@ -24,7 +31,11 @@ clang_version = "23"
 clang_use_chrome_plugins = false
 treat_warnings_as_errors = false  # a newer clang than Chromium 150's warns more
 use_thin_lto = false
-chrome_pgo_phase = 0
+chrome_pgo_phase = 0  # no ARM32 profile exists
+# V8 builtins PGO with the x86 profile V8 ships for x86 and ARM (Venetium
+# v1.2, 0058): the interpreter's handlers are builtins too, so it helps
+# jitless JavaScript as well.
+v8_enable_builtins_optimization = true
 use_siso = false
 enable_precompiled_headers = false
 # rt2 is not rt2.1: lld-link's ARM32 Control Flow Guard tables are wrong

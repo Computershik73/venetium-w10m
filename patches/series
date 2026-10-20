@@ -19,7 +19,10 @@ supermium xp_tts_fix
 # Venetium. Left out: 0006 (gaia; Supermium's ungoogled set already does it),
 # 0014 (Supermium 09-30 has its own fix, with a typo apply-patches.sh
 # corrects), 0021 (Direct3D 9: a phone has none) and 0032-0043 (Tegra and
-# Direct3D 9 tuning, the Windows RT renderer token). 0024 comes back from
+# Direct3D 9 tuning, the Windows RT renderer token). Of Venetium v1.2, 0032,
+# 0036, 0037, 0048, 0050, 0054-0058, 0060 and 0061 (the performance work) are
+# in patches/w10m as "Venetium NNNN (v1.2)" commits, without the files that
+# do not apply here (each commit names them). 0024 comes back from
 # superseded/: rt2 has no 32-bit ARM C++ exception handling, which is what
 # rt2.1 fixed and made 0024 unnecessary.
 venetium 0001-branding.patch

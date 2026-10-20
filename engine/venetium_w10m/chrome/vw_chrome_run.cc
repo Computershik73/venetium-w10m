@@ -109,7 +109,12 @@ void AddChromeSwitches(const EngineConfig& config,
   // thread a single process has for good; in the browser they do not.
   AddToFeatureList(command_line, switches::kEnableFeatures,
                    "TracingServiceInProcess,"
-                   "RunVideoCaptureServiceInBrowserProcess");
+                   "RunVideoCaptureServiceInBrowserProcess,"
+                   // The tab switcher's pictures (VwTabGrid): Chrome keeps
+                   // each tab's as it goes to the background. Venetium 0056
+                   // turns them off on ARM32 tablets, which have no use for
+                   // them.
+                   "TabHoverCardImages");
   // A URL from outside (the shell's first one): a tab of its own.
   if (!config.initial_url.empty()) {
     command_line->AppendArg(config.initial_url);

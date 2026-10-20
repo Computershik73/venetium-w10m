@@ -1,0 +1,34 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Tue, 20 Oct 2026 21:34:25 +0400
+Subject: [PATCH] Venetium 0050 (v1.2): Web Store extensions install again
+
+From Venetium v1.2 (github.com/hamed7ir/venetium 92b73dd), patches/0050-webstore-extension-install.patch.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ extensions/browser/extension_util.cc | 11 ++++++++++-
+ 1 file changed, 10 insertions(+), 1 deletion(-)
+
+diff --git a/extensions/browser/extension_util.cc b/extensions/browser/extension_util.cc
+index e8df047adde400b57d4cc00d1faeb11d436ac626..1e391f17404781fc7167b66e1b3fd86f3526568e 100644
+--- a/extensions/browser/extension_util.cc
++++ b/extensions/browser/extension_util.cc
+@@ -592,7 +592,16 @@ bool IsExtensionDownload(const download::DownloadItem& download_item) {
+   if (download_item.GetMimeType() == Extension::kMimeType ||
+       UserScript::IsURLUserScript(download_item.GetURL(),
+                                   download_item.GetMimeType())) {
+-    return ShouldDownloadAsRegularFile();
++    // Venetium 0050: a valid extension / user-script download IS an extension
++    // download. The ungoogled change here returned ShouldDownloadAsRegularFile()
++    // directly, which is false unless --extension-mime-request-handling=
++    // download-as-regular-file is passed, so WebstoreInstaller rejected EVERY Web
++    // Store .crx with "Download was not a valid extension or user script" and no
++    // extension could be installed. Negate it to match download_target_determiner.cc,
++    // which gates the install branch on !ShouldDownloadAsRegularFile(): install by
++    // default; download the .crx as a plain file only when the user opts in via the
++    // flag. (The CRX unzip utility itself is already handled by Venetium 0044.)
++    return !ShouldDownloadAsRegularFile();
+   }
+   return false;
+ }

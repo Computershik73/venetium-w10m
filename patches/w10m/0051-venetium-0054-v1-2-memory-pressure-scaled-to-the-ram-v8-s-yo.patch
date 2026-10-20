@@ -1,0 +1,94 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Tue, 20 Oct 2026 21:34:25 +0400
+Subject: [PATCH] Venetium 0054 (v1.2): memory pressure scaled to the RAM, V8's
+ young generation on low-end machines
+
+From Venetium v1.2 (github.com/hamed7ir/venetium 92b73dd), patches/0054-low-end-memory-pressure-v8-young-gen-d3d9-vsync.patch.
+Left out here (they do not apply to this port's tree, and the phone does not
+need them): components/viz/service/display_embedder/skia_output_device_gl.cc
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../system_memory_pressure_evaluator_win.cc   | 25 ++++++++++++++++---
+ .../system_memory_pressure_evaluator_win.h    |  4 +--
+ content/renderer/render_process_impl.cc       | 10 ++++++++
+ 3 files changed, 34 insertions(+), 5 deletions(-)
+
+diff --git a/components/memory_pressure/system_memory_pressure_evaluator_win.cc b/components/memory_pressure/system_memory_pressure_evaluator_win.cc
+index 7a4c90e14ee5eb22c7a1acdb4113bfe067c509c5..9b280f81d8321a6ef2070db1c0de4a5578bfef89 100644
+--- a/components/memory_pressure/system_memory_pressure_evaluator_win.cc
++++ b/components/memory_pressure/system_memory_pressure_evaluator_win.cc
+@@ -125,13 +125,32 @@ void MemoryPressureWatcherDelegate::OnObjectSignaled(HANDLE handle) {
+   std::move(callback_).Run();
+ }
+ 
++// Venetium 0054: the fixed 1000/400 MiB available-RAM thresholds keep a 2 GB
++// machine at MODERATE pressure nearly all the time (Surface 2: 98% of
++// Memory.PressureLevel2 samples), which keeps the spare renderer away, cuts
++// the GPU caches to a quarter and prunes the back/forward cache every 5-10 s.
++// Below 4 GiB of RAM scale them with the installed memory (2 GiB: about
++// 512/205 MiB); at 4 GiB and above they stay at the upstream values.
++base::ByteCount ScaledThreshold(base::ByteCount upstream,
++                                int64_t total_mib_divisor,
++                                int64_t floor_mib) {
++  const int64_t total_mib =
++      base::SysInfo::AmountOfTotalPhysicalMemory().InMiB();
++  if (total_mib <= 0 || total_mib >= 4096) {
++    return upstream;
++  }
++  return base::MiB(std::clamp<int64_t>(total_mib / total_mib_divisor,
++                                       floor_mib, upstream.InMiB()));
++}
++
+ }  // namespace
+ 
+ SystemMemoryPressureEvaluator::SystemMemoryPressureEvaluator(
+     std::unique_ptr<MemoryPressureVoter> voter)
+-    : SystemMemoryPressureEvaluator(kPhysicalMemoryDefaultModerateThreshold,
+-                                    kPhysicalMemoryDefaultCriticalThreshold,
+-                                    std::move(voter)) {}
++    : SystemMemoryPressureEvaluator(
++          ScaledThreshold(kPhysicalMemoryDefaultModerateThreshold, 4, 300),
++          ScaledThreshold(kPhysicalMemoryDefaultCriticalThreshold, 10, 150),
++          std::move(voter)) {}
+ 
+ SystemMemoryPressureEvaluator::SystemMemoryPressureEvaluator(
+     base::ByteCount moderate_threshold,
+diff --git a/components/memory_pressure/system_memory_pressure_evaluator_win.h b/components/memory_pressure/system_memory_pressure_evaluator_win.h
+index 274ece73e54d8548cf7c425e931c5d8b2de7318d..75623230329315a32416aa6f479527ef5e6c2f18 100644
+--- a/components/memory_pressure/system_memory_pressure_evaluator_win.h
++++ b/components/memory_pressure/system_memory_pressure_evaluator_win.h
+@@ -47,8 +47,8 @@ class SystemMemoryPressureEvaluator
+   static constexpr base::ByteCount kPhysicalMemoryDefaultCriticalThreshold =
+       base::MiB(400);
+ 
+-  // Default constructor. Will choose thresholds automatically based on the
+-  // actual amount of system memory.
++  // Default constructor. Uses the thresholds above, scaled down on machines
++  // with less than 4 GiB of RAM (Venetium 0054).
+   explicit SystemMemoryPressureEvaluator(
+       std::unique_ptr<MemoryPressureVoter> voter);
+ 
+diff --git a/content/renderer/render_process_impl.cc b/content/renderer/render_process_impl.cc
+index f70cdddde1daf7d7ae8837a9643b4ada0b80c26a..b4966ec75899c5c9a8e48eb8018e631dea613671 100644
+--- a/content/renderer/render_process_impl.cc
++++ b/content/renderer/render_process_impl.cc
+@@ -124,7 +124,17 @@ RenderProcessImpl::RenderProcessImpl()
+           switches::kDisallowV8FeatureFlagOverrides);
+   if (!disallow_v8_feature_flag_overrides) {
+     if (base::SysInfo::IsLowEndDevice()) {
++#if BUILDFLAG(IS_ANDROID)
+       std::string_view optimize_flag("--optimize-for-size");
++#else
++      // Venetium 0054: on desktop "low end" means up to 2 GiB of RAM, where
++      // --optimize-for-size pins V8's young generation at 1 MiB and keeps the
++      // heap in permanent memory-saver mode (minimal growth, compaction on
++      // every mark-compact). Bound the young generation instead, at the 8 MiB
++      // V8 itself picks for non-high-end Android, and leave the GC heuristics
++      // alone.
++      std::string_view optimize_flag("--max-semi-space-size=8");
++#endif
+       v8::V8::SetFlagsFromString(optimize_flag.data(), optimize_flag.size());
+     }
+ 

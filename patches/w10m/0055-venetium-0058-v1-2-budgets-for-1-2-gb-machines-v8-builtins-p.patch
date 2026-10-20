@@ -1,0 +1,248 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Tue, 20 Oct 2026 21:34:26 +0400
+Subject: [PATCH] Venetium 0058 (v1.2): budgets for 1-2 GB machines, V8
+ builtins PGO, fewer components
+
+From Venetium v1.2 (github.com/hamed7ir/venetium 92b73dd), patches/0058-perf-research-small-fixes.patch.
+Left out here (they do not apply to this port's tree, and the phone does not
+need them): ui/gl/gl_features.cc
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ base/time/time_win.cc                         |  7 +++++-
+ cc/tiles/image_decode_cache_utils.cc          |  8 ++++++-
+ .../browser/component_updater/registration.cc | 24 +++++++------------
+ .../component_updater/configurator_impl.cc    |  5 +++-
+ .../gpu/gpu_data_manager_impl_private.cc      | 23 +++++++-----------
+ .../client/raster_implementation.cc           |  7 +++++-
+ .../service/service_transfer_cache.cc         |  7 ++++++
+ gpu/config/skia_limits.cc                     |  7 ++++++
+ v8/BUILD.gn                                   |  6 ++++-
+ 9 files changed, 60 insertions(+), 34 deletions(-)
+
+diff --git a/base/time/time_win.cc b/base/time/time_win.cc
+index 1f0bceba4b8006fb2aece249d149d6c3c5b91d22..cab0fbb371b5d8b155fc35e338ee52c044d4a443 100644
+--- a/base/time/time_win.cc
++++ b/base/time/time_win.cc
+@@ -591,7 +591,12 @@ void InitializeNowFunctionPointer() {
+         // the browser process so we should roll a dice to determine if we're in
+         // the field trial, or this device already uses high resolution
+         // TimeTicks so the dice roll will not be used.
+-        force_high_res_time_ticks = base::RandDouble() < 0.5;
++        // Venetium 0058: no dice. Old x86 CPUs without an invariant TSC bit
++        // otherwise get the 1-15.6 ms system clock on every other launch
++        // (unrepeatable timing, coarse animation and timer pacing); always
++        // use QueryPerformanceCounter, which Windows 10 backs with the TSC on
++        // nearly all of them.
++        force_high_res_time_ticks = true;
+       }
+     } else {
+       opted_out_because_no_command_line = true;
+diff --git a/cc/tiles/image_decode_cache_utils.cc b/cc/tiles/image_decode_cache_utils.cc
+index b78d3246bf9ba92d7402b62ce25ff0466d103bf8..26251da86b2d992c28cc25e865fe6866f0bd471e 100644
+--- a/cc/tiles/image_decode_cache_utils.cc
++++ b/cc/tiles/image_decode_cache_utils.cc
+@@ -27,7 +27,13 @@ size_t ImageDecodeCacheUtils::GetWorkingSetBytesForImageDecode(
+     // both gpu and software.
+     constexpr base::ByteSize kImageDecodeMemoryThreshold = base::GiBU(4);
+     if (using_low_memory_policy) {
+-      decoded_image_working_set_budget = base::MiBU(32);
++      // Venetium 0058: desktop "low end" reaches up to 2 GiB, where the
++      // Android-Go value of 32 MiB re-decodes images on ordinary pages; use
++      // 64 MiB above 1 GiB of RAM.
++      decoded_image_working_set_budget =
++          base::SysInfo::AmountOfTotalPhysicalMemory() > base::GiBU(1)
++              ? base::MiBU(64)
++              : base::MiBU(32);
+     } else if (base::SysInfo::AmountOfTotalPhysicalMemory() >=
+                kImageDecodeMemoryThreshold) {
+       decoded_image_working_set_budget = base::MiBU(256);
+diff --git a/chrome/browser/component_updater/registration.cc b/chrome/browser/component_updater/registration.cc
+index f891c619c6cdc337197e31282938acee3df918ac..55f44968951a2f7f552ae2780590e99c9734967f 100644
+--- a/chrome/browser/component_updater/registration.cc
++++ b/chrome/browser/component_updater/registration.cc
+@@ -148,10 +148,15 @@ void RegisterComponentsForUpdate() {
+   RegisterWidevineCdmComponent(cus);
+ #endif  // BUILDFLAG(ENABLE_WIDEVINE_CDM_COMPONENT)
+ 
+-  RegisterSubresourceFilterComponent(cus);
+-  RegisterOnDeviceHeadSuggestComponent(
+-      cus, g_browser_process->GetApplicationLocale());
+-  RegisterOptimizationHintsComponent(cus);
++  // Venetium 0058/0059: components this browser never uses are not
++  // registered, so they are not downloaded, verified and unpacked on a slow
++  // tablet: Google's subresource-filter ruleset (Venetium ships its own ad
++  // blocker list, 0059), the on-device head-suggest model and optimization
++  // hints (both feed Google-service features that are off here), the actor
++  // safety lists, commerce and payment-amount heuristics, and the captcha
++  // provider list. Everything with a security or web-compat role stays
++  // (CRLSet, PKI metadata, file type policies, safety tips, crowd deny,
++  // origin trials, first-party sets, hyphenation, ...).
+   RegisterTrustTokenKeyCommitmentsComponentIfTrustTokensEnabled(cus);
+   RegisterFirstPartySetsComponent(cus);
+   RegisterPrivacySandboxAttestationsComponent(cus);
+@@ -194,7 +199,6 @@ void RegisterComponentsForUpdate() {
+ #if !BUILDFLAG(IS_ANDROID)
+   RegisterIwaKeyDistributionComponent(cus);
+   RegisterZxcvbnDataComponent(cus);
+-  RegisterActorSafetyListsComponent(cus, base::OnceClosure());
+ #endif  // !BUILDFLAG(IS_ANDROID)
+ 
+ #if BUILDFLAG(IS_ANDROID)
+@@ -205,8 +209,6 @@ void RegisterComponentsForUpdate() {
+   ManageScreenAIComponentRegistration(cus, g_browser_process->local_state());
+ #endif  // !BUILDFLAG(IS_ANDROID) && !BUILDFLAG(IS_CHROMEOS)
+ 
+-  RegisterCommerceHeuristicsComponent(cus);
+-
+ #if BUILDFLAG(ENABLE_ON_DEVICE_TRANSLATION)
+   // TODO(crbug.com/364795294): Support other platforms.
+   RegisterTranslateKitComponent(cus, g_browser_process->local_state(),
+@@ -219,18 +221,10 @@ void RegisterComponentsForUpdate() {
+       cus, g_browser_process->local_state());
+ #endif  // BUILDFLAG(ENABLE_ON_DEVICE_TRANSLATION)
+ 
+-#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC) || BUILDFLAG(IS_LINUX) || \
+-    BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_ANDROID)
+-  RegisterAmountExtractionHeuristicRegexesComponent(cus);
+-#endif  // BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC) || BUILDFLAG(IS_LINUX) ||
+-        // BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_ANDROID)
+-
+ #if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC) || BUILDFLAG(IS_LINUX)
+   RegisterWasmTtsEngineComponent(cus, g_browser_process->local_state());
+ #endif  // BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC) || BUILDFLAG(IS_LINUX)
+ 
+-  RegisterCaptchaProviderComponent(cus);
+-
+   MaybeRegisterPlatformRuntimeComponent(cus);
+ 
+   base::FilePath path;
+diff --git a/components/component_updater/configurator_impl.cc b/components/component_updater/configurator_impl.cc
+index e8d0a0486e7f07b411adb2c38b1654e064c89256..2811efd1bfbf9922f3af0dd09e8969546c6c5a3b 100644
+--- a/components/component_updater/configurator_impl.cc
++++ b/components/component_updater/configurator_impl.cc
+@@ -57,7 +57,10 @@ base::TimeDelta ConfiguratorImpl::InitialDelay() const {
+   if (!initial_delay_.is_zero()) {
+     return initial_delay_;
+   }
+-  return fast_update_ ? base::Seconds(10) : base::Minutes(1);
++  // Venetium 0058: the first update check (downloads, CRX verification and
++  // unpacking) waits 10 minutes instead of 1, so it does not land in the
++  // first page loads after a launch on a slow tablet.
++  return fast_update_ ? base::Seconds(10) : base::Minutes(10);
+ }
+ 
+ base::TimeDelta ConfiguratorImpl::NextCheckDelay() const {
+diff --git a/content/browser/gpu/gpu_data_manager_impl_private.cc b/content/browser/gpu/gpu_data_manager_impl_private.cc
+index 5c2d6fa3d29e462efc3d5351bbd01b2433367fa7..ef05eb1525a5e5571de43846a26c8b9684f892c6 100644
+--- a/content/browser/gpu/gpu_data_manager_impl_private.cc
++++ b/content/browser/gpu/gpu_data_manager_impl_private.cc
+@@ -1164,13 +1164,15 @@ std::optional<CHROME_LUID> GpuDataManagerImplPrivate::GetUseAdapterLuid()
+ 
+ void GpuDataManagerImplPrivate::PostCreateThreads() {
+   base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
+-  // Launch the info collection GPU process to collect Dawn info.
+-  // Not to affect Chrome startup, this is done in a delayed mode, i.e., 120
+-  // seconds after Chrome startup.
+-  bool delay_dawn_collection =
+-      !command_line->HasSwitch(switches::kCollectDawnInfoEagerly);
+-  RequestDawnInfo(/*delayed=*/delay_dawn_collection,
+-                  /*collect_metrics=*/true);
++  // Venetium 0058: the delayed collections below exist only to feed UMA
++  // histograms, which Venetium never uploads. Each one stalls the GPU main
++  // thread (the Dawn probe runs on it, about 55 ms on a Tegra 4) or launches a
++  // second, unsandboxed GPU process 120 s into browsing, on machines that are
++  // short of memory and have no D3D12/DirectML to find. Keep only the explicit
++  // test switches; chrome://gpu still requests the Dawn info when opened.
++  if (command_line->HasSwitch(switches::kCollectDawnInfoEagerly)) {
++    RequestDawnInfo(/*delayed=*/false, /*collect_metrics=*/true);
++  }
+ 
+ #if BUILDFLAG(IS_WIN)
+   if (command_line->HasSwitch(switches::kNoDelayForDX12VulkanInfoCollection)) {
+@@ -1178,13 +1180,6 @@ void GpuDataManagerImplPrivate::PostCreateThreads() {
+     RequestDx12VulkanVideoGpuInfoIfNeeded(
+         GpuDataManagerImpl::kGpuInfoRequestDirectXVulkan,
+         /*delayed=*/false);
+-  } else {
+-    // Launch the info collection GPU process to collect DX12 and DirectML
+-    // support information for UMA at the start of the browser. Not to affect
+-    // Chrome startup, this is done in a delayed mode,  i.e., 120 seconds after
+-    // Chrome startup.
+-    RequestDx12VulkanVideoGpuInfoIfNeeded(
+-        GpuDataManagerImpl::kGpuInfoRequestDirectX, /*delayed=*/true);
+   }
+ 
+   // Observer for display change.
+diff --git a/gpu/command_buffer/client/raster_implementation.cc b/gpu/command_buffer/client/raster_implementation.cc
+index e6d267341d75d1da31477a436ace0f8cc3b8242f..83749ce07eb1b53816922f9a87c0f0f0c8542de2 100644
+--- a/gpu/command_buffer/client/raster_implementation.cc
++++ b/gpu/command_buffer/client/raster_implementation.cc
+@@ -1831,7 +1831,12 @@ cc::ClientPaintCache* RasterImplementation::GetOrCreatePaintCache() {
+   if (!paint_cache_) {
+     size_t paint_cache_budget = 0u;
+     if (base::SysInfo::IsLowEndDevice()) {
+-      paint_cache_budget = 256 * 1024;
++      // Venetium 0058: 1 MiB instead of 256 KiB on 1-2 GiB desktops, so text
++      // blobs and paths are not re-serialized for every raster.
++      paint_cache_budget =
++          base::SysInfo::AmountOfTotalPhysicalMemory().InMiB() > 1024
++              ? 1024 * 1024
++              : 256 * 1024;
+     } else {
+       paint_cache_budget = 4 * 1024 * 1024;
+     }
+diff --git a/gpu/command_buffer/service/service_transfer_cache.cc b/gpu/command_buffer/service/service_transfer_cache.cc
+index b9adb092b49dcd44175f33c78a4502b1520cba27..03671c231df52feb23e43df5d47f8a23825d7858 100644
+--- a/gpu/command_buffer/service/service_transfer_cache.cc
++++ b/gpu/command_buffer/service/service_transfer_cache.cc
+@@ -59,6 +59,13 @@ size_t DiscardableCacheSizeLimit() {
+     return kNormalCacheSizeBytes;
+   }
+ #else
++  // Venetium 0058: a 2 GB desktop shares its RAM with the GPU, and ANGLE's D3D9
++  // backend also keeps a system-memory copy of every uploaded texture, so the
++  // 192 MiB image cache can hold far more than the machine can spare. Use
++  // 64 MiB on low-end devices.
++  if (base::SysInfo::IsLowEndDevice()) {
++    return 64 * 1024 * 1024;
++  }
+   if (base::SysInfo::AmountOfTotalPhysicalMemory() <
+       kLargeCacheSizeMemoryThreshold) {
+     return kNormalCacheSizeBytes;
+diff --git a/gpu/config/skia_limits.cc b/gpu/config/skia_limits.cc
+index 19e76a6bb054c36a8f1a9e04b3ddbc00440c83e3..f621aeedf280353421ff8250c458bb5fdcfc3dfe 100644
+--- a/gpu/config/skia_limits.cc
++++ b/gpu/config/skia_limits.cc
+@@ -64,6 +64,13 @@ void DetermineGrCacheLimitsFromAvailableMemory(
+   if (base::SysInfo::IsLowEndDevice()) {
+     *max_resource_cache_bytes = kMaxLowEndGaneshResourceCacheBytes;
+     *max_glyph_cache_texture_bytes = kMaxLowEndGlyphCacheTextureBytes;
++    // Venetium 0058: on 1-2 GiB desktops (low end since the 2048 MiB
++    // threshold) a 2 MiB glyph budget gives a 1024x512 colour atlas, which
++    // text-dense pages refill again and again; 4 MiB gives 1024x1024 and an
++    // A8 atlas of 2048x2048.
++    if (base::SysInfo::AmountOfTotalPhysicalMemory().InMiB() > 1024) {
++      *max_glyph_cache_texture_bytes = 1024 * 1024 * 4;
++    }
+   } else if (base::SysInfo::AmountOfTotalPhysicalMemory().InMiB() >=
+              kHighEndMemoryThresholdInMB) {
+     *max_resource_cache_bytes = kMaxHighEndGaneshResourceCacheBytes;
+diff --git a/v8/BUILD.gn b/v8/BUILD.gn
+index a19ec5212547a907fd9c094dc030e806110d176c..19dc45d4e56f264daad9752f8a15755cfe7fa403 100644
+--- a/v8/BUILD.gn
++++ b/v8/BUILD.gn
+@@ -2831,7 +2831,11 @@ template("run_mksnapshot") {
+ 
+         # Replace this with --warn-about-builtin-profile-data to see the full
+         # list of builtins with incompatible profiles.
+-        "--abort-on-bad-builtin-profile-data",
++        # Venetium 0058: Venetium applies the shipped x86 profile to ARM32 (the
++        # pairing V8 supports) on a Windows host, with a tree one V8 patch level
++        # past the profile. A builtin whose graph does not match just goes
++        # without profile data instead of failing the whole build.
++        "--warn-about-builtin-profile-data",
+       ]
+ 
+       if (!v8_enable_builtins_profiling && v8_enable_builtins_reordering) {

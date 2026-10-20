@@ -1,0 +1,265 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Tue, 20 Oct 2026 21:34:26 +0400
+Subject: [PATCH] Venetium 0061 (v1.2): word-at-a-time string routines for
+ ARM32
+
+From Venetium v1.2 (github.com/hamed7ir/venetium 92b73dd), patches/0061-arm32-crt-string-routines.patch.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ build/config/BUILD.gn           |   5 +
+ build/win/BUILD.gn              |  17 +++
+ build/win/venetium_string_arm.c | 199 ++++++++++++++++++++++++++++++++
+ 3 files changed, 221 insertions(+)
+ create mode 100644 build/win/venetium_string_arm.c
+
+diff --git a/build/config/BUILD.gn b/build/config/BUILD.gn
+index 72ccd0823e87d630d62ee9b7bb79b632612712a0..d129fcf5ba816868057a942063084e17da81db54 100644
+--- a/build/config/BUILD.gn
++++ b/build/config/BUILD.gn
+@@ -250,6 +250,11 @@ group("common_deps_without_libcxx") {
+   }
+ 
+   if (is_win) {
++    if (current_cpu == "arm" && !is_component_build) {
++      # Venetium 0061: word-at-a-time memchr/memcmp/strchr/strcmp/strlen in
++      # place of the static CRT's byte loops, linked into every ARM32 binary.
++      public_deps += [ "//build/win:venetium_string_arm" ]
++    }
+     if (build_with_chromium && is_component_build) {
+       # To enable allocator_shim for the windows component built chrome,
+       # need to make all shared libraries and also executable(i.e.chrome.exe)
+diff --git a/build/win/BUILD.gn b/build/win/BUILD.gn
+index 3eb5520cd12cee56ce9e0a11a290722a88c550f0..40569f7e6ce0c33472b8e614c9d808ab876907b4 100644
+--- a/build/win/BUILD.gn
++++ b/build/win/BUILD.gn
+@@ -20,6 +20,23 @@ if (is_win) {
+   assert(host_os != "mac" || target_cpu != "x86",
+          "Windows cross-builds from Mac must be 64-bit.")
+ 
++  if (current_cpu == "arm") {
++    # Venetium 0061: replaces the static CRT's byte-at-a-time ARM32 memchr,
++    # memcmp, strchr, strcmp and strlen (see the source). A source_set, so its
++    # object is linked directly into each binary and wins over the CRT
++    # library members. -fno-builtin keeps the compiler from turning the loops
++    # back into calls to these functions; no vectorization, so the routines
++    # stay on plain 32-bit loads.
++    source_set("venetium_string_arm") {
++      sources = [ "venetium_string_arm.c" ]
++      cflags = [
++        "/clang:-fno-builtin",
++        "/clang:-fno-vectorize",
++        "/clang:-fno-slp-vectorize",
++      ]
++    }
++  }
++
+   action("copy_cdb_to_output") {
+     script = "//build/win/copy_cdb_to_output.py"
+     inputs = [
+diff --git a/build/win/venetium_string_arm.c b/build/win/venetium_string_arm.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..61fc7f58abf1cc44ae4c2bf32783e674b6c56362
+--- /dev/null
++++ b/build/win/venetium_string_arm.c
+@@ -0,0 +1,199 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++// Venetium 0061: word-at-a-time memchr, memcmp, strchr, strcmp and strlen for
++// Windows ARM32.
++//
++// The static CRT's ARM32 versions of these (libvcruntime memchr/memcmp/strchr,
++// libucrt strlen/strcmp) are byte-at-a-time loops, and memcmp drops to one
++// byte per iteration as soon as either pointer is odd. Blink's string search,
++// V8's String.indexOf, URL and header parsing all lean on them. Each CRT
++// routine is a one-function object in its library, so defining the same
++// names in an object linked directly into the binary (this file, through
++// //build/config:common_deps) means the CRT member is never pulled in.
++//
++// Same results as the CRT, including strcmp's -1/0/1 and memcmp's byte
++// difference. Reads are aligned 32-bit words: memchr and memcmp never read
++// outside [p, p + n); strlen, strchr and strcmp may read up to 3 bytes past
++// the terminating NUL, but only inside the aligned word that holds it, so they
++// cannot cross into another page. Built with -fno-builtin so the compiler does
++// not turn these loops back into calls to themselves.
++
++#ifdef UNSAFE_BUFFERS_BUILD
++// Raw pointer walks over caller buffers are what these functions are.
++#pragma allow_unsafe_buffers
++#endif
++
++#include <stddef.h>
++#include <stdint.h>
++#include <string.h>  // The CRT's prototypes, so these definitions match them.
++
++typedef uint32_t __attribute__((__may_alias__)) venetium_word;
++typedef uint32_t __attribute__((__may_alias__, __aligned__(1)))
++venetium_unaligned_word;
++
++#define VENETIUM_ONES 0x01010101u
++#define VENETIUM_HIGHS 0x80808080u
++
++// Nonzero iff some byte of |v| is zero (exact: no false positives).
++static inline uint32_t VenetiumHasZeroByte(uint32_t v) {
++  return (v - VENETIUM_ONES) & ~v & VENETIUM_HIGHS;
++}
++
++// The difference of the first unequal bytes of two little-endian words that
++// differ.
++static inline int VenetiumFirstByteDiff(uint32_t x, uint32_t y) {
++  const unsigned shift = (unsigned)__builtin_ctz(x ^ y) & ~7u;
++  return (int)((x >> shift) & 0xff) - (int)((y >> shift) & 0xff);
++}
++
++void* memchr(const void* s, int c, size_t n) {
++  const unsigned char* p = (const unsigned char*)s;
++  const unsigned char ch = (unsigned char)c;
++  while (n && ((uintptr_t)p & 3)) {
++    if (*p == ch) {
++      return (void*)p;
++    }
++    ++p;
++    --n;
++  }
++  const uint32_t pattern = ch * VENETIUM_ONES;
++  while (n >= 8) {
++    const uint32_t a = ((const venetium_word*)p)[0] ^ pattern;
++    const uint32_t b = ((const venetium_word*)p)[1] ^ pattern;
++    if (VenetiumHasZeroByte(a) | VenetiumHasZeroByte(b)) {
++      break;
++    }
++    p += 8;
++    n -= 8;
++  }
++  while (n >= 4) {
++    if (VenetiumHasZeroByte(*(const venetium_word*)p ^ pattern)) {
++      break;
++    }
++    p += 4;
++    n -= 4;
++  }
++  while (n) {
++    if (*p == ch) {
++      return (void*)p;
++    }
++    ++p;
++    --n;
++  }
++  return NULL;
++}
++
++int memcmp(const void* a, const void* b, size_t n) {
++  const unsigned char* p = (const unsigned char*)a;
++  const unsigned char* q = (const unsigned char*)b;
++  // Align |p|; |q| is read with unaligned word loads (plain LDR, which ARMv7
++  // Windows allows on normal memory) whatever its alignment.
++  while (n && ((uintptr_t)p & 3)) {
++    if (*p != *q) {
++      return (int)*p - (int)*q;
++    }
++    ++p;
++    ++q;
++    --n;
++  }
++  while (n >= 4) {
++    const uint32_t x = *(const venetium_word*)p;
++    const uint32_t y = *(const venetium_unaligned_word*)q;
++    if (x != y) {
++      return VenetiumFirstByteDiff(x, y);
++    }
++    p += 4;
++    q += 4;
++    n -= 4;
++  }
++  while (n) {
++    if (*p != *q) {
++      return (int)*p - (int)*q;
++    }
++    ++p;
++    ++q;
++    --n;
++  }
++  return 0;
++}
++
++size_t strlen(const char* s) {
++  const char* p = s;
++  while ((uintptr_t)p & 3) {
++    if (!*p) {
++      return (size_t)(p - s);
++    }
++    ++p;
++  }
++  const venetium_word* w = (const venetium_word*)p;
++  while (!VenetiumHasZeroByte(*w)) {
++    ++w;
++  }
++  p = (const char*)w;
++  while (*p) {
++    ++p;
++  }
++  return (size_t)(p - s);
++}
++
++char* strchr(const char* s, int c) {
++  const char ch = (char)c;
++  while ((uintptr_t)s & 3) {
++    if (*s == ch) {
++      return (char*)s;
++    }
++    if (!*s) {
++      return NULL;
++    }
++    ++s;
++  }
++  const uint32_t pattern = (unsigned char)ch * VENETIUM_ONES;
++  const venetium_word* w = (const venetium_word*)s;
++  for (;;) {
++    const uint32_t v = *w;
++    if (VenetiumHasZeroByte(v) | VenetiumHasZeroByte(v ^ pattern)) {
++      break;
++    }
++    ++w;
++  }
++  for (s = (const char*)w;; ++s) {
++    if (*s == ch) {
++      return (char*)s;
++    }
++    if (!*s) {
++      return NULL;
++    }
++  }
++}
++
++int strcmp(const char* a, const char* b) {
++  const unsigned char* p = (const unsigned char*)a;
++  const unsigned char* q = (const unsigned char*)b;
++  if ((((uintptr_t)p ^ (uintptr_t)q) & 3) == 0) {
++    while ((uintptr_t)p & 3) {
++      if (*p != *q || !*p) {
++        goto done;
++      }
++      ++p;
++      ++q;
++    }
++    for (;;) {
++      const uint32_t x = *(const venetium_word*)p;
++      const uint32_t y = *(const venetium_word*)q;
++      if (x != y || VenetiumHasZeroByte(x)) {
++        break;
++      }
++      p += 4;
++      q += 4;
++    }
++  }
++  while (*p && *p == *q) {
++    ++p;
++    ++q;
++  }
++done:
++  // The CRT's strcmp returns exactly -1, 0 or 1.
++  return (*p > *q) - (*p < *q);
++}

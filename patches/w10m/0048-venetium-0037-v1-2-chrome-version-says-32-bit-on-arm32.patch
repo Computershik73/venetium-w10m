@@ -1,0 +1,30 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Tue, 20 Oct 2026 21:34:25 +0400
+Subject: [PATCH] Venetium 0037 (v1.2): chrome://version says 32-bit on ARM32
+
+From Venetium v1.2 (github.com/hamed7ir/venetium 92b73dd), patches/0037-arm32-version-ui-32bit.patch.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ chrome/browser/ui/webui/version/version_ui.cc | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/chrome/browser/ui/webui/version/version_ui.cc b/chrome/browser/ui/webui/version/version_ui.cc
+index 8353f5d5a5734e8fc116dcc0f0221891ff3ea9ff..8032f5ce79ed49c28204b2f7ed18ff8625b1890b 100644
+--- a/chrome/browser/ui/webui/version/version_ui.cc
++++ b/chrome/browser/ui/webui/version/version_ui.cc
+@@ -195,6 +195,13 @@ int VersionUI::VersionProcessorVariation() {
+ #elif BUILDFLAG(IS_WIN)
+ #if defined(ARCH_CPU_ARM64)
+   return IDS_VERSION_UI_64BIT_ARM;
++#elif defined(ARCH_CPU_ARMEL)
++  // Venetium 0037: native Windows ARM32 (the Surface 2 / Tegra 4 build) is
++  // 32-bit and is not an x86 binary translated on an ARM64 host, so report it
++  // plainly as 32-bit. Without this, ARM32 fell through to the non-x86 branch
++  // below (IsRunningEmulatedOnArm64 / IDS_VERSION_UI_64BIT) and about://version
++  // mislabeled the build as 64-bit.
++  return IDS_VERSION_UI_32BIT;
+ #else
+   bool emulated = base::win::OSInfo::IsRunningEmulatedOnArm64();
+ #if defined(ARCH_CPU_X86)

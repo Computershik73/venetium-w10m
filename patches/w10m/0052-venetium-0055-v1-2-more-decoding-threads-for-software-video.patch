@@ -1,0 +1,207 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Tue, 20 Oct 2026 21:34:25 +0400
+Subject: [PATCH] Venetium 0055 (v1.2): more decoding threads for software
+ video
+
+From Venetium v1.2 (github.com/hamed7ir/venetium 92b73dd), patches/0055-arm32-codec-steering-decode-threads.patch.
+Left out here (they do not apply to this port's tree, and the phone does not
+need them): media/base/supported_types.cc
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ media/base/media_switches.cc                  | 15 ++++++++++++++
+ media/base/media_switches.h                   |  3 +++
+ media/filters/ffmpeg_video_decoder.cc         | 20 +++++++++++++++++++
+ media/filters/vpx_video_decoder.cc            | 18 +++++++++++++++++
+ media/filters/vpx_video_decoder.h             |  8 ++++++++
+ .../services/video_decode_perf_history.cc     | 12 +++++++++++
+ 6 files changed, 76 insertions(+)
+
+diff --git a/media/base/media_switches.cc b/media/base/media_switches.cc
+index 840180d9d5f296f286c2f31299cfe673ea62382b..4e2957c7d6213cea13d7dd594b8310d55aa1909f 100644
+--- a/media/base/media_switches.cc
++++ b/media/base/media_switches.cc
+@@ -450,6 +450,21 @@ BASE_FEATURE(kPulseaudioLoopbackForScreenShare,
+ BASE_FEATURE(kMediaCapabilitiesQueryGpuFactories,
+              base::FEATURE_ENABLED_BY_DEFAULT);
+ 
++// Venetium 0055: Windows ARM32 devices (Tegra 3/4, Adreno) decode VP9 and AV1
++// on their few slow cores, while H.264 has a hardware decoder (DXVA, Venetium
++// 0041). Report VP9/AV1 at 720p and up (AV1: 480p and up) as unsupported when
++// the codec string carries a level, and as not smooth before any decode stats
++// exist, so sites that offer H.264 pick it. Lower resolutions and level-less
++// codec strings keep working. --disable-features=VenetiumArm32CodecSteering
++// turns it off.
++BASE_FEATURE(kVenetiumArm32CodecSteering,
++#if BUILDFLAG(IS_WIN) && defined(ARCH_CPU_ARMEL)
++             base::FEATURE_ENABLED_BY_DEFAULT
++#else
++             base::FEATURE_DISABLED_BY_DEFAULT
++#endif
++);
++
+ // Enable Media Capabilities with finch-parameters.
+ BASE_FEATURE(kMediaCapabilitiesWithParameters,
+              base::FEATURE_ENABLED_BY_DEFAULT);
+diff --git a/media/base/media_switches.h b/media/base/media_switches.h
+index 32286bf89fabcfb96a146aa048f7a03584847b30..8dce6a57dde5a45e5e6ba7beb5ec2a19773ec81b 100644
+--- a/media/base/media_switches.h
++++ b/media/base/media_switches.h
+@@ -284,6 +284,9 @@ MEDIA_EXPORT BASE_DECLARE_FEATURE(kUseSCContentSharingPicker);
+ MEDIA_EXPORT BASE_DECLARE_FEATURE(kApplicationAudioCaptureMac);
+ #endif  // BUILDFLAG(IS_MAC)
+ MEDIA_EXPORT BASE_DECLARE_FEATURE(kMediaCapabilitiesQueryGpuFactories);
++// Venetium 0055: on Windows ARM32 steer 720p+ video to H.264 (see
++// media/base/supported_types.cc and video_decode_perf_history.cc).
++MEDIA_EXPORT BASE_DECLARE_FEATURE(kVenetiumArm32CodecSteering);
+ MEDIA_EXPORT BASE_DECLARE_FEATURE(kMediaCapabilitiesWithParameters);
+ MEDIA_EXPORT BASE_DECLARE_FEATURE(kAutoplayPoliciesAndroid);
+ MEDIA_EXPORT BASE_DECLARE_FEATURE(kMediaEngagementBypassAutoplayPolicies);
+diff --git a/media/filters/ffmpeg_video_decoder.cc b/media/filters/ffmpeg_video_decoder.cc
+index eaf9f1c3c4490a24fe0f2a9ff7cebc02a412932c..7fabc84991f42da8efe898cb5fa15f084d986f04 100644
+--- a/media/filters/ffmpeg_video_decoder.cc
++++ b/media/filters/ffmpeg_video_decoder.cc
+@@ -6,6 +6,7 @@
+ #include <stddef.h>
+ #include <stdint.h>
+ 
++#include <algorithm>
+ #include <memory>
+ #include <numeric>
+ 
+@@ -16,8 +17,10 @@
+ #include "base/location.h"
+ #include "base/memory/raw_span.h"
+ #include "base/numerics/safe_conversions.h"
++#include "base/system/sys_info.h"
+ #include "base/task/bind_post_task.h"
+ #include "base/task/sequenced_task_runner.h"
++#include "build/build_config.h"
+ #include "media/base/decoder_buffer.h"
+ #include "media/base/limits.h"
+ #include "media/base/media_log.h"
+@@ -93,6 +96,23 @@ static int GetFFmpegVideoDecoderThreadCount(const VideoDecoderConfig& config) {
+       // anything lower than 1080p: 2 threads
+       desired_threads = config.coded_size().width() *
+                         config.coded_size().height() * 3 / 1920 / 1080;
++#if defined(ARCH_CPU_32_BITS)
++      // Venetium 0055: software H.264 is the fallback on Windows ARM32 when
++      // the DXVA decoder is not available (and the only H.264 path on old x86
++      // PCs without a hardware decoder). Their 4 slow cores are mostly idle
++      // with 2 threads below 1080p, so use up to 3 from 640x360 and up to 4
++      // from 1280x720 (frame threading; the clamp below still caps it at the
++      // core count).
++      if (base::SysInfo::NumberOfProcessors() >= 4) {
++        const int area =
++            config.coded_size().width() * config.coded_size().height();
++        if (area >= 1280 * 720) {
++          desired_threads = std::max(desired_threads, 4);
++        } else if (area >= 640 * 360) {
++          desired_threads = std::max(desired_threads, 3);
++        }
++      }
++#endif
+   }
+ 
+   return VideoDecoder::GetRecommendedThreadCount(desired_threads);
+diff --git a/media/filters/vpx_video_decoder.cc b/media/filters/vpx_video_decoder.cc
+index f6cf0e27680e26f562cd2aff81eec93248421956..2acdf4452cd64cf08788f7c30a3a2e0b328ec3b8 100644
+--- a/media/filters/vpx_video_decoder.cc
++++ b/media/filters/vpx_video_decoder.cc
+@@ -18,6 +18,7 @@
+ #include "base/location.h"
+ #include "base/logging.h"
+ #include "base/numerics/byte_conversions.h"
++#include "base/system/sys_info.h"
+ #include "base/task/bind_post_task.h"
+ #include "base/trace_event/trace_event.h"
+ #include "media/base/agtm.h"
+@@ -25,6 +26,7 @@
+ #include "media/base/limits.h"
+ #include "media/base/media_switches.h"
+ #include "media/base/video_aspect_ratio.h"
++#include "build/build_config.h"
+ #include "media/filters/ffmpeg_video_decoder.h"
+ #include "third_party/libvpx/source/libvpx/vpx/vp8dx.h"
+ #include "third_party/libvpx/source/libvpx/vpx/vpx_decoder.h"
+@@ -49,6 +51,12 @@ static int GetVpxVideoDecoderThreadCount(const VideoDecoderConfig& config) {
+       desired_threads = 8;
+     else if (width >= 1280)
+       desired_threads = 4;
++#if defined(ARCH_CPU_32_BITS)
++    // Venetium 0055: on 4-core 32-bit devices (Tegra 3/4, Adreno phones, old
++    // x86) VP9 is software-decoded; use up to 4 threads from 640 px wide.
++    else if (width >= 640 && base::SysInfo::NumberOfProcessors() >= 4)
++      desired_threads = 4;
++#endif
+   }
+ 
+   return VideoDecoder::GetRecommendedThreadCount(desired_threads);
+@@ -243,6 +251,16 @@ bool VpxVideoDecoder::ConfigureDecoder(const VideoDecoderConfig& config) {
+                   << vpx_codec_error(vpx_codec_.get());
+       return false;
+     }
++#if defined(ARCH_CPU_32_BITS)
++    // Venetium 0055: without row multithreading libvpx only uses its threads
++    // across tile columns, and a 480p/720p stream often has a single one.
++    // Row-MT is bit-exact; if the control is refused, decode as before.
++    if (vpx_codec_control(vpx_codec_.get(), VP9D_SET_ROW_MT, 1) !=
++        VPX_CODEC_OK) {
++      DLOG(ERROR) << "Failed to enable VP9D_SET_ROW_MT. "
++                  << vpx_codec_error(vpx_codec_.get());
++    }
++#endif
+   }
+ 
+   if (config.alpha_mode() == VideoDecoderConfig::AlphaMode::kIsOpaque)
+diff --git a/media/filters/vpx_video_decoder.h b/media/filters/vpx_video_decoder.h
+index 8f8f07e419b7d16c52f550edd97af6f235fbd2ac..926c370f9ff0345993062c6ffb1ab7bee90fb8d4 100644
+--- a/media/filters/vpx_video_decoder.h
++++ b/media/filters/vpx_video_decoder.h
+@@ -7,6 +7,7 @@
+ 
+ #include "base/functional/callback.h"
+ #include "base/sequence_checker.h"
++#include "build/build_config.h"
+ #include "media/base/frame_buffer_pool.h"
+ #include "media/base/supported_video_decoder_config.h"
+ #include "media/base/video_decoder.h"
+@@ -117,7 +118,14 @@ class OffloadingVpxVideoDecoder : public OffloadingVideoDecoder {
+  public:
+   OffloadingVpxVideoDecoder()
+       : OffloadingVideoDecoder(
++#if defined(ARCH_CPU_32_BITS)
++            // Venetium 0055: on the slow 32-bit devices a 360p/480p VP9 decode
++            // on the media thread delays the audio and video renderers too;
++            // offload every VP9 stream.
++            0,
++#else
+             1024,
++#endif
+             std::vector<VideoCodec>(1, VideoCodec::kVP9),
+             std::make_unique<VpxVideoDecoder>(
+                 OffloadableVideoDecoder::OffloadState::kOffloaded)) {}
+diff --git a/media/mojo/services/video_decode_perf_history.cc b/media/mojo/services/video_decode_perf_history.cc
+index 206b4667054b794e4f4661c8b47f962bd9d5c8d8..ada9fefbccbb4373a96feaae5d4274c389e8bef3 100644
+--- a/media/mojo/services/video_decode_perf_history.cc
++++ b/media/mojo/services/video_decode_perf_history.cc
+@@ -171,6 +171,18 @@ void VideoDecodePerfHistory::AssessStats(
+     bool is_sw_secure_decode = is_encrypted && !is_hw_secure;
+     *is_power_efficient = !is_sw_secure_decode;
+     *is_smooth = true;
++    // Venetium 0055: without history, do not promise smooth software VP9/AV1
++    // above 480p30 on Windows ARM32 (see kVenetiumArm32CodecSteering). Real
++    // stats, once recorded, decide as usual.
++    const VideoCodec codec = VideoCodecProfileToVideoCodec(key.codec_profile);
++    if ((codec == VideoCodec::kVP9 || codec == VideoCodec::kAV1) &&
++        static_cast<int64_t>(key.size.width()) * key.size.height() *
++                key.frame_rate >
++            int64_t{854} * 480 * 30 &&
++        base::FeatureList::IsEnabled(kVenetiumArm32CodecSteering)) {
++      *is_smooth = false;
++      *is_power_efficient = false;
++    }
+     return;
+   }
+ 

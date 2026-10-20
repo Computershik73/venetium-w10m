@@ -1,0 +1,50 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Tue, 20 Oct 2026 21:34:25 +0400
+Subject: [PATCH] Venetium 0036 (v1.2): the GPU shader disk cache on Windows
+ ARM32
+
+From Venetium v1.2 (github.com/hamed7ir/venetium 92b73dd), patches/0036-arm32-gr-shader-cache.patch.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ gpu/ipc/service/gpu_channel_manager.cc | 21 ++++++++++++++++++++-
+ 1 file changed, 20 insertions(+), 1 deletion(-)
+
+diff --git a/gpu/ipc/service/gpu_channel_manager.cc b/gpu/ipc/service/gpu_channel_manager.cc
+index e9f42bc6e0e45812d2070a695707337771233c5d..9039daad08554ab74826e9a70cdf73a007b4d886 100644
+--- a/gpu/ipc/service/gpu_channel_manager.cc
++++ b/gpu/ipc/service/gpu_channel_manager.cc
+@@ -380,12 +380,31 @@ GpuChannelManager::GpuChannelManager(
+   DCHECK(io_task_runner);
+   DCHECK(scheduler);
+ 
+-  const bool enable_gr_shader_cache =
++  bool enable_gr_shader_cache =
+       (gpu_feature_info_
+            .status_values[GPU_FEATURE_TYPE_GPU_TILE_RASTERIZATION] ==
+        gpu::kGpuFeatureStatusEnabled) &&
+       !gpu_preferences_.disable_gpu_shader_disk_cache &&
+       !use_persistent_cache_for_ganesh_;
++#if BUILDFLAG(IS_WIN) && defined(ARCH_CPU_ARMEL)
++  // Venetium 0036: on Windows ARM32 the software rendering list blocklists GPU
++  // tile rasterization (software_rendering_list.json entry 122), which turns
++  // the condition above false and leaves the Gr shader disk cache off. With no
++  // on-disk cache, ANGLE/Skia recompile every D3D9 shader program on every cold
++  // start - the multi-second GPU-thread compositor stall the Surface 2 shows
++  // (chrome_debug.log: GrShaderCacheEnabled 0, GrLinkProgramUs mean 263 ms).
++  // Skia's ganesh backend still links GL programs here whenever accelerated GL
++  // is on (GPU compositing is active), so keep the on-disk shader cache for
++  // those programs regardless of the tile-raster blocklist, honoring the same
++  // disable_gpu_shader_disk_cache / persistent-ganesh-cache gates as above.
++  if (!enable_gr_shader_cache &&
++      gpu_feature_info_.status_values[GPU_FEATURE_TYPE_ACCELERATED_GL] ==
++          gpu::kGpuFeatureStatusEnabled &&
++      !gpu_preferences_.disable_gpu_shader_disk_cache &&
++      !use_persistent_cache_for_ganesh_) {
++    enable_gr_shader_cache = true;
++  }
++#endif  // BUILDFLAG(IS_WIN) && defined(ARCH_CPU_ARMEL)
+   UMA_HISTOGRAM_BOOLEAN("Gpu.GrShaderCacheEnabled", enable_gr_shader_cache);
+   if (enable_gr_shader_cache) {
+     size_t gr_shader_cache_size = gpu_preferences.gpu_program_cache_size;
