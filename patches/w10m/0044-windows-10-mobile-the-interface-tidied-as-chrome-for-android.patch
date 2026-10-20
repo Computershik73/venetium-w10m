@@ -1,0 +1,227 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Tue, 20 Oct 2026 20:38:41 +0400
+Subject: [PATCH] Windows 10 Mobile: the interface tidied as Chrome for
+ Android's
+
+The menu's first row of icons spreads across the menu with round buttons
+that have room for their icons; no menu shows keyboard shortcuts, nor the
+tab search field; typing in the address bar hides the toolbar's other
+buttons so it and its suggestions span the screen; no zoom icon in the
+address bar; no Customize Chrome button on the new tab page.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../views/location_bar/location_bar_view.cc   | 47 +++++++++++++++++++
+ chrome/browser/ui/views/toolbar/app_menu.cc   | 19 +++++---
+ .../ui/views/zoom/zoom_view_controller.cc     |  8 ++++
+ .../ui/webui/new_tab_page/new_tab_page_ui.cc  |  6 +++
+ .../ui/webui/tab_search/tab_search_ui.cc      |  5 ++
+ ui/views/controls/menu/menu_config_win.cc     |  7 +++
+ 6 files changed, 85 insertions(+), 7 deletions(-)
+
+diff --git a/chrome/browser/ui/views/location_bar/location_bar_view.cc b/chrome/browser/ui/views/location_bar/location_bar_view.cc
+index 1ed67788be23735bc9db4e2d782d81cbc236289a..414d7c8379ae04f9183bb3a2368e0858773bc3c0 100644
+--- a/chrome/browser/ui/views/location_bar/location_bar_view.cc
++++ b/chrome/browser/ui/views/location_bar/location_bar_view.cc
+@@ -4,6 +4,10 @@
+ 
+ #include "chrome/browser/ui/views/location_bar/location_bar_view.h"
+ 
++#if defined(VENETIUM_W10M)
++#include "ui/base/class_property.h"
++#endif
++
+ #include <algorithm>
+ #include <map>
+ #include <memory>
+@@ -2110,10 +2114,48 @@ const LocationBarModel* LocationBarView::GetLocationBarModel() const {
+   return delegate_->GetLocationBarModel();
+ }
+ 
++#if defined(VENETIUM_W10M)
++namespace {
++
++// The toolbar's views the address bar hid while it has the focus.
++DEFINE_UI_CLASS_PROPERTY_KEY(bool, kW10mHiddenWhileTypingKey, false)
++
++// Chrome for Android's toolbar while one types: the address bar alone, across
++// the toolbar (and its suggestions across the screen); the buttons beside it
++// come back as the focus goes.
++void ShowPhoneToolbarButtons(views::View* location_bar, bool show) {
++  views::View* const toolbar = location_bar->parent();
++  if (!toolbar) {
++    return;
++  }
++  for (views::View* sibling : toolbar->children()) {
++    if (sibling == location_bar) {
++      continue;
++    }
++    if (show) {
++      if (sibling->GetProperty(kW10mHiddenWhileTypingKey)) {
++        sibling->ClearProperty(kW10mHiddenWhileTypingKey);
++        sibling->SetVisible(true);
++      }
++    } else if (sibling->GetVisible()) {
++      sibling->SetProperty(kW10mHiddenWhileTypingKey, true);
++      sibling->SetVisible(false);
++    }
++  }
++}
++
++}  // namespace
++#endif  // defined(VENETIUM_W10M)
++
+ void LocationBarView::OnOmniboxFocused() {
+   if (views::FocusRing::Get(this)) {
+     views::FocusRing::Get(this)->Refresh();
+   }
++#if defined(VENETIUM_W10M)
++  if (browser_ && !is_popup_mode_) {
++    ShowPhoneToolbarButtons(this, false);
++  }
++#endif
+ 
+   // Only show hover animation in unfocused steady state.  Since focusing
+   // the omnibox is intentional, snapping is better than transitioning here.
+@@ -2136,6 +2178,11 @@ void LocationBarView::OnOmniboxBlurred() {
+   if (views::FocusRing::Get(this)) {
+     views::FocusRing::Get(this)->Refresh();
+   }
++#if defined(VENETIUM_W10M)
++  if (browser_ && !is_popup_mode_) {
++    ShowPhoneToolbarButtons(this, true);
++  }
++#endif
+   RefreshBackground();
+ 
+   // The AI mode page action icon view should only be visible when the omnibox
+diff --git a/chrome/browser/ui/views/toolbar/app_menu.cc b/chrome/browser/ui/views/toolbar/app_menu.cc
+index 7b0807cae5419713b05e4d34122468483994992d..0d01d78234beb4fe4fbe3db2237d51794397643a 100644
+--- a/chrome/browser/ui/views/toolbar/app_menu.cc
++++ b/chrome/browser/ui/views/toolbar/app_menu.cc
+@@ -717,6 +717,9 @@ class AppMenu::PhoneNavigationView : public AppMenuView {
+           kNames[i], InMenuButtonBackground::ButtonType::kRoundedButton, i,
+           kNames[i], /*add_accelerator_text=*/false,
+           /*use_accessible_name_as_tooltip_text=*/true, *icons[i]);
++      // Round buttons as wide as they are high: the padding beside the
++      // icon that a menu's text buttons have would leave the icon no room.
++      children().back()->SetBorder(nullptr);
+     }
+   }
+   PhoneNavigationView(const PhoneNavigationView&) = delete;
+@@ -725,21 +728,22 @@ class AppMenu::PhoneNavigationView : public AppMenuView {
+   // Overridden from View.
+   gfx::Size CalculatePreferredSize(
+       const views::SizeBounds& available_size) const override {
+-    // The height is the menu item's.
+-    return {kButtonExtent * static_cast<int>(children().size()), 0};
++    const int count = static_cast<int>(children().size());
++    return {kButtonExtent * count, kButtonExtent};
+   }
+ 
+   void Layout(PassKey) override {
+-    // As many equal columns as there are buttons, each holding a round
+-    // button of its own size.
++    // As many equal columns as there are buttons across the whole menu,
++    // each holding a round button in its middle.
+     const int count = static_cast<int>(children().size());
+     if (!count) {
+       return;
+     }
+     const int column = width() / count;
+     const int extent = std::min({kButtonExtent, column, height()});
++    const int left = (width() - column * count) / 2;
+     for (int i = 0; i < count; ++i) {
+-      children()[i]->SetBounds(i * column + (column - extent) / 2,
++      children()[i]->SetBounds(left + i * column + (column - extent) / 2,
+                                (height() - extent) / 2, extent, extent);
+     }
+   }
+@@ -1708,9 +1712,10 @@ void AppMenu::PopulateMenu(MenuItemView* parent, MenuModel* model) {
+ #if defined(VENETIUM_W10M)
+       case AppMenuModel::kW10mNavigationRow: {
+         ui::ButtonMenuItemModel* submodel = model->GetButtonMenuItemAt(i);
+-        item->set_vertical_margin(8);
++        // No title: the row is the item's one child, across all of it.
++        item->SetTitle(std::u16string());
++        item->set_vertical_margin(4);
+         item->AddChildView(std::make_unique<PhoneNavigationView>(this, submodel));
+-        item->set_children_use_full_width(true);
+         break;
+       }
+ #endif
+diff --git a/chrome/browser/ui/views/zoom/zoom_view_controller.cc b/chrome/browser/ui/views/zoom/zoom_view_controller.cc
+index 623cc4b64202c97bb839569f74c0d88af2ff7771..08382d956d46b2f7c1b85fc4322ad4d6c4d33d77 100644
+--- a/chrome/browser/ui/views/zoom/zoom_view_controller.cc
++++ b/chrome/browser/ui/views/zoom/zoom_view_controller.cc
+@@ -100,6 +100,14 @@ void ZoomViewController::UpdatePageActionIconVisibility(
+   CHECK(zoom_controller);
+ 
+   const bool is_at_default_zoom = zoom_controller->IsAtDefaultZoom();
++#if defined(VENETIUM_W10M)
++  // A phone zooms with two fingers, and Chrome for Android's address bar
++  // has no zoom icon: only the bubble, while it shows, needs it as anchor.
++  if (!is_bubble_visible) {
++    page_action_controller_->Hide(kActionZoomNormal);
++    return;
++  }
++#endif
+   if (is_at_default_zoom && !is_bubble_visible) {
+     page_action_controller_->Hide(kActionZoomNormal);
+   } else {
+diff --git a/chrome/browser/ui/webui/new_tab_page/new_tab_page_ui.cc b/chrome/browser/ui/webui/new_tab_page/new_tab_page_ui.cc
+index 860c90cfc2f1b1b362429e261010fbbdd127112d..d9985783e53811d1cd08332ecc2533273b0ffe14 100644
+--- a/chrome/browser/ui/webui/new_tab_page/new_tab_page_ui.cc
++++ b/chrome/browser/ui/webui/new_tab_page/new_tab_page_ui.cc
+@@ -316,7 +316,13 @@ content::WebUIDataSource* CreateAndAddNewTabPageUiHtmlSource(
+           ntp_features::kNtpMostRelevantTabResumptionModuleFallbackToHost));
+   source->AddBoolean("footerEnabled",
+                      base::FeatureList::IsEnabled(ntp_features::kNtpFooter));
++#if defined(VENETIUM_W10M)
++  // As on Android: no Customize Chrome button, whose side panel a phone has
++  // no room for.
++  source->AddBoolean("isAndroid", true);
++#else
+   source->AddBoolean("isAndroid", BUILDFLAG(IS_ANDROID));
++#endif
+ 
+   source->AddBoolean("ntpRealboxNextEnabled",
+                      ntp_realbox::IsNtpRealboxNextEnabled(profile));
+diff --git a/chrome/browser/ui/webui/tab_search/tab_search_ui.cc b/chrome/browser/ui/webui/tab_search/tab_search_ui.cc
+index 3562b4c32ca1beac4853c4ccd1e860dfbd4697ec..08312de9779ebf70753d039174958488304e089d 100644
+--- a/chrome/browser/ui/webui/tab_search/tab_search_ui.cc
++++ b/chrome/browser/ui/webui/tab_search/tab_search_ui.cc
+@@ -117,9 +117,14 @@ TabSearchUI::TabSearchUI(content::WebUI* web_ui)
+   source->AddResourcePath("alert_indicators/tab_media_glic_active.svg",
+                           IDR_GLIC_TAB_MEDIA_GLIC_ACTIVE);
+ 
++#if defined(VENETIUM_W10M)
++  // A phone has no keyboard to press it on.
++  source->AddString("shortcutText", std::u16string());
++#else
+   ui::Accelerator accelerator(ui::VKEY_A,
+                               ui::EF_SHIFT_DOWN | ui::EF_PLATFORM_ACCELERATOR);
+   source->AddString("shortcutText", accelerator.GetShortcutText());
++#endif
+   source->AddString("newTabPageUrl", chrome::kChromeUINewTabURL);
+ 
+   webui::SetupWebUIDataSource(source, kTabSearchResources,
+diff --git a/ui/views/controls/menu/menu_config_win.cc b/ui/views/controls/menu/menu_config_win.cc
+index e13fc4747dbaececc34512e542457a1e7fbe2172..ccc4d7b1011033fbc94bd9299b8ac467794f4ca6 100644
+--- a/ui/views/controls/menu/menu_config_win.cc
++++ b/ui/views/controls/menu/menu_config_win.cc
+@@ -39,6 +39,13 @@ void MenuConfig::InitPlatform() {
+   }
+ 
+   use_bubble_border = corner_radius > 0;
++
++#if defined(VENETIUM_W10M)
++  // A phone has no keyboard to press Ctrl+... on, as Chrome for Android's
++  // menus show none.
++  show_accelerators = false;
++  show_mnemonics = false;
++#endif
+ }
+ 
+ }  // namespace views

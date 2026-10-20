@@ -24,6 +24,8 @@
 #include "chrome/browser/ui/tabs/tab_enums.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/browser/ui/views/frame/browser_view.h"
+#include "chrome/browser/ui/views/location_bar/location_bar_view.h"
+#include "chrome/browser/ui/views/omnibox/omnibox_view_views.h"
 #include "components/keep_alive_registry/keep_alive_types.h"
 #include "components/keep_alive_registry/scoped_keep_alive.h"
 #include "components/prefs/pref_service.h"
@@ -77,6 +79,9 @@ VwChromeHost::VwChromeHost() {
 
 VwChromeHost::~VwChromeHost() {
   Observe(nullptr);
+  for (views::FocusManager* focus_manager : focus_managers_) {
+    focus_manager->RemoveFocusChangeListener(this);
+  }
 }
 
 void VwChromeHost::Started() {
@@ -147,6 +152,24 @@ bool VwChromeHost::BackStep(bool act) {
   }
   TabStripModel* tabs = browser->GetTabStripModel();
   content::WebContents* contents = tabs ? tabs->GetActiveWebContents() : nullptr;
+  // The address bar while one types in it: back leaves it, as on Android,
+  // dropping what was typed, and brings the page and the toolbar back.
+  if (BrowserView* view = BrowserView::GetBrowserViewForBrowser(browser)) {
+    LocationBarView* location_bar = view->GetLocationBarView();
+    OmniboxViewViews* omnibox =
+        location_bar ? location_bar->omnibox_view() : nullptr;
+    if (omnibox && omnibox->HasFocus()) {
+      if (act) {
+        omnibox->RevertAll();
+        if (contents) {
+          contents->Focus();
+        } else if (views::FocusManager* focus = omnibox->GetFocusManager()) {
+          focus->ClearFocus();
+        }
+      }
+      return true;
+    }
+  }
   if (!contents) {
     return false;
   }
@@ -181,6 +204,17 @@ void VwChromeHost::UpdateBackState() {
   VwEngine::Get()->selected_can_go_back.store(BackStep(/*act=*/false));
 }
 
+void VwChromeHost::OnDidChangeFocus(views::View* focused_before,
+                                    views::View* focused_now) {
+  UpdateBackState();
+}
+
+void VwChromeHost::OnFocusManagerDestroying(
+    views::FocusManager* focus_manager) {
+  focus_manager->RemoveFocusChangeListener(this);
+  focus_managers_.erase(focus_manager);
+}
+
 void VwChromeHost::WatchActiveTab() {
   BrowserWindowInterface* browser = ActiveBrowser();
   TabStripModel* tabs = browser ? browser->GetTabStripModel() : nullptr;
@@ -188,6 +222,12 @@ void VwChromeHost::WatchActiveTab() {
 }
 
 void VwChromeHost::OnBrowserCreated(BrowserWindowInterface* browser) {
+  if (BrowserView* view = BrowserView::GetBrowserViewForBrowser(browser)) {
+    views::FocusManager* focus_manager = view->GetFocusManager();
+    if (focus_manager && focus_managers_.insert(focus_manager).second) {
+      focus_manager->AddFocusChangeListener(this);
+    }
+  }
   active_tab_changes_[browser] = browser->RegisterActiveTabDidChange(
       base::BindRepeating(
           [](base::WeakPtr<VwChromeHost> host, BrowserWindowInterface*) {

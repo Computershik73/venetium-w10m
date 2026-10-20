@@ -101,7 +101,10 @@ void AddChromeSwitches(const EngineConfig& config,
       "OptimizationGuideModelExecution,OptimizationGuideOnDeviceModel,"
       "PageContentAnnotations,HistoryEmbeddings,SegmentationPlatform,"
       "MediaRouter,DialMediaRouteProvider,LensOverlay,LensStandalone,"
-      "NtpLogo,NtpCustomizeChromeAutoOpen");
+      "NtpLogo,NtpCustomizeChromeAutoOpen,"
+      // Google's AI Mode in the address bar and its suggestions: a page
+      // that needs a desktop's memory, and Google as the search engine.
+      "AimEnabled,AiModeOmniboxEntryPoint");
   // Tracing and video capture as utilities would hold the one utility
   // thread a single process has for good; in the browser they do not.
   AddToFeatureList(command_line, switches::kEnableFeatures,

@@ -13,6 +13,7 @@
 
 #include <map>
 #include <memory>
+#include <set>
 
 #include "base/callback_list.h"
 #include "base/memory/raw_ptr.h"
@@ -21,6 +22,7 @@
 #include "chrome/browser/ui/browser_window/public/browser_collection_observer.h"
 #include "chrome/browser/ui/browser_window/public/global_browser_collection.h"
 #include "content/public/browser/web_contents_observer.h"
+#include "ui/views/focus/focus_manager.h"
 #include "venetium_w10m/browser/vw_chrome_bridge.h"
 
 class ScopedKeepAlive;
@@ -29,7 +31,8 @@ namespace venetium_w10m {
 
 class VwChromeHost : public VwChromeBridge,
                      public BrowserCollectionObserver,
-                     public content::WebContentsObserver {
+                     public content::WebContentsObserver,
+                     public views::FocusChangeListener {
  public:
   VwChromeHost();
   VwChromeHost(const VwChromeHost&) = delete;
@@ -63,6 +66,12 @@ class VwChromeHost : public VwChromeBridge,
       const content::PrunedDetails& pruned_details) override;
   void NavigationEntriesDeleted() override;
 
+  // views::FocusChangeListener, for the browser windows: the address bar
+  // taking or leaving the focus changes what the back button does.
+  void OnDidChangeFocus(views::View* focused_before,
+                        views::View* focused_now) override;
+  void OnFocusManagerDestroying(views::FocusManager* focus_manager) override;
+
  private:
   BrowserWindowInterface* ActiveBrowser();
   // What the back button would do now; with |act|, does it.
@@ -77,6 +86,7 @@ class VwChromeHost : public VwChromeBridge,
       browsers_{this};
   std::map<BrowserWindowInterface*, base::CallbackListSubscription>
       active_tab_changes_;
+  std::set<raw_ptr<views::FocusManager>> focus_managers_;
   bool started_ = false;
   bool quitting_ = false;
   base::WeakPtrFactory<VwChromeHost> weak_factory_{this};
