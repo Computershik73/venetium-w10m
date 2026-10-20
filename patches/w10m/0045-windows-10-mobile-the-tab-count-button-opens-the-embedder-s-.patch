@@ -1,0 +1,99 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Tue, 20 Oct 2026 20:54:02 +0400
+Subject: [PATCH] Windows 10 Mobile: the tab count button opens the embedder's
+ tab switcher
+
+w10m::SetTabSwitcherOpener lets the embedder draw Chrome for Android's
+tab switcher; the tab count button beside the address bar opens it, and
+tab search only when none is set.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../browser/ui/views/toolbar/toolbar_view.cc  | 24 +++++++++++++++++--
+ .../ui/views/toolbar/w10m_tab_switcher.h      | 21 ++++++++++++++++
+ 2 files changed, 43 insertions(+), 2 deletions(-)
+ create mode 100644 chrome/browser/ui/views/toolbar/w10m_tab_switcher.h
+
+diff --git a/chrome/browser/ui/views/toolbar/toolbar_view.cc b/chrome/browser/ui/views/toolbar/toolbar_view.cc
+index beac08704d884c68f0a76a1b5425958fc7b16058..f583e67a3c360af267d445a627753a42135b91c9 100644
+--- a/chrome/browser/ui/views/toolbar/toolbar_view.cc
++++ b/chrome/browser/ui/views/toolbar/toolbar_view.cc
+@@ -61,6 +61,7 @@
+ #include "chrome/browser/ui/tabs/tab_strip_model.h"
+ #include "chrome/browser/ui/tabs/tab_strip_model_observer.h"
+ #include "chrome/browser/ui/views/tab_search_bubble_host.h"
++#include "chrome/browser/ui/views/toolbar/w10m_tab_switcher.h"
+ #include "ui/gfx/canvas.h"
+ #include "ui/gfx/font_list.h"
+ #include "ui/gfx/geometry/rect_conversions.h"
+@@ -262,6 +263,20 @@ bool IsPositionInWindowCaptionForView(const views::View* view,
+ DEFINE_CLASS_ELEMENT_IDENTIFIER_VALUE(ToolbarView, kToolbarElementId);
+ 
+ #if defined(VENETIUM_W10M)
++namespace w10m {
++namespace {
++TabSwitcherOpener g_tab_switcher_opener = nullptr;
++}  // namespace
++
++void SetTabSwitcherOpener(TabSwitcherOpener opener) {
++  g_tab_switcher_opener = opener;
++}
++
++TabSwitcherOpener GetTabSwitcherOpener() {
++  return g_tab_switcher_opener;
++}
++}  // namespace w10m
++
+ namespace {
+ 
+ // "+" beside the address bar: a new tab.
+@@ -282,14 +297,19 @@ BEGIN_METADATA(PhoneNewTabButton)
+ END_METADATA
+ 
+ // The number of tabs in a rounded square, as Chrome for Android's tab
+-// switcher button. It opens the list of tabs (tab search, anchored here).
++// switcher button. It opens the tab switcher (the embedder's), or else the
++// list of tabs (tab search, anchored here).
+ class PhoneTabCounterButton : public ToolbarButton,
+                               public TabStripModelObserver {
+   METADATA_HEADER(PhoneTabCounterButton, ToolbarButton)
+ 
+  public:
+   explicit PhoneTabCounterButton(Browser* browser) : browser_(browser) {
+-    tab_search_ = std::make_unique<TabSearchBubbleHost>(this, browser);
++    if (w10m::TabSwitcherOpener opener = w10m::GetTabSwitcherOpener()) {
++      SetCallback(base::BindRepeating(opener, base::Unretained(browser)));
++    } else {
++      tab_search_ = std::make_unique<TabSearchBubbleHost>(this, browser);
++    }
+     SetTooltipText(l10n_util::GetStringUTF16(IDS_ACCNAME_TAB_SEARCH));
+     GetViewAccessibility().SetName(
+         l10n_util::GetStringUTF16(IDS_ACCNAME_TAB_SEARCH));
+diff --git a/chrome/browser/ui/views/toolbar/w10m_tab_switcher.h b/chrome/browser/ui/views/toolbar/w10m_tab_switcher.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..2c26de2ed4d8273bd3a70acb881f99ecce8da6e2
+--- /dev/null
++++ b/chrome/browser/ui/views/toolbar/w10m_tab_switcher.h
+@@ -0,0 +1,21 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_UI_VIEWS_TOOLBAR_W10M_TAB_SWITCHER_H_
++#define CHROME_BROWSER_UI_VIEWS_TOOLBAR_W10M_TAB_SWITCHER_H_
++
++class Browser;
++
++namespace w10m {
++
++// Chrome for Android's tab switcher on Windows 10 Mobile, which the embedder
++// draws: the tab count button beside the address bar opens it. Without one,
++// the button opens tab search. Set before the first browser window.
++using TabSwitcherOpener = void (*)(Browser* browser);
++void SetTabSwitcherOpener(TabSwitcherOpener opener);
++TabSwitcherOpener GetTabSwitcherOpener();
++
++}  // namespace w10m
++
++#endif  // CHROME_BROWSER_UI_VIEWS_TOOLBAR_W10M_TAB_SWITCHER_H_

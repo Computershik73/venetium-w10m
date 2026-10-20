@@ -8,6 +8,7 @@
 #include "base/task/single_thread_task_runner.h"
 #include "chrome/browser/platform_util.h"
 #include "chrome/browser/ui/toolbar/app_menu_model.h"
+#include "chrome/browser/ui/views/toolbar/w10m_tab_switcher.h"
 #include "ui/display/win/dpi.h"
 #include "venetium_w10m/browser/vw_browser.h"
 #include "venetium_w10m/browser/vw_browser_main_parts.h"
@@ -17,6 +18,7 @@
 #include "venetium_w10m/chrome/vw_browser_native_widget.h"
 #include "venetium_w10m/chrome/vw_chrome_host.h"
 #include "venetium_w10m/chrome/vw_select_file_dialog.h"
+#include "venetium_w10m/chrome/vw_tab_grid.h"
 #include "venetium_w10m/common/vw_log.h"
 
 namespace venetium_w10m {
@@ -82,6 +84,9 @@ void VwChromeExtraParts::PreProfileInit() {
   VwSelectFileDialogFactory::Install();
   platform_util::SetW10mOpenHandler(&OpenThroughShell);
   AppMenuModel::SetW10mShellCommandHandler(&ShellCommand);
+  // The tab count button beside the address bar opens Chrome for Android's
+  // tab switcher.
+  w10m::SetTabSwitcherOpener(&VwTabGrid::Show);
   auto host = std::make_unique<VwChromeHost>();
   host_ = host.get();
   browser_ = std::make_unique<VwBrowser>(nullptr, VwEngine::Get()->config(),
@@ -101,6 +106,7 @@ void VwChromeExtraParts::PostMainMessageLoopRun() {
   VwEngine::Get()->BrowserStopping();
   platform_util::SetW10mOpenHandler(nullptr);
   AppMenuModel::SetW10mShellCommandHandler(nullptr);
+  w10m::SetTabSwitcherOpener(nullptr);
   host_ = nullptr;
   browser_.reset();
 }
