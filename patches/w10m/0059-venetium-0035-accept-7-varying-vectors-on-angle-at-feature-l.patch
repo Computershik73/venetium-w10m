@@ -1,0 +1,76 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Thu, 22 Oct 2026 20:28:50 +0400
+Subject: [PATCH] Venetium 0035: accept 7 varying vectors on ANGLE at feature
+ level 9_x
+
+From Venetium (github.com/hamed7ir/venetium), patches/0035-accept-7-varyings-9x-sm2.patch: ANGLE's Direct3D 11 backend at feature level 9_3 has 7 varying vectors, one short of ES 2.0's 8, and ContextGroup refused every GL context there for it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ gpu/command_buffer/service/context_group.cc | 32 ++++++++++++++++++++-
+ ui/gl/gl_switches.cc                        |  7 +++++
+ 2 files changed, 38 insertions(+), 1 deletion(-)
+
+diff --git a/gpu/command_buffer/service/context_group.cc b/gpu/command_buffer/service/context_group.cc
+index a3bd5095353f97baec1a35b7c3a67d6ccb4653f0..863eee872e030a8b6e67324feb98e174793d63f4 100644
+--- a/gpu/command_buffer/service/context_group.cc
++++ b/gpu/command_buffer/service/context_group.cc
+@@ -430,8 +430,38 @@ ContextGroup::InitializeWithCompleteFramebufferForWorkarounds(
+   GetIntegerv(GL_MAX_VERTEX_UNIFORM_VECTORS, &max_vertex_uniform_vectors_);
+ 
+   const GLint kMinFragmentUniformVectors = 16;
+-  const GLint kMinVaryingVectors = 8;
++  GLint kMinVaryingVectors = 8;
+   const GLint kMinVertexUniformVectors = 128;
++
++  // Venetium 0035: ANGLE's Direct3D9 (shader model 2) and Direct3D11
++  // feature-level 9_x backends expose only 7 varying vectors - D3D9 has eight
++  // texcoord interpolators and ANGLE reserves one - one short of the ES 2.0
++  // minimum of 8. On the Surface 2 (ARM32, D3D9 SM2 / FL9_3) that single-vector
++  // shortfall makes ContextGroup::Initialize reject every WebGL and compositor
++  // GL context ("too few uniforms or varyings supported."). Accept exactly 7 on
++  // these contexts only; any other backend keeps the stock 8, and
++  // --venetium-strict-es2-limits restores the stock minimum everywhere. Both
++  // the validating and passthrough decoders reach this via group_->Initialize,
++  // so this is the single enforcement site for the ES 2.0 varyings minimum.
++  if (max_varying_vectors_ == 7u &&
++      !base::CommandLine::ForCurrentProcess()->HasSwitch(
++          "venetium-strict-es2-limits")) {
++    const char* renderer_cstr =
++        reinterpret_cast<const char*>(glGetString(GL_RENDERER));
++    const std::string renderer =
++        renderer_cstr ? renderer_cstr : std::string();
++    if (renderer.find("Direct3D9") != std::string::npos ||
++        renderer.find("level_9_") != std::string::npos) {
++      kMinVaryingVectors = 7;
++      static bool logged = false;
++      if (!logged) {
++        logged = true;
++        LOG(WARNING) << "Venetium: accepting 7 varying vectors (ES 2.0 wants 8) "
++                     << "on ANGLE renderer \"" << renderer << "\".";
++      }
++    }
++  }
++
+   if (!CheckGLFeatureU(
+       kMinFragmentUniformVectors, &max_fragment_uniform_vectors_) ||
+       !CheckGLFeatureU(kMinVaryingVectors, &max_varying_vectors_) ||
+diff --git a/ui/gl/gl_switches.cc b/ui/gl/gl_switches.cc
+index 3600c21358c6f9b2e10b01fec269e21e94a36dfb..05a68dfa4a54661d9fd669b3b312d7c52fc3170a 100644
+--- a/ui/gl/gl_switches.cc
++++ b/ui/gl/gl_switches.cc
+@@ -199,6 +199,13 @@ const auto kGLSwitchesCopiedFromGpuProcessHostArray = std::to_array({
+     kTintDcLayer,
+     kEnableUnsafeSwiftShader,
+     kDisableD3D11Warp,
++    // Venetium 0035: forward --venetium-strict-es2-limits to the GPU process,
++    // where context_group.cc reads it (ContextGroup::Initialize) to keep the
++    // stock ES 2.0 varyings minimum of 8 instead of accepting 7 on D3D9/FL9_x
++    // ANGLE contexts. Without forwarding, the GPU process never sees it
++    // (gpu_process_host.cc copies only listed switches) and the strict-limits
++    // control - section 5 arm (b) - would have no effect.
++    "venetium-strict-es2-limits",
+ });
+ // An external span to the array above, so that it can be exposed from the
+ // header file without specifying the size of the array manually.

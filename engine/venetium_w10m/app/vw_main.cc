@@ -175,11 +175,12 @@ bool ChromeInterface(const std::string& switches,
 
 // How frames reach the screen, best first:
 //   GPU compositing  ANGLE on Direct3D 11 draws the page's layers into the
-//                    shell's SwapChainPanel (feature level 11_0 and up);
+//                    shell's SwapChainPanel (feature level 9_3 and up: ES 3
+//                    from 10_0, ES 2 at 9_3, ANGLE's 9_3 from gecko-w10m);
 //   the Direct3D 11  the CPU rasters, and viz draws the layers itself with
 //   compositor       Direct3D 11 into the swap chain below, frame by frame
-//                    where it can (a GPU that stops below 10_0, where ANGLE
-//                    cannot run; or --vw-gpu=d3d11, on a device held to 9_3);
+//                    where it can (a 9_3 GPU whose runs with ANGLE did not
+//                    last; or --vw-gpu=d3d11, on a device held to 9_3);
 //   D3D11 present    the software compositor's frames, shown by the GPU
 //                    through the panel (any feature level from 9_3);
 //   the bitmap       frames copied out to the shell.
@@ -233,7 +234,7 @@ void ChoosePresentation(EngineConfig* config, uint64_t ram_mb) {
   // The Direct3D 11 compositor asked for by name: on any phone, and with the
   // device a 9_3 phone has, so that it is tested within the same limits.
   const bool d3d11_asked = HasSwitch(config->switches, "--vw-gpu=d3d11");
-  const bool angle_capable = level >= 0xb000 &&
+  const bool angle_capable = level >= 0x9300 &&
                              PanelHost::Get()->has_panel() && !off &&
                              !d3d11_asked;
   config->gpu_compositing =
@@ -244,6 +245,13 @@ void ChoosePresentation(EngineConfig* config, uint64_t ram_mb) {
           "graphics off and on, tries again)",
           guard->Failures(PresentKind::kAngle));
   }
+  if (config->gpu_compositing && level < 0xa000) {
+    // ANGLE's ES 2 at 9_3 (Venetium's way on Lumias, with gecko-w10m's level
+    // 9 clear shaders): WebGL 1, no WebGL 2; Chromium takes its 7 varyings.
+    Note("gpu: GPU compositing at feature level 9_3, ANGLE's ES 2 "
+         "(--vw-gpu=d3d11 among the engine switches: the Direct3D 11 "
+         "compositor instead)");
+  }
   // H.264 on the GPU's own decoder (Chromium's D3D11VideoDecoder), where the
   // compositor is on the GPU too: the decoder works on ANGLE's device and
   // hands its frames on as textures, which a software compositor cannot
@@ -253,6 +261,11 @@ void ChoosePresentation(EngineConfig* config, uint64_t ram_mb) {
   if (!config->gpu_compositing) {
     Note("video: decoded in software (the GPU's decoder needs GPU "
          "compositing to draw its frames)");
+  } else if (level < 0xb000) {
+    // Not tried below 11_0: Chromium's decoder on a 9_3 device is unknown
+    // ground (gecko-w10m decodes there through Media Foundation instead).
+    Note("video: decoded in software (the GPU's decoder is used from "
+         "feature level 11 up)");
   } else if (HasSwitch(config->switches, "--vw-video=software") ||
              HasSwitch(config->switches,
                        "--disable-accelerated-video-decode")) {
@@ -269,8 +282,8 @@ void ChoosePresentation(EngineConfig* config, uint64_t ram_mb) {
          "(--vw-video=software among the engine switches keeps it on the "
          "CPU)");
   }
-  // Raster on the GPU as well, where the compositor is: a phone at feature
-  // level 11 rasters there as Chrome for Android does. Chromium's blocklist
+  // Raster on the GPU as well, where the compositor is (at 9_3 too: the
+  // user's "hardware acceleration, forced"), as Chrome for Android does. Chromium's blocklist
   // keeps it off Qualcomm's Windows drivers before 31.0.2.0 (crbug 1047002,
   // for laptops), which every phone's driver is; the switch overrides it. A
   // run that does not last with it counts against GPU compositing, as above.
@@ -283,7 +296,8 @@ void ChoosePresentation(EngineConfig* config, uint64_t ram_mb) {
            "the engine switches keeps them on the CPU)");
     }
   }
-  const bool compositor_capable = (level < 0xa000 || d3d11_asked) &&
+  const bool compositor_capable = !config->gpu_compositing &&
+                                  (level < 0xa000 || d3d11_asked) &&
                                   PanelHost::Get()->has_panel() && !off;
   config->d3d_compositing =
       compositor_capable && guard->Allowed(PresentKind::kCompositor);
