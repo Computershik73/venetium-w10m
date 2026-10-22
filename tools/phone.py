@@ -158,6 +158,11 @@ def cmd_install(a):
                            capture_output=True, text=True)
         print((r.stdout + r.stderr).strip().splitlines()[-1] if (r.stdout + r.stderr).strip() else "")
         code = r.returncode
+        if code != 0:
+            # WinAppDeployCmd is refused (E_ACCESSDENIED) by a locked phone,
+            # among others; the portal's own install is not.
+            print("WinAppDeployCmd failed; installing through the portal instead")
+            code = install_through_portal(appx)
     else:
         code = install_through_portal(appx)
     print("now on the phone:", package()["PackageFullName"])
