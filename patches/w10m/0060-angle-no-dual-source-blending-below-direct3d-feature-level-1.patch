@@ -1,0 +1,41 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Thu, 22 Oct 2026 20:50:48 +0400
+Subject: [PATCH] ANGLE: no dual-source blending below Direct3D feature level
+ 10_0 (W10M)
+
+At 9_3 ANGLE offered GL_EXT_blend_func_extended, which Direct3D has from
+10_0 only: Skia blended LCD text with SRC1 factors, Direct3D refused the
+blend state (E_INVALIDARG, "Error allocating BlendState") and nothing with
+such text drew -- on a Lumia 650 the address bar froze as one typed. Below
+10_0 the extension and dual-source draw buffers are not offered; below
+10_1 blend states are not independent, below 10_0 alpha to coverage is
+left out, both of which Direct3D also refuses there.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../libANGLE/renderer/d3d/d3d11/renderer11_utils.cpp  | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/third_party/angle/src/libANGLE/renderer/d3d/d3d11/renderer11_utils.cpp b/third_party/angle/src/libANGLE/renderer/d3d/d3d11/renderer11_utils.cpp
+index a4537cdc393a05f40298f2f1b5a3f57a873f9934..c865281619850ed9218a239358fe03fc866973eb 100644
+--- a/third_party/angle/src/libANGLE/renderer/d3d/d3d11/renderer11_utils.cpp
++++ b/third_party/angle/src/libANGLE/renderer/d3d/d3d11/renderer11_utils.cpp
+@@ -1638,6 +1638,17 @@ void GenerateCaps(ID3D11Device *device,
+     extensions->textureMultisampleANGLE = true;
+     extensions->provokingVertexANGLE    = true;
+     extensions->blendFuncExtendedEXT    = true;
++#if defined(VENETIUM_W10M)
++    // Windows 10 Mobile: Direct3D has dual-source blending (D3D11_BLEND_SRC1_*) from
++    // feature level 10_0 only; below it a blend state that asks for it is refused
++    // (E_INVALIDARG, "Error allocating BlendState"). Offered at 9_3, Skia blended LCD text
++    // that way, and nothing with such text drew -- the address bar while one typed.
++    if (featureLevel < D3D_FEATURE_LEVEL_10_0)
++    {
++        extensions->blendFuncExtendedEXT = false;
++        caps->maxDualSourceDrawBuffers   = 0;
++    }
++#endif
+     // http://anglebug.com/42263500
+     extensions->texture3DOES                             = false;
+     extensions->baseInstanceEXT                          = true;
