@@ -25,7 +25,7 @@
   <Identity
       Name="Venetium"
       Publisher="CN=Computershik"
-      Version="150.7871.222.39"
+      Version="150.7871.222.40"
       ProcessorArchitecture="arm" />
 
   <mp:PhoneIdentity

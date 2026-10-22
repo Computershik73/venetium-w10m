@@ -1,0 +1,129 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Thu, 22 Oct 2026 23:24:56 +0400
+Subject: [PATCH] Windows 10 Mobile: H.264 on the GPU's decoder at feature
+ level 9_3
+
+Asked for by the user for the Lumia 650 (Adreno 304). D3D11VideoDecoder
+takes a device from feature level 9_3 up, driven as an 11_0 device is
+(ID3D11VideoContext). Below 10_0 a shader cannot sample NV12, so the
+frames are copied by the video processor as BGRA, as the system's own
+players do there; the decoder's texture array is not made shareable,
+which Direct3D refuses below 10_0 and nothing needs on one device and
+thread. Each frame having a BGRA copy of its own, decoding goes up to
+1280x720 there; larger video is decoded in software.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../gpu/windows/d3d11_decoder_configurator.cc |  9 +++++++
+ media/gpu/windows/d3d11_texture_selector.cc   | 24 ++++++++++++++++-
+ media/gpu/windows/d3d11_video_decoder.cc      | 27 +++++++++++++++++++
+ 3 files changed, 59 insertions(+), 1 deletion(-)
+
+diff --git a/media/gpu/windows/d3d11_decoder_configurator.cc b/media/gpu/windows/d3d11_decoder_configurator.cc
+index 015a29907a1ac531f7959f960bf4cda266dad6b8..f2154adce6685e149c6587152d58ee6bc8637144 100644
+--- a/media/gpu/windows/d3d11_decoder_configurator.cc
++++ b/media/gpu/windows/d3d11_decoder_configurator.cc
+@@ -219,6 +219,15 @@ D3D11DecoderConfigurator::CreateOutputTexture(ComD3D11Device device,
+ 
+   if (is_encrypted_)
+     output_texture_desc_.MiscFlags |= D3D11_RESOURCE_MISC_HW_PROTECTED;
++#if defined(VENETIUM_W10M)
++  // Windows 10 Mobile: below feature level 10_0 a texture array of NV12 cannot be
++  // shared (Direct3D refuses it), and nothing shares it here: the video processor
++  // copies its frames out on the same device, on the same thread.
++  if (!use_shared_handle &&
++      device->GetFeatureLevel() < D3D_FEATURE_LEVEL_10_0) {
++    output_texture_desc_.MiscFlags = 0;
++  }
++#endif
+ 
+   ComD3D11Texture2D texture;
+   HRESULT hr =
+diff --git a/media/gpu/windows/d3d11_texture_selector.cc b/media/gpu/windows/d3d11_texture_selector.cc
+index 8cacbee46b8e53e9a7e98cf9a9e3590c9b675549..f224a13bca26699afe47f98af22d10c96d9fb7bc 100644
+--- a/media/gpu/windows/d3d11_texture_selector.cc
++++ b/media/gpu/windows/d3d11_texture_selector.cc
+@@ -77,6 +77,28 @@ std::unique_ptr<TextureSelector> TextureSelector::Create(
+   auto supports_fmt = [format_checker](auto fmt) {
+     return format_checker->CheckOutputFormatSupport(fmt);
+   };
++#if defined(VENETIUM_W10M)
++  // Windows 10 Mobile: below feature level 10_0 a shader cannot sample NV12 (its
++  // planes have no views there), however well the video processor writes it: the
++  // frames are copied as BGRA, the video processor converting them, as the system's
++  // own players do on those phones.
++  bool w10m_rgb_only = false;
++  {
++    ComD3D11Device device;
++    device_context->GetDevice(&device);
++    if (device && device->GetFeatureLevel() < D3D_FEATURE_LEVEL_10_0) {
++      w10m_rgb_only = true;
++      needs_texture_copy = true;
++      MEDIA_LOG(INFO, media_log)
++          << "D3D11VideoDecoder: feature level 9_3, frames copied as BGRA";
++    }
++  }
++  auto supports_nv12_output = [&](auto fmt) {
++    return !w10m_rgb_only && supports_fmt(fmt);
++  };
++#else
++  auto supports_nv12_output = supports_fmt;
++#endif
+ 
+   switch (decoder_output_format) {
+     case DXGI_FORMAT_YUY2:
+@@ -112,7 +134,7 @@ std::unique_ptr<TextureSelector> TextureSelector::Create(
+     case DXGI_FORMAT_NV12: {
+       MEDIA_LOG(INFO, media_log) << "D3D11VideoDecoder producing "
+                                  << DxgiFormatToString(decoder_output_format);
+-      if (!needs_texture_copy || supports_fmt(DXGI_FORMAT_NV12)) {
++      if (!needs_texture_copy || supports_nv12_output(DXGI_FORMAT_NV12)) {
+         output_pixel_format = PIXEL_FORMAT_NV12;
+         output_si_format = viz::MultiPlaneFormat::kNV12;
+         MEDIA_LOG(INFO, media_log) << "D3D11VideoDecoder: Selected NV12";
+diff --git a/media/gpu/windows/d3d11_video_decoder.cc b/media/gpu/windows/d3d11_video_decoder.cc
+index 918d5b9f59dbd7227bed3e2e79085f10f9f9d6d6..4fc69690bcefeeba146e994bb7688cd1a40bea3f 100644
+--- a/media/gpu/windows/d3d11_video_decoder.cc
++++ b/media/gpu/windows/d3d11_video_decoder.cc
+@@ -1556,6 +1556,18 @@ bool D3D11VideoDecoder::GetD3D11FeatureLevel(
+     return false;
+ 
+   *feature_level = dev->GetFeatureLevel();
++#if defined(VENETIUM_W10M)
++  // Windows 10 Mobile: the phones that stop at feature level 9_3 (Adreno 3xx)
++  // decode H.264 through the Direct3D 11 video interfaces too -- the system's
++  // own decoder does so there. Driven as an 11_0 device is (ID3D11VideoContext),
++  // its frames copied by the video processor into BGRA textures the 9_3
++  // compositor can sample (d3d11_texture_selector.cc).
++  if (*feature_level >= D3D_FEATURE_LEVEL_9_3 &&
++      *feature_level < D3D_FEATURE_LEVEL_11_0) {
++    *feature_level = D3D_FEATURE_LEVEL_11_0;
++    return true;
++  }
++#endif
+   if (*feature_level < D3D_FEATURE_LEVEL_11_0)
+     return false;
+ 
+@@ -1637,6 +1649,21 @@ D3D11VideoDecoder::GetSupportedVideoDecoderConfigs(
+     if (!w10m_usable) {
+       return {};
+     }
++    // Below feature level 10_0 every decoded frame has a BGRA copy of its own
++    // (d3d11_texture_selector.cc), some twenty of them: 75 MB at 720p, 170 MB
++    // at 1080p, of the 390 MB a 1 GB phone gives an app. Up to 720p there;
++    // larger video is decoded in software.
++    if (d3d11_device->GetFeatureLevel() < D3D_FEATURE_LEVEL_10_0) {
++      for (auto& kv : supported_resolutions) {
++        auto& range = kv.second;
++        range.max_landscape_resolution.SetToMin(gfx::Size(1280, 720));
++        if (range.max_portrait_resolution) {
++          range.max_portrait_resolution->SetToMin(gfx::Size(720, 1280));
++        }
++      }
++      LOG(WARNING) << "video: feature level 9_3: H.264 on the GPU's decoder "
++                      "up to 1280x720, frames copied as BGRA";
++    }
+ #else
+     supported_resolutions =
+         GetSupportedD3D11VideoDecoderResolutions(d3d11_device, gpu_workarounds);

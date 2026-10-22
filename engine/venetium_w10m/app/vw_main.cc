@@ -261,11 +261,6 @@ void ChoosePresentation(EngineConfig* config, uint64_t ram_mb) {
   if (!config->gpu_compositing) {
     Note("video: decoded in software (the GPU's decoder needs GPU "
          "compositing to draw its frames)");
-  } else if (level < 0xb000) {
-    // Not tried below 11_0: Chromium's decoder on a 9_3 device is unknown
-    // ground (gecko-w10m decodes there through Media Foundation instead).
-    Note("video: decoded in software (the GPU's decoder is used from "
-         "feature level 11 up)");
   } else if (HasSwitch(config->switches, "--vw-video=software") ||
              HasSwitch(config->switches,
                        "--disable-accelerated-video-decode")) {
@@ -278,6 +273,12 @@ void ChoosePresentation(EngineConfig* config, uint64_t ram_mb) {
   } else {
     config->hardware_video = true;
     gl::SetW10mVideoHandler(&VideoDecoding);
+    if (level < 0xa000) {
+      // Chromium's decoder on a 9_3 device: its frames copied by the video
+      // processor into BGRA textures the compositor samples, up to 720p
+      // (media/gpu/windows, Windows 10 Mobile).
+      Note("video: at feature level 9_3, frames copied as BGRA, up to 720p");
+    }
     Note("video: H.264 goes to the GPU's decoder when a page plays one "
          "(--vw-video=software among the engine switches keeps it on the "
          "CPU)");
