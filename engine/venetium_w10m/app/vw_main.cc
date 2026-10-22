@@ -269,6 +269,20 @@ void ChoosePresentation(EngineConfig* config, uint64_t ram_mb) {
          "(--vw-video=software among the engine switches keeps it on the "
          "CPU)");
   }
+  // Raster on the GPU as well, where the compositor is: a phone at feature
+  // level 11 rasters there as Chrome for Android does. Chromium's blocklist
+  // keeps it off Qualcomm's Windows drivers before 31.0.2.0 (crbug 1047002,
+  // for laptops), which every phone's driver is; the switch overrides it. A
+  // run that does not last with it counts against GPU compositing, as above.
+  if (config->gpu_compositing) {
+    if (HasSwitch(config->switches, "--vw-raster=cpu")) {
+      Note("raster: on the CPU (the engine switches ask for it)");
+    } else {
+      config->gpu_raster = true;
+      Note("raster: tiles and 2D canvases on the GPU (--vw-raster=cpu among "
+           "the engine switches keeps them on the CPU)");
+    }
+  }
   const bool compositor_capable = (level < 0xa000 || d3d11_asked) &&
                                   PanelHost::Get()->has_panel() && !off;
   config->d3d_compositing =
@@ -334,14 +348,19 @@ void SetUpCommandLine(const EngineConfig& config) {
   command_line->AppendSwitch(sandbox::policy::switches::kNoSandbox);
   if (config.gpu_compositing) {
     // The compositor on the GPU: SkiaRenderer on ANGLE's Direct3D 11,
-    // presenting into the shell's panel. Raster stays on the CPU for now,
-    // and video encode and 2D canvas off the GPU: one thing at a time.
-    // (Video encode left on has the GPU thread enumerate and activate the
-    // phone's hardware encoder transforms for the first page with a media
-    // element, only to list their profiles.)
+    // presenting into the shell's panel; tiles and 2D canvases rastered there
+    // too (gpu_raster), or on the CPU. Video encode stays off the GPU: left
+    // on, it has the GPU thread enumerate and activate the phone's hardware
+    // encoder transforms for the first page with a media element, only to
+    // list their profiles.
     command_line->AppendSwitchASCII(switches::kUseGL, "angle");
     command_line->AppendSwitchASCII(switches::kUseANGLE, "d3d11");
-    command_line->AppendSwitch(switches::kDisableGpuRasterization);
+    if (config.gpu_raster) {
+      command_line->AppendSwitch(switches::kEnableGpuRasterization);
+    } else {
+      command_line->AppendSwitch(switches::kDisableGpuRasterization);
+      command_line->AppendSwitch(switches::kDisableAccelerated2dCanvas);
+    }
     if (config.hardware_video) {
       // H.264 on the GPU's decoder, and nothing else of video there. These
       // are Chromium's own driver workarounds, taken as switches
@@ -368,7 +387,6 @@ void SetUpCommandLine(const EngineConfig& config) {
       command_line->AppendSwitch(switches::kDisableAcceleratedVideoDecode);
     }
     command_line->AppendSwitch(switches::kDisableAcceleratedVideoEncode);
-    command_line->AppendSwitch(switches::kDisableAccelerated2dCanvas);
   } else {
     // Software raster and compositing; the frames go to the panel through
     // Direct3D 11, or to the shell's bitmap (vw_frame_sink). The Direct3D 11

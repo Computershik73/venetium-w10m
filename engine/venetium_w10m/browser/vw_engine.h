@@ -58,6 +58,9 @@ struct EngineConfig {
   // ANGLE's device); only with gpu_compositing, whose compositor takes the
   // decoded frames as textures.
   bool hardware_video = false;
+  // Tiles and 2D canvases are rastered on the GPU too (Skia on ANGLE); only
+  // with gpu_compositing. Otherwise the CPU rasters and the GPU composites.
+  bool gpu_raster = false;
   // A file that exists while a hardware run has not shown a frame yet.
   base::FilePath present_guard;
 };
