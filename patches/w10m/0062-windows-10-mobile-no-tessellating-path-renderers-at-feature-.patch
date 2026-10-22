@@ -1,0 +1,169 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Thu, 22 Oct 2026 23:09:28 +0400
+Subject: [PATCH] Windows 10 Mobile: no tessellating path renderers at feature
+ level 9_3
+
+A Lumia 650's address bar froze as one typed: Skia drew a path with its
+tessellating path renderer, whose vertex shader (466 instruction slots)
+is far over vs_2_x's 256 at Direct3D feature level 9_3. D3DCompile spent
+some 12 s on the first attempt on a Cortex-A7 before failing, and ANGLE
+then tried three more configurations, the GPU thread drawing nothing.
+
+Ganesh contexts on an ANGLE device below 10_0 now have
+fDisableTessellationPathRenderer (the atlas path renderer goes with it),
+as Skia already does for native Adreno 3xx and ANGLE-D3D9. In ANGLE, a
+shader over the target's limits (X5615, X5608, X5609, X4505) is not
+retried with other configurations, and HLSL that failed is remembered
+and fails at once the next time.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../service/shared_context_state.cc           | 16 +++++
+ .../libANGLE/renderer/d3d/HLSLCompiler.cpp    | 67 +++++++++++++++++++
+ 2 files changed, 83 insertions(+)
+
+diff --git a/gpu/command_buffer/service/shared_context_state.cc b/gpu/command_buffer/service/shared_context_state.cc
+index 08ba87c8db6c6f82cf5cee07226315d78e11824c..b4619252fc5b9f0aabb42df0b62da497f02bb8e7 100644
+--- a/gpu/command_buffer/service/shared_context_state.cc
++++ b/gpu/command_buffer/service/shared_context_state.cc
+@@ -536,6 +536,22 @@ bool SharedContextState::InitializeGanesh(
+           GrContextOptions::ShaderCacheStrategy::kBackendSource;
+     }
+     options.fPreferExternalImagesOverES3 = true;
++#if defined(VENETIUM_W10M)
++    // Windows 10 Mobile: ANGLE at Direct3D feature level 9_3 has vertex shaders of 256
++    // instruction slots (vs_2_x). Skia's tessellating path renderers write vertex shaders of
++    // nearly twice that, which fail there -- after D3DCompile spent seconds on each on a
++    // Cortex-A7, the GPU thread drawing nothing meanwhile (a Lumia 650's address bar froze as
++    // one typed). Paths go to Skia's other renderers at 9_3.
++    if (Microsoft::WRL::ComPtr<ID3D11Device> d3d11_device =
++            gl::QueryD3D11DeviceObjectFromANGLE();
++        d3d11_device &&
++        d3d11_device->GetFeatureLevel() < D3D_FEATURE_LEVEL_10_0) {
++      // The atlas path renderer tessellates too, and goes with it.
++      options.fDisableTessellationPathRenderer = true;
++      LOG(WARNING) << "W10M: Direct3D feature level 9_3; Skia's tessellating "
++                      "path renderers are off";
++    }
++#endif
+ 
+     if (gl::GetGLImplementation() == gl::kGLImplementationStubGL) {
+       // gl::kGLImplementationStubGL doesn't implement enough functions for
+diff --git a/third_party/angle/src/libANGLE/renderer/d3d/HLSLCompiler.cpp b/third_party/angle/src/libANGLE/renderer/d3d/HLSLCompiler.cpp
+index 253b533e4e521097b6b71ec799a6a7a55f7e88e1..65fe21a8676bd67e38bbf8e192b76e20740f5556 100644
+--- a/third_party/angle/src/libANGLE/renderer/d3d/HLSLCompiler.cpp
++++ b/third_party/angle/src/libANGLE/renderer/d3d/HLSLCompiler.cpp
+@@ -11,6 +11,11 @@
+ #include "libANGLE/renderer/d3d/HLSLCompiler.h"
+ 
+ #include <sstream>
++#if defined(VENETIUM_W10M)
++#    include <functional>
++#    include <mutex>
++#    include <unordered_set>
++#endif
+ 
+ #include "common/system_utils.h"
+ #include "common/utilities.h"
+@@ -195,6 +200,36 @@ void HLSLCompiler::release()
+     }
+ }
+ 
++#if defined(VENETIUM_W10M)
++namespace
++{
++// Windows 10 Mobile: HLSL that could not be compiled, by hash of profile and source. It fails
++// again every time -- at feature level 9_3 after seconds of D3DCompile on a Cortex-A7 for each
++// configuration -- and Skia asks for a program that failed again at its next draw.
++std::mutex &W10mFailedLock()
++{
++    static std::mutex lock;
++    return lock;
++}
++
++std::unordered_set<size_t> &W10mFailed()
++{
++    static std::unordered_set<size_t> failed;
++    return failed;
++}
++
++// The shader is over what the target allows (instruction slots, registers): no other
++// compiler configuration makes it fit, and each costs as long as the first.
++bool W10mOverTheLimit(const std::string &message)
++{
++    return message.find("error X5615:") != std::string::npos ||  // instruction slots
++           message.find("error X5608:") != std::string::npos ||  // arithmetic slots
++           message.find("error X5609:") != std::string::npos ||  // texture slots
++           message.find("error X4505:") != std::string::npos;    // registers
++}
++}  // namespace
++#endif
++
+ angle::Result HLSLCompiler::compileToBinary(d3d::Context *context,
+                                             gl::InfoLog &infoLog,
+                                             const std::string &hlsl,
+@@ -223,6 +258,21 @@ angle::Result HLSLCompiler::compileToBinary(d3d::Context *context,
+ 
+     const D3D_SHADER_MACRO *macros = overrideMacros ? overrideMacros : nullptr;
+ 
++#if defined(VENETIUM_W10M)
++    const size_t w10mKey =
++        std::hash<std::string>()(profile + static_cast<char>(10) + hlsl);
++    {
++        std::lock_guard<std::mutex> hold(W10mFailedLock());
++        if (W10mFailed().count(w10mKey) != 0)
++        {
++            infoLog << "This shader failed to compile before (" << profile << ").";
++            *outCompiledBlob = nullptr;
++            return angle::Result::Continue;
++        }
++    }
++    bool w10mOverTheLimit = false;
++#endif
++
+     for (size_t i = 0; i < configs.size(); ++i)
+     {
+         ID3DBlob *errorMessage = nullptr;
+@@ -252,6 +302,9 @@ angle::Result HLSLCompiler::compileToBinary(d3d::Context *context,
+             // WARN() << std::endl << hlsl;
+ 
+             WARN() << std::endl << message;
++#if defined(VENETIUM_W10M)
++            w10mOverTheLimit = W10mOverTheLimit(message);
++#endif
+ 
+             if (macros != nullptr)
+             {
+@@ -346,6 +399,13 @@ angle::Result HLSLCompiler::compileToBinary(d3d::Context *context,
+ 
+         infoLog << "Warning: D3D shader compilation failed with " << configs[i].name << " flags. ("
+                 << profile << ")";
++#if defined(VENETIUM_W10M)
++        if (w10mOverTheLimit)
++        {
++            infoLog << " Over the target's limits: not retried.";
++            break;
++        }
++#endif
+ 
+         if (i + 1 < configs.size())
+         {
+@@ -355,10 +415,17 @@ angle::Result HLSLCompiler::compileToBinary(d3d::Context *context,
+ 
+     // None of the configurations succeeded in compiling this shader but the compiler is still
+     // intact
++#if defined(VENETIUM_W10M)
++    {
++        std::lock_guard<std::mutex> hold(W10mFailedLock());
++        W10mFailed().insert(w10mKey);
++    }
++#endif
+     *outCompiledBlob = nullptr;
+     return angle::Result::Continue;
+ }
+ 
++
+ angle::Result HLSLCompiler::disassembleBinary(d3d::Context *context,
+                                               ID3DBlob *shaderBinary,
+                                               std::string *disassemblyOut)
