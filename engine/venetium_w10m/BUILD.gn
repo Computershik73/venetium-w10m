@@ -81,6 +81,8 @@ shared_library("venetium_engine") {
     "browser/vw_engine.cc",
     "browser/vw_engine.h",
     "browser/vw_frame_sink.cc",
+    "browser/vw_hang_watch.cc",
+    "browser/vw_hang_watch.h",
     "browser/vw_frame_sink.h",
     "browser/vw_input_method.cc",
     "browser/vw_input_method.h",

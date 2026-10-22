@@ -1,0 +1,101 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Thu, 22 Oct 2026 21:17:53 +0400
+Subject: [PATCH] ANGLE: what making each shader costs, in the log (W10M)
+
+D3DCompile with its retries, then the driver's Create*Shader, said for each shader of 50 ms and more and every 25th, with the running count and total: at feature level 9_3 on a Cortex-A7 a frame waits for every new shader it needs.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../renderer/d3d/d3d11/Renderer11.cpp         | 49 +++++++++++++++++++
+ 1 file changed, 49 insertions(+)
+
+diff --git a/third_party/angle/src/libANGLE/renderer/d3d/d3d11/Renderer11.cpp b/third_party/angle/src/libANGLE/renderer/d3d/d3d11/Renderer11.cpp
+index 9e04989150027a323b984ec165084fffb6d94fa8..adca0af4f9bd1b79c3096b405560ca9678d66fbb 100644
+--- a/third_party/angle/src/libANGLE/renderer/d3d/d3d11/Renderer11.cpp
++++ b/third_party/angle/src/libANGLE/renderer/d3d/d3d11/Renderer11.cpp
+@@ -12,6 +12,9 @@
+ 
+ #include "libANGLE/renderer/d3d/d3d11/Renderer11.h"
+ 
++#include <atomic>
++#include <chrono>
++
+ #include <EGL/eglext.h>
+ #include <sstream>
+ 
+@@ -3162,6 +3165,37 @@ angle::Result Renderer11::loadExecutable(d3d::Context *context,
+     return angle::Result::Continue;
+ }
+ 
++#if defined(VENETIUM_W10M)
++namespace
++{
++// Windows 10 Mobile: what making a shader costs (D3DCompile, retries included, then the
++// driver's Create*Shader), said for each one of 50 ms and more and every 25th, with the
++// running count and total: at feature level 9_3, on a Cortex-A7, a frame that needs new
++// shaders waits for all of them.
++void W10mNoteShader(const std::string &profile, bool compiled, double compileMs, double createMs)
++{
++    static std::atomic<int> count{0};
++    static std::atomic<int64_t> totalUs{0};
++    const int n         = ++count;
++    const int64_t spent = static_cast<int64_t>((compileMs + createMs) * 1000.0);
++    const int64_t total = (totalUs += spent) / 1000;
++    if (spent >= 50'000 || n % 25 == 0)
++    {
++        WARN() << "W10M shader " << n << ": " << profile << (compiled ? "" : " NOT COMPILED")
++               << ", compiled in " << static_cast<int>(compileMs) << " ms, created in "
++               << static_cast<int>(createMs) << " ms; " << total << " ms for " << n
++               << " shaders";
++    }
++}
++
++double W10mMsSince(std::chrono::steady_clock::time_point start)
++{
++    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start)
++        .count();
++}
++}  // namespace
++#endif
++
+ angle::Result Renderer11::compileToExecutable(d3d::Context *context,
+                                               gl::InfoLog &infoLog,
+                                               const std::string &shaderHLSL,
+@@ -3225,21 +3259,36 @@ angle::Result Renderer11::compileToExecutable(d3d::Context *context,
+ 
+     angle::ComPtr<ID3DBlob> binary;
+     std::string debugInfo;
++#if defined(VENETIUM_W10M)
++    const auto w10mStart = std::chrono::steady_clock::now();
++#endif
+     ANGLE_TRY(mCompiler.compileToBinary(context, infoLog, shaderHLSL, profile, configs, loopMacros,
+                                         &binary, &debugInfo));
++#if defined(VENETIUM_W10M)
++    const double w10mCompileMs = W10mMsSince(w10mStart);
++#endif
+ 
+     // It's possible that binary is NULL if the compiler failed in all configurations.  Set the
+     // executable to NULL and return GL_NO_ERROR to signify that there was a link error but the
+     // internal state is still OK.
+     if (!binary)
+     {
++#if defined(VENETIUM_W10M)
++        W10mNoteShader(profile, false, w10mCompileMs, 0.0);
++#endif
+         *outExectuable = nullptr;
+         return angle::Result::Continue;
+     }
+ 
++#if defined(VENETIUM_W10M)
++    const auto w10mCompiled = std::chrono::steady_clock::now();
++#endif
+     angle::Result error = loadExecutable(
+         context, static_cast<const uint8_t *>(binary->GetBufferPointer()), binary->GetBufferSize(),
+         type, streamOutVaryings, separatedOutputBuffers, outExectuable);
++#if defined(VENETIUM_W10M)
++    W10mNoteShader(profile, true, w10mCompileMs, W10mMsSince(w10mCompiled));
++#endif
+ 
+     if (error == angle::Result::Stop)
+     {

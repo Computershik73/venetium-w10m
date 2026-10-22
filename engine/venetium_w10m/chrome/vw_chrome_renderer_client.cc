@@ -2,12 +2,15 @@
 
 #include "venetium_w10m/chrome/vw_chrome_renderer_client.h"
 
+#include "venetium_w10m/browser/vw_hang_watch.h"
+
 namespace venetium_w10m {
 
 VwChromeRendererClient::VwChromeRendererClient() = default;
 VwChromeRendererClient::~VwChromeRendererClient() = default;
 
 void VwChromeRendererClient::RenderThreadStarted() {
+  hang_watch::WatchCurrentThread("renderer");
   ChromeContentRendererClient::RenderThreadStarted();
   engine_.RenderThreadStarted();
 }

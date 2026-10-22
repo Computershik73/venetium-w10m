@@ -24,6 +24,7 @@
 #include "base/time/time.h"
 #include "ui/gl/w10m_panel.h"
 #include "venetium_w10m/common/vw_log.h"
+#include "venetium_w10m/browser/vw_hang_watch.h"
 
 namespace venetium_w10m {
 
@@ -245,6 +246,10 @@ void PanelHost::SetPanel(IInspectable* raw) {
 }
 
 uint32_t PanelHost::Attach(IDXGISwapChain1* chain, PresentKind kind) {
+  if (kind == PresentKind::kAngle) {
+    // ANGLE makes its swap chain on the GPU's main thread.
+    hang_watch::WatchCurrentThread("GPU");
+  }
   State& state = GetState();
   if (!has_panel_.load() || !chain) {
     return 0;

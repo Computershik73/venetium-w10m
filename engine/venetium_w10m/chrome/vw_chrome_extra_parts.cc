@@ -14,6 +14,7 @@
 #include "venetium_w10m/browser/vw_browser_main_parts.h"
 #include "venetium_w10m/browser/vw_engine.h"
 #include "venetium_w10m/browser/vw_frame_sink.h"
+#include "venetium_w10m/browser/vw_hang_watch.h"
 #include "venetium_w10m/browser/vw_platform.h"
 #include "venetium_w10m/chrome/vw_browser_native_widget.h"
 #include "venetium_w10m/chrome/vw_chrome_host.h"
@@ -95,6 +96,7 @@ void VwChromeExtraParts::PreProfileInit() {
 }
 
 void VwChromeExtraParts::PostBrowserStart() {
+  hang_watch::WatchCurrentThread("UI");
   host_->Started();
   VwEngine::Get()->BrowserStarted(
       browser_.get(), base::SingleThreadTaskRunner::GetCurrentDefault());
