@@ -1,0 +1,50 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Fri, 23 Oct 2026 23:27:41 +0400
+Subject: [PATCH] ANGLE: why a program binary was not loaded, in the log (W10M)
+
+Skia found 68 of its programs in the shader cache on a Lumia 650, yet built every one again: ANGLE refused the stored binaries somewhere before ProgramExecutableD3D::load. The two refusals in Program::loadBinary and a failed load task now say so, with the program's info log.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ third_party/angle/src/libANGLE/Program.cpp | 13 +++++++++++++
+ 1 file changed, 13 insertions(+)
+
+diff --git a/third_party/angle/src/libANGLE/Program.cpp b/third_party/angle/src/libANGLE/Program.cpp
+index 1f2f118d11ec9e236cc64777f5f78f8727e59686..fdefafd927ed925aa852ff59fda99043133f3cd2 100644
+--- a/third_party/angle/src/libANGLE/Program.cpp
++++ b/third_party/angle/src/libANGLE/Program.cpp
+@@ -1243,6 +1243,13 @@ void Program::resolveLinkImpl(const Context *context)
+     std::unique_ptr<LinkingState> linkingState = std::move(mLinkingState);
+     if (!mLinked)
+     {
++#if defined(VENETIUM_W10M)
++        if (linkingState->linkingFromBinary)
++        {
++            WARN() << "W10M: a program binary was not loaded (load task): "
++                   << mState.mInfoLog.str();
++        }
++#endif
+         // If the link fails, the spec allows program queries to either return empty results (all
+         // zeros) or whatever parts of the link happened to have been done before the failure:
+         //
+@@ -1429,6 +1436,9 @@ angle::Result Program::loadBinary(const Context *context,
+     BinaryInputStream stream(angle::Span(static_cast<const uint8_t *>(binary), length));
+     if (!deserialize(context, stream))
+     {
++#if defined(VENETIUM_W10M)
++        WARN() << "W10M: a program binary was not loaded (deserialize): " << mState.mInfoLog.str();
++#endif
+         return angle::Result::Continue;
+     }
+     // Currently we require the full shader text to compute the program hash.
+@@ -1446,6 +1456,9 @@ angle::Result Program::loadBinary(const Context *context,
+     ANGLE_TRY(mProgram->load(context, &stream, &loadTask, resultOut));
+     if (*resultOut == egl::CacheGetResult::Rejected)
+     {
++#if defined(VENETIUM_W10M)
++        WARN() << "W10M: a program binary was not loaded (backend): " << mState.mInfoLog.str();
++#endif
+         return angle::Result::Continue;
+     }
+ 
