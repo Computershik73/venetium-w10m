@@ -189,6 +189,7 @@ bool ChromeInterface(const std::string& switches,
 // would otherwise end every launch.
 void ChoosePresentation(EngineConfig* config, uint64_t ram_mb) {
   const unsigned level = ProbeD3D11();
+  config->d3d_feature_level = level;
   config->present_guard = config->profile_dir.Append(L"present-guard");
   PresentGuard* guard = PresentGuard::Get();
   // What a verdict belongs to: this package (its directory carries the appx
@@ -275,9 +276,10 @@ void ChoosePresentation(EngineConfig* config, uint64_t ram_mb) {
     gl::SetW10mVideoHandler(&VideoDecoding);
     if (level < 0xa000) {
       // Chromium's decoder on a 9_3 device: its frames copied by the video
-      // processor into BGRA textures the compositor samples, up to 720p
-      // (media/gpu/windows, Windows 10 Mobile).
-      Note("video: at feature level 9_3, frames copied as BGRA, up to 720p");
+      // processor into BGRA textures the compositor samples, up to 1080p30
+      // (media/gpu/windows, Windows 10 Mobile; the renderer client).
+      Note("video: at feature level 9_3, frames copied as BGRA, up to 1080p "
+           "at 30 frames a second (720p up to 60)");
     }
     Note("video: H.264 goes to the GPU's decoder when a page plays one "
          "(--vw-video=software among the engine switches keeps it on the "
@@ -478,6 +480,13 @@ void SetUpCommandLine(const EngineConfig& config) {
     // app container without the codeGeneration capability allows.
     command_line->AppendSwitchASCII(blink::switches::kJavaScriptFlags,
                                     "--jitless");
+  }
+  if (config.d3d_feature_level && config.d3d_feature_level < 0xa000) {
+    // Audio buffers of 2048 frames (43 ms at 48 kHz) on the feature level 9_3
+    // phones: four slow cores busy with a page left the audio thread short
+    // of time with Windows' 10 ms ("SyncReader::Read timed out", the sound
+    // breaking up during video). Playback does not mind the latency.
+    command_line->AppendSwitchASCII("audio-buffer-size", "2048");
   }
   if (config.hardware_video) {
     // With video on the GPU's decoder, a call's stays on the CPU (the

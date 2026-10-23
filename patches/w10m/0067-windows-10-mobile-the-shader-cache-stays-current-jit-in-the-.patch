@@ -1,0 +1,157 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Fri, 23 Oct 2026 23:55:43 +0400
+Subject: [PATCH] Windows 10 Mobile: the shader cache stays current; JIT in the
+ menu; 1080p at 9_3
+
+GpuDiskCacheEntry kept a stored blob whenever the new one had the same
+size. ANGLE's program binaries differ across builds only in a version
+hash of fixed length, so after any update the old binaries stayed on
+disk for good and were refused at every start, and every one of Skia's
+programs was built again. On Windows 10 Mobile what is stored again is
+written.
+
+The phone's menu gets "JavaScript JIT (restart)", a check item the
+embedder sets and is told about (AppMenuModel::SetW10mJitOn).
+
+At feature level 9_3 the GPU's decoder takes H.264 up to 1920x1088
+(1080p30; the embedder's renderer client keeps 1080p60 from pages).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ chrome/browser/ui/toolbar/app_menu_model.cc | 22 ++++++++++++++++++++-
+ chrome/browser/ui/toolbar/app_menu_model.h  |  3 +++
+ gpu/ipc/host/gpu_disk_cache.cc              | 10 ++++++++++
+ media/gpu/windows/d3d11_video_decoder.cc    | 14 +++++++------
+ 4 files changed, 42 insertions(+), 7 deletions(-)
+
+diff --git a/chrome/browser/ui/toolbar/app_menu_model.cc b/chrome/browser/ui/toolbar/app_menu_model.cc
+index cd9766d92a4bb2f41c326b0ea18e1c21bb53e192..bd4f52d1eacc5b45f4c9b75350cd31af9d944f7f 100644
+--- a/chrome/browser/ui/toolbar/app_menu_model.cc
++++ b/chrome/browser/ui/toolbar/app_menu_model.cc
+@@ -1287,9 +1287,11 @@ namespace {
+ // The shell's items (AppMenuModel::SetW10mShellCommandHandler): ids of their
+ // own, past Chrome's 40xxx menu commands.
+ constexpr int kW10mShellCommandFirst = 40990;
+-constexpr int kW10mShellCommandCount = 4;
++constexpr int kW10mShellCommandCount = 5;
+ constexpr int kW10mShellSubmenu = kW10mShellCommandFirst + 9;
++constexpr int kW10mJitCommand = kW10mShellCommandFirst + 4;
+ AppMenuModel::W10mShellCommandHandler g_w10m_shell_command = nullptr;
++bool g_w10m_jit_on = false;
+ 
+ bool IsW10mShellCommand(int command_id) {
+   return (command_id >= kW10mShellCommandFirst &&
+@@ -1304,6 +1306,11 @@ void AppMenuModel::SetW10mShellCommandHandler(
+     W10mShellCommandHandler handler) {
+   g_w10m_shell_command = handler;
+ }
++
++// static
++void AppMenuModel::SetW10mJitOn(bool on) {
++  g_w10m_jit_on = on;
++}
+ #endif  // defined(VENETIUM_W10M)
+ 
+ #if defined(VENETIUM_W10M)
+@@ -1362,6 +1369,7 @@ void AppMenuModel::BuildPhoneMenu() {
+   shell->AddItem(kW10mShellCommandFirst + 1, u"Log");
+   shell->AddItem(kW10mShellCommandFirst + 2, u"Engine switches (restart)");
+   shell->AddItem(kW10mShellCommandFirst + 3, u"Copy logs to Pictures");
++  shell->AddCheckItem(kW10mJitCommand, u"JavaScript JIT (restart)");
+   sub_menus_.push_back(std::move(shell));
+   AddSubMenu(kW10mShellSubmenu, u"Windows 10 Mobile", sub_menus_.back().get());
+ }
+@@ -1369,6 +1377,13 @@ void AppMenuModel::BuildPhoneMenu() {
+ 
+ void AppMenuModel::ExecuteCommand(int command_id, int event_flags) {
+ #if defined(VENETIUM_W10M)
++  if (command_id == kW10mJitCommand) {
++    g_w10m_jit_on = !g_w10m_jit_on;
++    if (g_w10m_shell_command) {
++      g_w10m_shell_command(g_w10m_jit_on ? 5 : 6);
++    }
++    return;
++  }
+   if (IsW10mShellCommand(command_id)) {
+     if (g_w10m_shell_command && command_id != kW10mShellSubmenu) {
+       g_w10m_shell_command(command_id - kW10mShellCommandFirst + 1);
+@@ -2072,6 +2087,11 @@ void AppMenuModel::LogMenuMetrics(int command_id) {
+ }
+ 
+ bool AppMenuModel::IsCommandIdChecked(int command_id) const {
++#if defined(VENETIUM_W10M)
++  if (command_id == kW10mJitCommand) {
++    return g_w10m_jit_on;
++  }
++#endif
+   PrefService* prefs = browser_->profile()->GetPrefs();
+   if (command_id == IDC_SHOW_BOOKMARK_BAR) {
+     return prefs->GetBoolean(bookmarks::prefs::kShowBookmarkBar);
+diff --git a/chrome/browser/ui/toolbar/app_menu_model.h b/chrome/browser/ui/toolbar/app_menu_model.h
+index aa96eb3080a199134d67d584b9795c19da94781e..50b779cac10cae4f46d668dbc2b7c5d836e6fc5d 100644
+--- a/chrome/browser/ui/toolbar/app_menu_model.h
++++ b/chrome/browser/ui/toolbar/app_menu_model.h
+@@ -199,6 +199,9 @@ class AppMenuModel : public ui::SimpleMenuModel,
+   // switches, 4 copy the logs.
+   using W10mShellCommandHandler = void (*)(int command);
+   static void SetW10mShellCommandHandler(W10mShellCommandHandler handler);
++  // Whether JavaScript's JIT is on (checked in the submenu); turning it on
++  // or off gives the handler 5 or 6, for the next start.
++  static void SetW10mJitOn(bool on);
+ 
+   // The first row of the phone's menu, as Chrome for Android's: back,
+   // forward, bookmark, download and reload as icons (AppMenu draws it).
+diff --git a/gpu/ipc/host/gpu_disk_cache.cc b/gpu/ipc/host/gpu_disk_cache.cc
+index 356d52fd10cbc7c07e8d5f3191e3fea75b69be98..b018ba6bae6e1ff2ed25c05f250895987cfdbc23 100644
+--- a/gpu/ipc/host/gpu_disk_cache.cc
++++ b/gpu/ipc/host/gpu_disk_cache.cc
+@@ -212,6 +212,16 @@ void GpuDiskCacheEntry::OnEntryOpenComplete(disk_cache::EntryResult result) {
+ int GpuDiskCacheEntry::OpenCallback(int rv) {
+   DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
+   if (rv == net::OK) {
++#if defined(VENETIUM_W10M)
++    // Windows 10 Mobile: a blob is only stored when it was made again, so
++    // what is stored is stale whatever its size. ANGLE's program binaries
++    // differ across builds only in a version hash of fixed length: kept by
++    // size alone, a binary from an older build stayed on disk for good, was
++    // refused at every start ("Invalid program binary version"), and every
++    // one of Skia's programs was built again -- seconds of a phone's GPU
++    // thread at feature level 9_3.
++    return WriteCallback(net::OK);
++#endif
+     size_t existing_size =
+         base::checked_cast<size_t>(entry_->GetDataSize(kCacheIndex));
+     if (existing_size != blob_.size()) {
+diff --git a/media/gpu/windows/d3d11_video_decoder.cc b/media/gpu/windows/d3d11_video_decoder.cc
+index 4fc69690bcefeeba146e994bb7688cd1a40bea3f..bd2e07d2468472be5235296f2651b46b73f4e927 100644
+--- a/media/gpu/windows/d3d11_video_decoder.cc
++++ b/media/gpu/windows/d3d11_video_decoder.cc
+@@ -1650,19 +1650,21 @@ D3D11VideoDecoder::GetSupportedVideoDecoderConfigs(
+       return {};
+     }
+     // Below feature level 10_0 every decoded frame has a BGRA copy of its own
+-    // (d3d11_texture_selector.cc), some twenty of them: 75 MB at 720p, 170 MB
+-    // at 1080p, of the 390 MB a 1 GB phone gives an app. Up to 720p there;
+-    // larger video is decoded in software.
++    // (d3d11_texture_selector.cc), as many as the decoder keeps pictures --
++    // its references and 6 more, some 11 at 1080p30: about 125 MB at 1080p,
++    // 75 MB at 720p60, of the 390 MB a 1 GB phone gives an app. Up to
++    // 1920x1088 there; pages are not offered 1080p60 (H.264 above level 4.1,
++    // the engine's renderer client).
+     if (d3d11_device->GetFeatureLevel() < D3D_FEATURE_LEVEL_10_0) {
+       for (auto& kv : supported_resolutions) {
+         auto& range = kv.second;
+-        range.max_landscape_resolution.SetToMin(gfx::Size(1280, 720));
++        range.max_landscape_resolution.SetToMin(gfx::Size(1920, 1088));
+         if (range.max_portrait_resolution) {
+-          range.max_portrait_resolution->SetToMin(gfx::Size(720, 1280));
++          range.max_portrait_resolution->SetToMin(gfx::Size(1088, 1920));
+         }
+       }
+       LOG(WARNING) << "video: feature level 9_3: H.264 on the GPU's decoder "
+-                      "up to 1280x720, frames copied as BGRA";
++                      "up to 1920x1088, frames copied as BGRA";
+     }
+ #else
+     supported_resolutions =

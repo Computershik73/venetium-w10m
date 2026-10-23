@@ -85,6 +85,7 @@ void VwChromeExtraParts::PreProfileInit() {
   VwSelectFileDialogFactory::Install();
   platform_util::SetW10mOpenHandler(&OpenThroughShell);
   AppMenuModel::SetW10mShellCommandHandler(&ShellCommand);
+  AppMenuModel::SetW10mJitOn(VwEngine::Get()->config().jit);
   // The tab count button beside the address bar opens Chrome for Android's
   // tab switcher.
   w10m::SetTabSwitcherOpener(&VwTabGrid::Show);

@@ -543,6 +543,13 @@ void MainPage::WireEngineEvents() {
         std::thread([]() { Log::Mirror(); }).detach();
         ShowNotice(L"Logs go to Pictures\\Venetium logs");
         break;
+      case 5:
+      case 6:
+        // Chrome's menu: JavaScript's JIT on or off, from the next start.
+        Settings::SetJit(command == 5);
+        ShowNotice(command == 5 ? L"JavaScript JIT on after a restart"
+                                : L"JavaScript JIT off after a restart");
+        break;
     }
   };
   events.openPath = [this](std::wstring path, bool folder) {

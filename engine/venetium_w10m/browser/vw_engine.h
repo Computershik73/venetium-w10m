@@ -61,6 +61,9 @@ struct EngineConfig {
   // Tiles and 2D canvases are rastered on the GPU too (Skia on ANGLE); only
   // with gpu_compositing. Otherwise the CPU rasters and the GPU composites.
   bool gpu_raster = false;
+  // The GPU's best Direct3D feature level (0x9300 for 9_3, 0xb000 for 11_0);
+  // 0 without Direct3D 11.
+  unsigned d3d_feature_level = 0;
   // A file that exists while a hardware run has not shown a frame yet.
   base::FilePath present_guard;
 };

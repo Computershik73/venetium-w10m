@@ -230,6 +230,15 @@ bool VwContentRendererClient::IsDecoderSupportedVideoType(
       type.codec != media::VideoCodec::kVP8) {
     return false;
   }
+  // A feature level 9_3 phone decodes H.264 on its GPU up to 1080p at 30
+  // frames a second: pages are not offered more (level 4.2 is 1080p60,
+  // 3.2 is 720p60). Asked with a level, sites such as YouTube then pick
+  // what the phone plays.
+  const unsigned level = VwEngine::Get()->config().d3d_feature_level;
+  if (type.codec == media::VideoCodec::kH264 && level && level < 0xa000 &&
+      type.level != media::kNoVideoCodecLevel && type.level > 41) {
+    return false;
+  }
   // What is allowed still has to be decodable.
   return content::ContentRendererClient::IsDecoderSupportedVideoType(type);
 }

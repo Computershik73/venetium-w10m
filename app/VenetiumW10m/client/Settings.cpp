@@ -79,12 +79,14 @@ std::wstring Settings::HomePage() {
   return ReadString(L"home_page", L"https://www.google.com/");
 }
 
+// On unless turned off; "jit2", not "jit": the old setting was off by default
+// and is not carried over.
 bool Settings::Jit() {
-  return ReadInt(L"jit", 0) != 0;
+  return ReadInt(L"jit2", 1) != 0;
 }
 
 void Settings::SetJit(bool jit) {
-  WriteInt(L"jit", jit ? 1 : 0);
+  WriteInt(L"jit2", jit ? 1 : 0);
 }
 
 bool Settings::HardwareGraphics() {
