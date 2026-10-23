@@ -1,0 +1,34 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Fri, 23 Oct 2026 22:35:34 +0400
+Subject: [PATCH] ANGLE: video frames drawn at feature level 9_3 (W10M)
+
+At 9_3 (zeroMaxLodWorkaround) every sampling of a texture first asks for its level-zero copy; an EGL image's storage answered UNREACHABLE, and every draw of a decoded video frame was refused (GL_INVALID_OPERATION, 2426 times in one Lumia 650 run). An EGL image is one level already: nothing to switch, so it answers Continue.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../src/libANGLE/renderer/d3d/d3d11/TextureStorage11.cpp | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/third_party/angle/src/libANGLE/renderer/d3d/d3d11/TextureStorage11.cpp b/third_party/angle/src/libANGLE/renderer/d3d/d3d11/TextureStorage11.cpp
+index 828454a2d81bc6e630d5160f1f7928e0bf1be972..3a276eb21b32a470a48a3699dd5623720d9b6237 100644
+--- a/third_party/angle/src/libANGLE/renderer/d3d/d3d11/TextureStorage11.cpp
++++ b/third_party/angle/src/libANGLE/renderer/d3d/d3d11/TextureStorage11.cpp
+@@ -1997,8 +1997,17 @@ angle::Result TextureStorage11_EGLImage::copyToStorage(const gl::Context *contex
+ angle::Result TextureStorage11_EGLImage::useLevelZeroWorkaroundTexture(const gl::Context *context,
+                                                                        bool)
+ {
++#if defined(VENETIUM_W10M)
++    // Windows 10 Mobile: at feature level 9_3 (zeroMaxLodWorkaround) every sampling of a
++    // texture first asks for its level-zero copy. An EGL image -- a decoded video frame's BGRA
++    // copy here -- is one level of a texture that is not ANGLE's: it already is the level-zero
++    // texture, and there is nothing to switch to. UNREACHABLE refused every draw of a video
++    // frame at 9_3, and the video was not seen.
++    return angle::Result::Continue;
++#else
+     ANGLE_HR_UNREACHABLE(GetImplAs<Context11>(context));
+     return angle::Result::Stop;
++#endif
+ }
+ 
+ angle::Result TextureStorage11_EGLImage::getSwizzleTexture(const gl::Context *context,
