@@ -481,13 +481,6 @@ void SetUpCommandLine(const EngineConfig& config) {
     command_line->AppendSwitchASCII(blink::switches::kJavaScriptFlags,
                                     "--jitless");
   }
-  if (config.d3d_feature_level && config.d3d_feature_level < 0xa000) {
-    // Audio buffers of 2048 frames (43 ms at 48 kHz) on the feature level 9_3
-    // phones: four slow cores busy with a page left the audio thread short
-    // of time with Windows' 10 ms ("SyncReader::Read timed out", the sound
-    // breaking up during video). Playback does not mind the latency.
-    command_line->AppendSwitchASCII("audio-buffer-size", "2048");
-  }
   if (config.hardware_video) {
     // With video on the GPU's decoder, a call's stays on the CPU (the
     // feature's name is spelt this way): the driver has one decoder to give,
