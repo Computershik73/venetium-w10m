@@ -1,0 +1,160 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Fri, 23 Oct 2026 23:12:00 +0400
+Subject: [PATCH] Windows 10 Mobile: what the shader cache does, in the log
+
+A Lumia 650 compiled every shader again at each start although GrShaderCache had entries on disk. The cache now says how many programs it loaded from disk, found, did not find, wrote and did not write (and for which client), and ANGLE says when it refuses a stored program binary.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ gpu/command_buffer/service/gr_shader_cache.cc | 51 ++++++++++++++++++-
+ .../renderer/d3d/ProgramExecutableD3D.cpp     | 15 ++++++
+ 2 files changed, 65 insertions(+), 1 deletion(-)
+
+diff --git a/gpu/command_buffer/service/gr_shader_cache.cc b/gpu/command_buffer/service/gr_shader_cache.cc
+index 17aba542762ee2e49ba7efc7861754de78fd044a..4cf7da96147919a0661947ad14aaf2cf90861852 100644
+--- a/gpu/command_buffer/service/gr_shader_cache.cc
++++ b/gpu/command_buffer/service/gr_shader_cache.cc
+@@ -10,6 +10,7 @@
+ #include <cmath>
+ 
+ #include "base/base64.h"
++#include "base/logging.h"
+ #include "base/feature_list.h"
+ #include "base/functional/callback_helpers.h"
+ #include "base/memory_coordinator/memory_coordinator_features.h"
+@@ -33,6 +34,37 @@ namespace {
+ // mismatch.
+ BASE_FEATURE(kGrShaderCacheLoad, base::FEATURE_ENABLED_BY_DEFAULT);
+ 
++#if defined(VENETIUM_W10M)
++// Windows 10 Mobile: what the shader cache does, in the log -- at feature level 9_3 every
++// program it does not find costs a phone's GPU thread hundreds of milliseconds. Every 20th
++// event, and the first ones.
++struct W10mCacheCounts {
++  int populated = 0;
++  int hits = 0;
++  int misses = 0;
++  int written = 0;
++  int not_written = 0;
++  int events = 0;
++};
++
++W10mCacheCounts& W10mCounts() {
++  static W10mCacheCounts counts;
++  return counts;
++}
++
++void W10mCacheEvent(int client_id) {
++  W10mCacheCounts& c = W10mCounts();
++  ++c.events;
++  if (c.events <= 3 || c.events % 20 == 0) {
++    LOG(WARNING) << "W10M shader cache: " << c.populated << " loaded from disk, "
++                 << c.hits << " found, " << c.misses << " not found, " << c.written
++                 << " written to disk, " << c.not_written
++                 << " not written (client not cached on disk; last client "
++                 << client_id << ")";
++  }
++}
++#endif
++
+ std::string MakeString(const SkData* data) {
+   return std::string(static_cast<const char*>(data->data()), data->size());
+ }
+@@ -84,6 +116,10 @@ sk_sp<SkData> GrShaderCache::load(const SkData& key) {
+   auto it = store_.Get(cache_key);
+   UMA_HISTOGRAM_BOOLEAN("Gpu.GrShaderCacheLoadHitInCache",
+                         (it != store_.end()));
++#if defined(VENETIUM_W10M)
++  ++(it != store_.end() ? W10mCounts().hits : W10mCounts().misses);
++  W10mCacheEvent(current_client_id());
++#endif
+ 
+   if (it == store_.end())
+     return nullptr;
+@@ -163,6 +199,10 @@ void GrShaderCache::PopulateCache(const std::string& key,
+   // write.
+   it->second.pending_disk_write = false;
+   it->second.prefetched_but_not_read = true;
++#if defined(VENETIUM_W10M)
++  ++W10mCounts().populated;
++  W10mCacheEvent(-1);
++#endif
+ }
+ 
+ GrShaderCache::Store::iterator GrShaderCache::AddToCache(CacheKey key,
+@@ -246,10 +286,19 @@ void GrShaderCache::WriteToDisk(const CacheKey& key, CacheData* data) {
+     return;
+ 
+   // Only cache the shader on disk if this client id is permitted.
+-  if (client_ids_to_cache_on_disk_.count(current_client_id()) == 0)
++  if (client_ids_to_cache_on_disk_.count(current_client_id()) == 0) {
++#if defined(VENETIUM_W10M)
++    ++W10mCounts().not_written;
++    W10mCacheEvent(current_client_id());
++#endif
+     return;
++  }
+ 
+   data->pending_disk_write = false;
++#if defined(VENETIUM_W10M)
++  ++W10mCounts().written;
++  W10mCacheEvent(current_client_id());
++#endif
+ 
+   std::string encoded_key = base::Base64Encode(MakeString(key.data.get()));
+   client_->StoreShader(encoded_key, MakeString(data->data.get()));
+diff --git a/third_party/angle/src/libANGLE/renderer/d3d/ProgramExecutableD3D.cpp b/third_party/angle/src/libANGLE/renderer/d3d/ProgramExecutableD3D.cpp
+index 4bd56b222cfc1fc40a7bb5caa21f5b21f4f810f5..b57587c457f6dcf0c65f8196374118b98d263284 100644
+--- a/third_party/angle/src/libANGLE/renderer/d3d/ProgramExecutableD3D.cpp
++++ b/third_party/angle/src/libANGLE/renderer/d3d/ProgramExecutableD3D.cpp
+@@ -492,6 +492,9 @@ bool ProgramExecutableD3D::load(const gl::Context *context,
+     if (memcmp(&identifier, &binaryDeviceIdentifier, sizeof(DeviceIdentifier)) != 0)
+     {
+         infoLog << "Invalid program binary, device configuration has changed.";
++#if defined(VENETIUM_W10M)
++        WARN() << "W10M: a stored program binary was refused at line " << __LINE__;
++#endif
+         return false;
+     }
+ 
+@@ -558,6 +561,9 @@ bool ProgramExecutableD3D::load(const gl::Context *context,
+     if (stream->error())
+     {
+         infoLog << "Invalid program binary.";
++#if defined(VENETIUM_W10M)
++        WARN() << "W10M: a stored program binary was refused at line " << __LINE__;
++#endif
+         return false;
+     }
+ 
+@@ -567,6 +573,9 @@ bool ProgramExecutableD3D::load(const gl::Context *context,
+         if (stream->error())
+         {
+             infoLog << "Invalid program binary.";
++#if defined(VENETIUM_W10M)
++            WARN() << "W10M: a stored program binary was refused at line " << __LINE__;
++#endif
+             return false;
+         }
+ 
+@@ -584,6 +593,9 @@ bool ProgramExecutableD3D::load(const gl::Context *context,
+     if (stream->error())
+     {
+         infoLog << "Invalid program binary.";
++#if defined(VENETIUM_W10M)
++        WARN() << "W10M: a stored program binary was refused at line " << __LINE__;
++#endif
+         return false;
+     }
+ 
+@@ -617,6 +629,9 @@ bool ProgramExecutableD3D::load(const gl::Context *context,
+     if (stream->error())
+     {
+         infoLog << "Invalid program binary.";
++#if defined(VENETIUM_W10M)
++        WARN() << "W10M: a stored program binary was refused at line " << __LINE__;
++#endif
+         return false;
+     }
+ 
