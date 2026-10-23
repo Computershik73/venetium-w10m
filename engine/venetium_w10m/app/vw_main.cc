@@ -476,6 +476,12 @@ void SetUpCommandLine(const EngineConfig& config) {
       "ReleaseResourceStrongReferencesOnMemoryPressure,"
       "ReleaseResourceDecodedDataOnMemoryPressure,"
       "WinMemoryPressurePeriod:period/30d");
+  if (config.d3d_feature_level && config.d3d_feature_level < 0xa000) {
+    // A feature level 9_3 phone does not keep 60 frames a second: sites that
+    // ask MediaCapabilities are told it is not smooth above 30
+    // (media/mojo/services/video_decode_perf_history.cc).
+    command_line->AppendSwitchASCII("vw-max-smooth-video-fps", "30");
+  }
   if (!config.jit) {
     // V8 without a JIT: no executable memory needed at all, which is all an
     // app container without the codeGeneration capability allows.

@@ -1,0 +1,94 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Sat, 24 Oct 2026 02:41:46 +0400
+Subject: [PATCH] Windows 10 Mobile: no smooth claim above the phone's frame
+ rate; the ad blocker in the log
+
+VideoDecodePerfHistory claims no frame rate above --vw-max-smooth-video-fps
+smooth or power efficient, history or not: a feature level 9_3 phone
+showed 38-40 of 720p60's frames, and sites that choose by
+MediaCapabilities (YouTube's automatic quality) now take 30 frames a
+second there; a higher rate chosen by hand still plays.
+
+The ad blocker says whether its list was found and handed on.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ chrome/browser/browser_process_impl.cc        | 11 ++++++++
+ .../services/video_decode_perf_history.cc     | 27 +++++++++++++++++++
+ 2 files changed, 38 insertions(+)
+
+diff --git a/chrome/browser/browser_process_impl.cc b/chrome/browser/browser_process_impl.cc
+index 85984b61b4cdb42aa66f8401844cdf187cdc7185..98307b27a7e29da4307315316fa9e35e0ae20d33 100644
+--- a/chrome/browser/browser_process_impl.cc
++++ b/chrome/browser/browser_process_impl.cc
+@@ -1812,13 +1812,24 @@ std::string ReadVenetiumFiltersVersion(const base::FilePath& dir) {
+ void PublishVenetiumFilters(const base::FilePath& dir,
+                             const std::string& version) {
+   if (version.empty() || !g_browser_process) {
++#if defined(VENETIUM_W10M)
++    LOG(WARNING) << "ad blocker: no list in " << dir.AsUTF8Unsafe()
++                 << "; nothing is blocked";
++#endif
+     return;
+   }
+   subresource_filter::RulesetService* service =
+       g_browser_process->subresource_filter_ruleset_service();
+   if (!service) {
++#if defined(VENETIUM_W10M)
++    LOG(WARNING) << "ad blocker: no ruleset service; nothing is blocked";
++#endif
+     return;
+   }
++#if defined(VENETIUM_W10M)
++  LOG(WARNING) << "ad blocker: list " << version
++               << " given to the ruleset service (indexed once per version)";
++#endif
+   subresource_filter::UnindexedRulesetInfo info;
+   info.content_version = "venetium-" + version;
+   info.ruleset_path = dir.AppendASCII("filters.dat");
+diff --git a/media/mojo/services/video_decode_perf_history.cc b/media/mojo/services/video_decode_perf_history.cc
+index ada9fefbccbb4373a96feaae5d4274c389e8bef3..bd1a1cce5cd55eb44eda1a315161acb9a2e0f348 100644
+--- a/media/mojo/services/video_decode_perf_history.cc
++++ b/media/mojo/services/video_decode_perf_history.cc
+@@ -4,6 +4,10 @@
+ 
+ #include "media/mojo/services/video_decode_perf_history.h"
+ 
++#include "base/strings/string_number_conversions.h"
++
++#include "base/command_line.h"
++
+ #include "base/format_macros.h"
+ #include "base/functional/bind.h"
+ #include "base/functional/callback.h"
+@@ -162,6 +166,29 @@ void VideoDecodePerfHistory::AssessStats(
+   /// smooth. If lower resolutions/frames are known to be janky, we can assume
+   // this will be janky.
+ 
++#if defined(VENETIUM_W10M)
++  // Windows 10 Mobile: a phone at feature level 9_3 does not keep 60 frames a
++  // second (a Lumia 650 showed 38-40 of 720p60's), and the embedder says so
++  // with --vw-max-smooth-video-fps. Above it no frame rate is claimed smooth
++  // or power efficient, history or not: sites that choose by
++  // MediaCapabilities (YouTube's automatic quality) take 30 frames a second
++  // there; a higher rate chosen by hand still plays.
++  {
++    static const int max_smooth_fps = [] {
++      int fps = 0;
++      const std::string value =
++          base::CommandLine::ForCurrentProcess()->GetSwitchValueASCII(
++              "vw-max-smooth-video-fps");
++      return base::StringToInt(value, &fps) && fps > 0 ? fps : 0;
++    }();
++    if (max_smooth_fps && key.frame_rate > max_smooth_fps) {
++      *is_smooth = false;
++      *is_power_efficient = false;
++      return;
++    }
++  }
++#endif
++
+   // No stats? Lets be optimistic for clear content, but pessimistic for
+   // encrypted content that uses sw secure codecs in regards to power
+   // efficiency. An empty key system means that it is clear content.

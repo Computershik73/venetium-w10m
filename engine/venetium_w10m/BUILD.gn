@@ -38,6 +38,13 @@ group("chrome_probe") {
   ]
 }
 
+# Tools for packaging, built for the build machine: the ad blocker's list is
+# converted from EasyList and EasyPrivacy with Chromium's ruleset_converter
+# (tools/build-filters.sh).
+group("vw_host_tools") {
+  deps = [ "//components/subresource_filter/tools:ruleset_converter($host_toolchain)" ]
+}
+
 # A toolchain check: base, V8 and the content layer, nothing of ours.
 group("probe") {
   deps = [

@@ -114,6 +114,17 @@ if [ -f "$ENGINE_OUT/venetium_engine.dll" ]; then
        mkdir -p "$STAGE/$(dirname "$f")" && cp "$f" "$STAGE/$f"; done)
     echo "    Chrome's resources: $(cd "$ENGINE_OUT/vw_chrome" && find . -name '*.pak' | sort | tr '\n' ' ')"
   fi
+  # The built-in ad blocker's list (tools/build-filters.sh): next to the exe,
+  # where the browser looks for it (Venetium 0059). Without it nothing is
+  # blocked.
+  if [ -f "$ENGINE_OUT/venetium_filters/filters.dat" ]; then
+    mkdir -p "$STAGE/venetium_filters"
+    cp "$ENGINE_OUT/venetium_filters/filters.dat" "$ENGINE_OUT/venetium_filters/version.txt" \
+       "$ENGINE_OUT/venetium_filters/LICENSE.txt" "$STAGE/venetium_filters/"
+    echo "    ad blocker list: $(cat "$ENGINE_OUT/venetium_filters/version.txt")"
+  else
+    echo "    no ad blocker list (tools/build-filters.sh makes it)"
+  fi
 else
   echo "    WARNING: no engine in $ENGINE_OUT -- packaging the shell alone" >&2
 fi

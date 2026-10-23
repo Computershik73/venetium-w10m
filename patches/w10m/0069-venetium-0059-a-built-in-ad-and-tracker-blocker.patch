@@ -1,0 +1,183 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Sat, 24 Oct 2026 02:41:46 +0400
+Subject: [PATCH] Venetium 0059: a built-in ad and tracker blocker
+
+From Venetium (github.com/hamed7ir/venetium), patches/0059-builtin-ad-blocker.patch, without its installer list (chrome/installer/mini_installer/chrome.release): subresource_filter with an all-sites preset and the list from venetium_filters next to the executable.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ chrome/browser/browser_process_impl.cc        | 58 +++++++++++++++++++
+ .../browser/subresource_filter_features.cc    | 23 +++++++-
+ .../browser/subresource_filter_features.h     |  2 +
+ 3 files changed, 82 insertions(+), 1 deletion(-)
+
+diff --git a/chrome/browser/browser_process_impl.cc b/chrome/browser/browser_process_impl.cc
+index f699d8b8e463f9ebbaf37ba8976d5b7e06a72ebe..85984b61b4cdb42aa66f8401844cdf187cdc7185 100644
+--- a/chrome/browser/browser_process_impl.cc
++++ b/chrome/browser/browser_process_impl.cc
+@@ -14,10 +14,12 @@
+ #include <vector>
+ 
+ #include "base/atomic_ref_count.h"
++#include "base/base_paths.h"
+ #include "base/command_line.h"
+ #include "base/compiler_specific.h"
+ #include "base/debug/leak_annotations.h"
+ #include "base/files/file_path.h"
++#include "base/files/file_util.h"
+ #include "base/functional/bind.h"
+ #include "base/functional/callback.h"
+ #include "base/functional/callback_helpers.h"
+@@ -28,6 +30,7 @@
+ #include "base/notreached.h"
+ #include "base/path_service.h"
+ #include "base/run_loop.h"
++#include "base/strings/string_util.h"
+ #include "base/synchronization/waitable_event.h"
+ #include "base/task/sequenced_task_runner.h"
+ #include "base/task/single_thread_task_runner.h"
+@@ -132,6 +135,7 @@
+ #include "components/signin/core/browser/active_primary_accounts_metrics_recorder.h"
+ #include "components/subresource_filter/content/browser/ruleset_service.h"
+ #include "components/subresource_filter/content/browser/safe_browsing_ruleset_publisher.h"
++#include "components/subresource_filter/core/browser/ruleset_version.h"
+ #include "components/subresource_filter/core/browser/subresource_filter_features.h"
+ #include "components/subresource_filter/core/common/constants.h"
+ #include "components/supervised_user/core/browser/device_parental_controls.h"
+@@ -1777,6 +1781,53 @@ void BrowserProcessImpl::CreateSafeBrowsingService() {
+ }
+ #endif
+ 
++namespace {
++
++// Venetium 0059: the ad/tracker filter list Venetium ships next to the
++// executable: venetium_filters\filters.dat (an unindexed subresource_filter
++// ruleset built from EasyList + EasyPrivacy by ruleset_converter), version.txt
++// (the list's content version) and LICENSE.txt.
++base::FilePath VenetiumFiltersDir() {
++  base::FilePath exe_dir;
++  if (!base::PathService::Get(base::DIR_EXE, &exe_dir)) {
++    return base::FilePath();
++  }
++  return exe_dir.AppendASCII("venetium_filters");
++}
++
++std::string ReadVenetiumFiltersVersion(const base::FilePath& dir) {
++  std::string version;
++  if (dir.empty() ||
++      !base::PathExists(dir.AppendASCII("filters.dat")) ||
++      !base::ReadFileToStringWithMaxSize(dir.AppendASCII("version.txt"),
++                                         &version, 256)) {
++    return std::string();
++  }
++  return std::string(base::TrimWhitespaceASCII(version, base::TRIM_ALL));
++}
++
++// Indexes the list once per content version (RulesetService compares it with
++// the last indexed one, does the work on a background thread after startup,
++// and keeps publishing the stored indexed copy on later launches).
++void PublishVenetiumFilters(const base::FilePath& dir,
++                            const std::string& version) {
++  if (version.empty() || !g_browser_process) {
++    return;
++  }
++  subresource_filter::RulesetService* service =
++      g_browser_process->subresource_filter_ruleset_service();
++  if (!service) {
++    return;
++  }
++  subresource_filter::UnindexedRulesetInfo info;
++  info.content_version = "venetium-" + version;
++  info.ruleset_path = dir.AppendASCII("filters.dat");
++  info.license_path = dir.AppendASCII("LICENSE.txt");
++  service->IndexAndStoreAndPublishRulesetIfNeeded(info);
++}
++
++}  // namespace
++
+ void BrowserProcessImpl::CreateSubresourceFilterRulesetService() {
+   DCHECK(!subresource_filter_ruleset_service_);
+   created_subresource_filter_ruleset_service_ = true;
+@@ -1794,6 +1845,13 @@ void BrowserProcessImpl::CreateSubresourceFilterRulesetService() {
+           subresource_filter::kSafeBrowsingRulesetConfig, local_state(),
+           user_data_dir,
+           subresource_filter::SafeBrowsingRulesetPublisher::Factory());
++
++  // Venetium 0059: publish the bundled filter list (see above).
++  const base::FilePath filters_dir = VenetiumFiltersDir();
++  base::ThreadPool::PostTaskAndReplyWithResult(
++      FROM_HERE, {base::MayBlock(), base::TaskPriority::BEST_EFFORT},
++      base::BindOnce(&ReadVenetiumFiltersVersion, filters_dir),
++      base::BindOnce(&PublishVenetiumFilters, filters_dir));
+ }
+ 
+ #if !BUILDFLAG(IS_ANDROID)
+diff --git a/components/subresource_filter/core/browser/subresource_filter_features.cc b/components/subresource_filter/core/browser/subresource_filter_features.cc
+index b617af5716568e1b86c3b91645fd453537f07d3e..94e2d8fc95ceb7db5230ea404b60a31b8a4aa831 100644
+--- a/components/subresource_filter/core/browser/subresource_filter_features.cc
++++ b/components/subresource_filter/core/browser/subresource_filter_features.cc
+@@ -135,7 +135,10 @@ std::vector<Configuration> FillEnabledPresetConfigurations(
+       {kPresetPerformanceTestingDryRunOnAllSites, ad_tagging_enabled,
+        &Configuration::MakePresetForPerformanceTestingDryRunOnAllSites},
+       {kPresetLiveRunForBetterAds, true,
+-       &Configuration::MakePresetForLiveRunForBetterAds}};
++       &Configuration::MakePresetForLiveRunForBetterAds},
++      // Venetium 0059: the built-in ad and tracker blocker.
++      {kPresetVenetiumLiveRunOnAllSites, true,
++       &Configuration::MakePresetForVenetiumLiveRunOnAllSites}};
+ 
+   CommaSeparatedStrings enabled_presets(
+       TakeVariationParamOrReturnEmpty(params, kEnablePresetsParameterName));
+@@ -283,6 +286,8 @@ const char kDisablePresetsParameterName[] = "disable_presets";
+ const char kPresetLiveRunOnPhishingSites[] = "liverun_on_phishing_sites";
+ const char kPresetPerformanceTestingDryRunOnAllSites[] =
+     "performance_testing_dryrun_on_all_sites";
++const char kPresetVenetiumLiveRunOnAllSites[] =
++    "venetium_live_run_on_all_sites";
+ const char kPresetLiveRunForBetterAds[] =
+     "liverun_on_better_ads_violating_sites";
+ 
+@@ -315,6 +320,22 @@ Configuration Configuration::MakePresetForLiveRunForBetterAds() {
+   return config;
+ }
+ 
++// static
++// Venetium 0059: block the subresources matched by the ruleset Venetium ships
++// (EasyList + EasyPrivacy network rules, published at startup by
++// BrowserProcessImpl) on every site. Above every other preset, so it is the
++// configuration that decides. A site the user allows ads on (the "Ads" site
++// setting, or "Always allow ads on this site" in the blocked-ads bubble) is
++// not filtered; --disable-features=SubresourceFilter, or
++// SubresourceFilter:disable_presets/venetium_live_run_on_all_sites, turns the
++// blocker off.
++Configuration Configuration::MakePresetForVenetiumLiveRunOnAllSites() {
++  Configuration config(mojom::ActivationLevel::kEnabled,
++                       ActivationScope::ALL_SITES);
++  config.activation_conditions.priority = 2000;
++  return config;
++}
++
+ Configuration::Configuration() = default;
+ Configuration::Configuration(mojom::ActivationLevel activation_level,
+                              ActivationScope activation_scope,
+diff --git a/components/subresource_filter/core/browser/subresource_filter_features.h b/components/subresource_filter/core/browser/subresource_filter_features.h
+index 4e627279693e66d61ae09fbc62a5dcb8db807f9c..561bd2f501217dd53dbdba6457d490f8d744ae3b 100644
+--- a/components/subresource_filter/core/browser/subresource_filter_features.h
++++ b/components/subresource_filter/core/browser/subresource_filter_features.h
+@@ -125,6 +125,7 @@ struct Configuration {
+   static Configuration MakePresetForLiveRunOnPhishingSites();
+   static Configuration MakePresetForPerformanceTestingDryRunOnAllSites();
+   static Configuration MakePresetForLiveRunForBetterAds();
++  static Configuration MakePresetForVenetiumLiveRunOnAllSites();
+ 
+   ActivationConditions activation_conditions;
+   ActivationOptions activation_options;
+@@ -231,6 +232,7 @@ extern const char kDisablePresetsParameterName[];
+ extern const char kPresetLiveRunOnPhishingSites[];
+ extern const char kPresetPerformanceTestingDryRunOnAllSites[];
+ extern const char kPresetLiveRunForBetterAds[];
++extern const char kPresetVenetiumLiveRunOnAllSites[];
+ 
+ }  // namespace subresource_filter
+ 
