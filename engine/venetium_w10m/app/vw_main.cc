@@ -44,6 +44,7 @@
 
 #if defined(VW_CHROME_INTERFACE)
 #include "venetium_w10m/chrome/vw_chrome_run.h"
+#include "venetium_w10m/browser/vw_hang_watch.h"
 #endif
 
 namespace venetium_w10m {
@@ -607,6 +608,8 @@ extern "C" VW_EXPORT int32_t venetium_w10m_run(
 
   SetUpCommandLine(engine_config);
   SetUpPaths(engine_config);
+  // Before Chromium starts its threads: each is counted as it is named.
+  hang_watch::StartCpuAccounting();
 
 #if defined(VW_CHROME_INTERFACE)
   if (ChromeInterface(engine_config.switches, engine_config.profile_dir)) {

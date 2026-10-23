@@ -17,6 +17,12 @@ namespace venetium_w10m::hang_watch {
 // a second call for the same thread does nothing.
 void WatchCurrentThread(const char* name);
 
+// From now on, every thread Chromium names (base::PlatformThread::SetName) is
+// counted, and every 10 s the log says which used the processor most: the
+// share of one core each thread, or each kind of thread, took. Called once,
+// before the browser starts its threads.
+void StartCpuAccounting();
+
 }  // namespace venetium_w10m::hang_watch
 
 #endif  // VENETIUM_W10M_BROWSER_VW_HANG_WATCH_H_
