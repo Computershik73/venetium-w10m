@@ -1,0 +1,296 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Sat, 24 Oct 2026 00:15:44 +0400
+Subject: [PATCH] Windows 10 Mobile: video processor views made once; video's
+ way to the screen in the log
+
+CopyingTexture2DWrapper made two video processor views for every frame,
+on a phone's driver each anew; they are the same for every frame a
+picture holds and are now made once per picture (again if a Blt with
+them fails).
+
+What playback costs, in the log: the Blt per frame (every 300 frames),
+the GPU thread's waits for a busy decoder (every 300 frames), frames
+decoded, shown and dropped as late with the compositor's ticks and the
+queue (every 10 s), the renderer running out of frames, and whether the
+compositor's frames are partial swaps.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../display_embedder/skia_output_device_gl.cc |  6 ++
+ .../windows/d3d11_copying_texture_wrapper.cc  | 84 +++++++++++++++++++
+ .../windows/d3d11_copying_texture_wrapper.h   |  6 ++
+ .../windows/d3d11_video_decoder_wrapper.cc    | 30 +++++++
+ media/renderers/video_renderer_impl.cc        | 52 ++++++++++++
+ 5 files changed, 178 insertions(+)
+
+diff --git a/components/viz/service/display_embedder/skia_output_device_gl.cc b/components/viz/service/display_embedder/skia_output_device_gl.cc
+index fdcc48812e12557f3c2ee4b0f8eeeb6ffc37904f..f40e95cec681d8b0e415158e0b64b5040ea5dd0e 100644
+--- a/components/viz/service/display_embedder/skia_output_device_gl.cc
++++ b/components/viz/service/display_embedder/skia_output_device_gl.cc
+@@ -112,6 +112,12 @@ SkiaOutputDeviceGL::SkiaOutputDeviceGL(
+           .disable_post_sub_buffers_for_onscreen_surfaces) {
+     capabilities_.supports_post_sub_buffer = false;
+   }
++#if defined(VENETIUM_W10M)
++  // Whether a frame that changes a part of the screen redraws only that part.
++  LOG(WARNING) << "W10M compositor: partial swaps "
++               << (capabilities_.supports_post_sub_buffer ? "on" : "off")
++               << ", " << gl_surface_->GetBufferCount() << " buffers";
++#endif
+   capabilities_.pending_swap_params.max_pending_swaps =
+       gl_surface_->GetBufferCount() - 1;
+ #if BUILDFLAG(IS_ANDROID)
+diff --git a/media/gpu/windows/d3d11_copying_texture_wrapper.cc b/media/gpu/windows/d3d11_copying_texture_wrapper.cc
+index 0300689eb0eadd89186049851024a482e855205d..3f917b72d22c19179c1eda73361e4736195be3cb 100644
+--- a/media/gpu/windows/d3d11_copying_texture_wrapper.cc
++++ b/media/gpu/windows/d3d11_copying_texture_wrapper.cc
+@@ -4,6 +4,13 @@
+ 
+ #include "media/gpu/windows/d3d11_copying_texture_wrapper.h"
+ 
++#if defined(VENETIUM_W10M)
++#include <algorithm>
++
++#include "base/logging.h"
++#include "base/time/time.h"
++#endif
++
+ #include "media/base/video_types.h"
+ #include "media/gpu/windows/d3d11_picture_buffer.h"
+ #include "ui/gfx/color_space.h"
+@@ -32,6 +39,23 @@ D3D11Status CopyingTexture2DWrapper::BeginSharedImageAccess() {
+   return D3D11Status::Codes::kOk;
+ }
+ 
++#if defined(VENETIUM_W10M)
++namespace {
++// Windows 10 Mobile: what the copies cost, said every 300 frames.
++struct W10mCopyCounts {
++  int frames = 0;
++  int views_made = 0;
++  int64_t blt_us = 0;
++  int64_t worst_blt_us = 0;
++};
++
++W10mCopyCounts& W10mCopies() {
++  static W10mCopyCounts counts;
++  return counts;
++}
++}  // namespace
++#endif
++
+ D3D11Status CopyingTexture2DWrapper::ProcessTexture(
+     scoped_refptr<gpu::ClientSharedImage>& shared_image_dest) {
+   // Acquire keyed mutex for VideoProcessorBlt ops.
+@@ -39,6 +63,65 @@ D3D11Status CopyingTexture2DWrapper::ProcessTexture(
+   if (!status.is_ok()) {
+     return status;
+   }
++#if defined(VENETIUM_W10M)
++  // The views once per picture, not per frame: a phone's driver makes each
++  // anew. Made again if a Blt with them fails.
++  for (int attempt = 0; attempt < 2; ++attempt) {
++    if (!output_view_ || !input_view_) {
++      D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC output_desc = {
++          D3D11_VPOV_DIMENSION_TEXTURE2D};
++      output_desc.Texture2D.MipSlice = 0;
++      output_view_.Reset();
++      HRESULT made = video_processor_->CreateVideoProcessorOutputView(
++          output_texture_.Get(), &output_desc, &output_view_);
++      if (!SUCCEEDED(made)) {
++        return {D3D11Status::Codes::kCreateVideoProcessorOutputViewFailed,
++                made};
++      }
++      D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC input_desc = {0};
++      input_desc.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
++      input_desc.Texture2D.ArraySlice = array_slice_;
++      input_desc.Texture2D.MipSlice = 0;
++      input_view_.Reset();
++      made = video_processor_->CreateVideoProcessorInputView(
++          texture_.Get(), &input_desc, &input_view_);
++      if (!SUCCEEDED(made)) {
++        output_view_.Reset();
++        return {D3D11Status::Codes::kCreateVideoProcessorInputViewFailed};
++      }
++      ++W10mCopies().views_made;
++    }
++    D3D11_VIDEO_PROCESSOR_STREAM stream = {0};
++    stream.Enable = TRUE;
++    stream.pInputSurface = input_view_.Get();
++    const base::TimeTicks start = base::TimeTicks::Now();
++    const HRESULT blt = video_processor_->VideoProcessorBlt(
++        output_view_.Get(), 0, 1, &stream);
++    const int64_t spent = (base::TimeTicks::Now() - start).InMicroseconds();
++    if (SUCCEEDED(blt)) {
++      W10mCopyCounts& c = W10mCopies();
++      ++c.frames;
++      c.blt_us += spent;
++      c.worst_blt_us = std::max(c.worst_blt_us, spent);
++      if (c.frames % 300 == 0) {
++        LOG(WARNING) << "video: 300 frames copied as BGRA, the video "
++                        "processor's Blt "
++                     << c.blt_us / 300 << " us each on the CPU (worst "
++                     << c.worst_blt_us / 1000 << " ms); views made "
++                     << c.views_made << " times so far";
++        c.blt_us = 0;
++        c.worst_blt_us = 0;
++      }
++      return output_texture_wrapper_->ProcessTexture(shared_image_dest);
++    }
++    if (attempt == 1) {
++      return {D3D11Status::Codes::kVideoProcessorBltFailed, blt};
++    }
++    output_view_.Reset();
++    input_view_.Reset();
++  }
++  return D3D11Status::Codes::kVideoProcessorBltFailed;
++#else
+ 
+   D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC output_view_desc = {
+       D3D11_VPOV_DIMENSION_TEXTURE2D};
+@@ -74,6 +157,7 @@ D3D11Status CopyingTexture2DWrapper::ProcessTexture(
+   }
+ 
+   return output_texture_wrapper_->ProcessTexture(shared_image_dest);
++#endif  // defined(VENETIUM_W10M)
+ }
+ 
+ const gfx::Size& CopyingTexture2DWrapper::GetSize() const {
+diff --git a/media/gpu/windows/d3d11_copying_texture_wrapper.h b/media/gpu/windows/d3d11_copying_texture_wrapper.h
+index 3efe894101c0ad865cbdb6737938a6c58a9f3058..7b37f5ec8fbda92b87eb77548c9797a7f5c64401 100644
+--- a/media/gpu/windows/d3d11_copying_texture_wrapper.h
++++ b/media/gpu/windows/d3d11_copying_texture_wrapper.h
+@@ -58,6 +58,12 @@ class MEDIA_GPU_EXPORT CopyingTexture2DWrapper : public Texture2DWrapper {
+   ComD3D11Texture2D output_texture_;
+   ComD3D11Texture2D texture_;
+   size_t array_slice_ = 0;
++#if defined(VENETIUM_W10M)
++  // The video processor's views of this picture's decoder slice and of its
++  // copy: the same for every frame the picture holds, made once.
++  ComD3D11VideoProcessorOutputView output_view_;
++  ComD3D11VideoProcessorInputView input_view_;
++#endif
+ };
+ 
+ }  // namespace media
+diff --git a/media/gpu/windows/d3d11_video_decoder_wrapper.cc b/media/gpu/windows/d3d11_video_decoder_wrapper.cc
+index 7b91082fce953cc749d310345893aab35bf9e8f9..2811048067167d999429d09956c5364077097103 100644
+--- a/media/gpu/windows/d3d11_video_decoder_wrapper.cc
++++ b/media/gpu/windows/d3d11_video_decoder_wrapper.cc
+@@ -119,6 +119,8 @@ class D3D11VideoDecoderWrapperImpl : public D3D11VideoDecoderWrapper {
+     // This is the one GPU thread, the compositor's too: a driver that stays
+     // busy fails the decode after two seconds, it does not stop the browser.
+     const base::TimeTicks give_up = base::TimeTicks::Now() + base::Seconds(2);
++    const base::TimeTicks began = base::TimeTicks::Now();
++    int spins = 0;
+ #endif
+     do {
+       hr = video_context_->DecoderBeginFrame(video_decoder_.Get(), output_view,
+@@ -131,8 +133,36 @@ class D3D11VideoDecoderWrapperImpl : public D3D11VideoDecoderWrapper {
+ #endif
+         // Hardware is busy.  We should make the call again.
+         base::PlatformThread::YieldCurrentThread();
++#if defined(VENETIUM_W10M)
++        ++spins;
++#endif
+       }
+     } while (hr == E_PENDING || hr == D3DERR_WASSTILLDRAWING);
++#if defined(VENETIUM_W10M)
++    {
++      // What waiting for a busy decoder costs the GPU thread, which spins
++      // meanwhile: said every 300 frames.
++      static int frames = 0;
++      static int waited_frames = 0;
++      static int64_t waited_us = 0;
++      static int64_t worst_us = 0;
++      const int64_t spent = (base::TimeTicks::Now() - began).InMicroseconds();
++      ++frames;
++      if (spins) {
++        ++waited_frames;
++        waited_us += spent;
++        worst_us = std::max(worst_us, spent);
++      }
++      if (frames % 300 == 0) {
++        LOG(WARNING) << "video: 300 frames decoded; " << waited_frames
++                     << " waited for the decoder, " << waited_us / 1000
++                     << " ms in all (worst " << worst_us / 1000 << " ms)";
++        waited_frames = 0;
++        waited_us = 0;
++        worst_us = 0;
++      }
++    }
++#endif
+ 
+     if (FAILED(hr)) {
+       MEDIA_PLOG(ERROR, hr, media_log_) << "DecoderBeginFrame failed";
+diff --git a/media/renderers/video_renderer_impl.cc b/media/renderers/video_renderer_impl.cc
+index fa971e92adb1cd44cd73d78329a54d814e317631..ad5e0884eb055ec1a94e76f2629aaa4f59804a01 100644
+--- a/media/renderers/video_renderer_impl.cc
++++ b/media/renderers/video_renderer_impl.cc
+@@ -246,6 +246,54 @@ scoped_refptr<VideoFrame> VideoRendererImpl::Render(
+   size_t frames_dropped = 0;
+   scoped_refptr<VideoFrame> result =
+       algorithm_->Render(deadline_min, deadline_max, &frames_dropped);
++#if defined(VENETIUM_W10M)
++  {
++    // Windows 10 Mobile: what reached the screen, said every 10 s of
++    // playback in the foreground.
++    static base::TimeTicks window_start;
++    static int renders = 0;
++    static int shown = 0;
++    static int64_t dropped = 0;
++    static int queued_sum = 0;
++    static const VideoFrame* last_shown = nullptr;
++    static size_t decoded_at_start = 0;
++    static size_t decoded_seen = 0;
++    const base::TimeTicks now = tick_clock_->NowTicks();
++    if (window_start.is_null() || background_rendering) {
++      window_start = now;
++      renders = shown = queued_sum = 0;
++      dropped = 0;
++      decoded_at_start = stats_.video_frames_decoded;
++    }
++    if (!background_rendering) {
++      ++renders;
++      dropped += frames_dropped;
++      queued_sum += static_cast<int>(algorithm_->effective_frames_queued());
++      if (result && result.get() != last_shown) {
++        ++shown;
++        last_shown = result.get();
++      }
++      decoded_seen = stats_.video_frames_decoded;
++      const base::TimeDelta window = now - window_start;
++      if (window >= base::Seconds(10)) {
++        const double seconds = window.InSecondsF();
++        LOG(WARNING) << "video: last " << static_cast<int>(seconds + 0.5)
++                     << " s: " << (decoded_seen - decoded_at_start) / seconds
++                     << " frames a second decoded, " << shown / seconds
++                     << " shown, " << dropped
++                     << " dropped as late; " << renders / seconds
++                     << " compositor ticks a second, "
++                     << (renders ? queued_sum / renders : 0)
++                     << " frames queued on average, "
++                     << result->natural_size().ToString();
++        window_start = now;
++        renders = shown = queued_sum = 0;
++        dropped = 0;
++        decoded_at_start = decoded_seen;
++      }
++    }
++  }
++#endif
+ 
+   // Due to how the |algorithm_| holds frames, this should never be null if
+   // we've had a proper startup sequence.
+@@ -786,6 +834,10 @@ void VideoRendererImpl::TransitionToHaveEnough_Locked() {
+ void VideoRendererImpl::TransitionToHaveNothing() {
+   DVLOG(3) << __func__;
+   DCHECK(task_runner_->RunsTasksInCurrentSequence());
++#if defined(VENETIUM_W10M)
++  // The renderer ran out of frames: decoding did not keep up.
++  LOG(WARNING) << "video: no frame left to show (decoding fell behind)";
++#endif
+ 
+   base::AutoLock auto_lock(lock_);
+   TransitionToHaveNothing_Locked();
