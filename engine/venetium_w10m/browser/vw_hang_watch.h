@@ -4,8 +4,9 @@
 // watched thread's tasks of half a second and more are said in the log when
 // they end, with where they were posted from, and a task still running after
 // three seconds is said while it runs (a watch thread looks every half
-// second). Nothing is suspended or sampled: a task's place of posting is all
-// it tells, which is often enough to know what to look at.
+// second). A task's place of posting is often enough to know what to look
+// at; for the renderer thread, where pages' scripts run, its program counter
+// is also sampled (SampleCurrentThread).
 
 #ifndef VENETIUM_W10M_BROWSER_VW_HANG_WATCH_H_
 #define VENETIUM_W10M_BROWSER_VW_HANG_WATCH_H_
@@ -22,6 +23,15 @@ void WatchCurrentThread(const char* name);
 // share of one core each thread, or each kind of thread, took. Called once,
 // before the browser starts its threads.
 void StartCpuAccounting();
+
+// From now on, the calling thread (watched already: WatchCurrentThread) is
+// sampled while it runs a task, some 30 to 100 times a second: it is
+// suspended for as long as reading its program counter takes. Every 10 s the
+// log says where its time went (code V8 compiled, V8's builtins and
+// interpreter, the engine's own code, each system DLL), and every minute the
+// engine's hottest code since the start, as engine+offset addresses for
+// llvm-symbolizer --relative-address.
+void SampleCurrentThread();
 
 }  // namespace venetium_w10m::hang_watch
 

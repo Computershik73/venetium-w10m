@@ -11,6 +11,8 @@ VwChromeRendererClient::~VwChromeRendererClient() = default;
 
 void VwChromeRendererClient::RenderThreadStarted() {
   hang_watch::WatchCurrentThread("renderer");
+  // Where pages' scripts run: where its time goes is sampled.
+  hang_watch::SampleCurrentThread();
   ChromeContentRendererClient::RenderThreadStarted();
   engine_.RenderThreadStarted();
 }

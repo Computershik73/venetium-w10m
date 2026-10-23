@@ -1,0 +1,100 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Sat, 24 Oct 2026 03:33:16 +0400
+Subject: [PATCH] Windows 10 Mobile: what the JIT layer's page flips cost, for
+ the log
+
+The fault handler counts the code pages it makes writable and executable
+again (VwJitFlipCounts), and VwJitMeasureFlipPair times one write to a code
+page and the next run of it, so the embedder can say what W^X costs.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../page_allocator_internals_win.h            | 53 +++++++++++++++++++
+ 1 file changed, 53 insertions(+)
+
+diff --git a/base/allocator/partition_allocator/src/partition_alloc/page_allocator_internals_win.h b/base/allocator/partition_allocator/src/partition_alloc/page_allocator_internals_win.h
+index 23cf60398125c180e88eab93d188ff41b56d4d55..72ab23cd4e50a77f9143c2b92c2fd64d50507258 100644
+--- a/base/allocator/partition_allocator/src/partition_alloc/page_allocator_internals_win.h
++++ b/base/allocator/partition_allocator/src/partition_alloc/page_allocator_internals_win.h
+@@ -120,6 +120,11 @@ bool IsJit(uintptr_t address) {
+ 
+ constexpr uintptr_t kPageMask = ~uintptr_t{4095};
+ 
++// How many pages the handler made writable, and executable again: what the
++// layer costs, for the embedder's log (VwJitFlipCounts below).
++std::atomic<uint32_t> g_to_writable{0};
++std::atomic<uint32_t> g_to_executable{0};
++
+ LONG CALLBACK OnFault(EXCEPTION_POINTERS* info) {
+   const EXCEPTION_RECORD* record = info->ExceptionRecord;
+   if (record->ExceptionCode != EXCEPTION_ACCESS_VIOLATION ||
+@@ -147,6 +152,7 @@ LONG CALLBACK OnFault(EXCEPTION_POINTERS* info) {
+   if (kind == 1) {
+     // A write to code: the page becomes writable, and not executable.
+     if (Protect(page, 4096, PAGE_READWRITE)) {
++      g_to_writable.fetch_add(1, std::memory_order_relaxed);
+       return EXCEPTION_CONTINUE_EXECUTION;
+     }
+   } else if (execute) {
+@@ -154,6 +160,7 @@ LONG CALLBACK OnFault(EXCEPTION_POINTERS* info) {
+     // instruction cache made to see what was written.
+     if (Protect(page, 4096, PAGE_EXECUTE_READ)) {
+       FlushInstructionCache(GetCurrentProcess(), page, 4096);
++      g_to_executable.fetch_add(1, std::memory_order_relaxed);
+       return EXCEPTION_CONTINUE_EXECUTION;
+     }
+   }
+@@ -184,6 +191,52 @@ bool MakeJit(void* address, size_t size) {
+ }
+ 
+ }  // namespace w10m_jit
++
++// For the embedder (venetium_w10m/browser/vw_hang_watch.cc): the pages
++// flipped so far, each way.
++extern "C" void VwJitFlipCounts(uint32_t* to_writable,
++                                uint32_t* to_executable) {
++  *to_writable = w10m_jit::g_to_writable.load(std::memory_order_relaxed);
++  *to_executable = w10m_jit::g_to_executable.load(std::memory_order_relaxed);
++}
++
++// What one write to a code page and the next run of it cost here, faults,
++// flips and the instruction cache flush together, in nanoseconds (0 when it
++// could not be measured): a page of its own, a Thumb "bx lr" written and
++// called 64 times. Its flips are counted too: measure before counting.
++extern "C" uint32_t VwJitMeasureFlipPair() {
++  void* const base = VirtualAlloc(nullptr, 65536, MEM_RESERVE, PAGE_NOACCESS);
++  if (!base) {
++    return 0;
++  }
++  uint32_t result = 0;
++  if (w10m_jit::MakeJit(base, 4096)) {
++    volatile uint16_t* const code = static_cast<volatile uint16_t*>(base);
++    using Function = void (*)();
++    const Function run =
++        reinterpret_cast<Function>(reinterpret_cast<uintptr_t>(base) | 1);
++    const uint32_t writes_before = w10m_jit::g_to_writable.load();
++    LARGE_INTEGER frequency, start, end;
++    QueryPerformanceFrequency(&frequency);
++    QueryPerformanceCounter(&start);
++    constexpr int kRounds = 64;
++    for (int i = 0; i < kRounds; ++i) {
++      code[0] = 0x4770;  // bx lr
++      run();
++    }
++    QueryPerformanceCounter(&end);
++    // Only if every round faulted twice, as code pages do.
++    if (w10m_jit::g_to_writable.load() - writes_before >= kRounds &&
++        frequency.QuadPart) {
++      result = static_cast<uint32_t>((end.QuadPart - start.QuadPart) *
++                                     1'000'000'000 / frequency.QuadPart /
++                                     kRounds);
++    }
++    w10m_jit::RemoveRange(reinterpret_cast<uintptr_t>(base), 4096);
++  }
++  VirtualFree(base, 0, MEM_RELEASE);
++  return result;
++}
+ #endif  // defined(VENETIUM_W10M)
+ 
+ // |VirtualAlloc| will fail if allocation at the hint address is blocked.

@@ -1,0 +1,121 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Sat, 24 Oct 2026 03:33:16 +0400
+Subject: [PATCH] Windows 10 Mobile: what the ad blocker blocked, in the log
+
+The first request blocked, then at most once a minute the requests checked
+and blocked since and the hosts blocked most.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../common/document_subresource_filter.cc     | 83 +++++++++++++++++++
+ 1 file changed, 83 insertions(+)
+
+diff --git a/components/subresource_filter/core/common/document_subresource_filter.cc b/components/subresource_filter/core/common/document_subresource_filter.cc
+index e6ce194c0032dcdb0a6c40079eb6b3d256d2e0ca..ea66c872077dc31c985525cd46d48d15c5ab504b 100644
+--- a/components/subresource_filter/core/common/document_subresource_filter.cc
++++ b/components/subresource_filter/core/common/document_subresource_filter.cc
+@@ -12,6 +12,19 @@
+ #include "base/check_op.h"
+ #include "base/metrics/histogram_functions.h"
+ #include "base/strings/strcat.h"
++#if defined(VENETIUM_W10M)
++#include <algorithm>
++#include <functional>
++#include <string>
++#include <utility>
++#include <vector>
++
++#include "base/containers/flat_map.h"
++#include "base/logging.h"
++#include "base/no_destructor.h"
++#include "base/strings/stringprintf.h"
++#include "base/synchronization/lock.h"
++#endif
+ #include "base/time/time.h"
+ #include "base/trace_event/trace_event.h"
+ #include "components/subresource_filter/core/common/first_party_origin.h"
+@@ -23,6 +36,68 @@
+ 
+ namespace subresource_filter {
+ 
++#if defined(VENETIUM_W10M)
++namespace {
++
++// Windows 10 Mobile: what the built-in ad blocker (Venetium 0059) did, in the
++// log: the first request it blocked, then, at most once a minute (with the
++// next request checked), how many it checked and blocked since, and which
++// hosts it blocked most.
++void W10mNoteLoad(const GURL& url, bool blocked) {
++  struct Counts {
++    base::Lock lock;
++    base::TimeTicks since;
++    int checked = 0;
++    int blocked = 0;
++    int blocked_ever = 0;
++    base::flat_map<std::string, int> hosts;
++  };
++  static base::NoDestructor<Counts> counts;
++  base::AutoLock hold(counts->lock);
++  const base::TimeTicks now = base::TimeTicks::Now();
++  if (counts->since.is_null()) {
++    counts->since = now;
++  }
++  ++counts->checked;
++  if (blocked) {
++    ++counts->blocked;
++    if (++counts->blocked_ever == 1) {
++      LOG(WARNING) << "ad blocker: the first request blocked, to "
++                   << url.host() << " (" << counts->checked
++                   << " checked so far)";
++    }
++    if (counts->hosts.size() < 200) {
++      ++counts->hosts[url.host()];
++    }
++  }
++  const base::TimeDelta window = now - counts->since;
++  if (window < base::Seconds(60)) {
++    return;
++  }
++  std::vector<std::pair<int, std::string>> top;
++  for (const auto& [host, n] : counts->hosts) {
++    top.emplace_back(n, host);
++  }
++  std::sort(top.begin(), top.end(), std::greater<>());
++  std::string line = base::StringPrintf(
++      "ad blocker: last %d s, %d requests checked, %d blocked (%d since "
++      "start)",
++      static_cast<int>(window.InSeconds()), counts->checked, counts->blocked,
++      counts->blocked_ever);
++  for (size_t i = 0; i < top.size() && i < 5; ++i) {
++    line += base::StringPrintf("%s %s %d", i ? "," : "; most:",
++                               top[i].second.c_str(), top[i].first);
++  }
++  LOG(WARNING) << line;
++  counts->since = now;
++  counts->checked = 0;
++  counts->blocked = 0;
++  counts->hosts.clear();
++}
++
++}  // namespace
++#endif  // defined(VENETIUM_W10M)
++
+ DocumentSubresourceFilter::DocumentSubresourceFilter(
+     url::Origin document_origin,
+     mojom::ActivationState activation_state,
+@@ -103,6 +178,14 @@ LoadPolicy DocumentSubresourceFilter::GetLoadPolicy(
+   }
+ 
+   CHECK_NE(LoadPolicy::WOULD_DISALLOW, result);
++#if defined(VENETIUM_W10M)
++  if (uma_tag_ == "SubresourceFilter") {
++    W10mNoteLoad(subresource_url,
++                 result == LoadPolicy::DISALLOW &&
++                     activation_state_.activation_level ==
++                         mojom::ActivationLevel::kEnabled);
++  }
++#endif
+   if (result == LoadPolicy::DISALLOW) {
+     ++statistics_.num_loads_matching_rules;
+     if (activation_state_.activation_level ==

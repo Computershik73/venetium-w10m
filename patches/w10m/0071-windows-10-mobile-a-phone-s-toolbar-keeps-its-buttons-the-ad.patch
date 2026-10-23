@@ -1,0 +1,185 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Sat, 24 Oct 2026 03:33:16 +0400
+Subject: [PATCH] Windows 10 Mobile: a phone's toolbar keeps its buttons, the
+ address bar gets the room
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+On a 360 DIP phone the touch toolbar's 48 DIP buttons left the address bar
+about 140 DIP, which Chrome's responsive toolbar answered by hiding Home
+behind a "»" button, and the page info, star and "ads blocked" icons took
+the rest: no address showed. Now no button ever overflows
+(ToolbarControllerUtil::PreventOverflow), touch toolbar buttons are 40 DIP
+wide (the tab counter too), the address bar's margins 4 DIP, the omnibox's
+minimum 10 characters, and neither the star (in the menu's first row) nor
+the ads-blocked icon is in the address bar.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ chrome/browser/ui/layout_constants.cc          | 13 +++++++++++++
+ chrome/browser/ui/toolbar_controller_util.cc   |  8 ++++++++
+ .../ui/views/location_bar/location_bar_view.cc | 12 ++++++++++++
+ .../ui/views/omnibox/omnibox_view_views.cc     |  7 +++++++
+ .../browser/ui/views/toolbar/toolbar_view.cc   | 18 ++++++++++++++----
+ 5 files changed, 54 insertions(+), 4 deletions(-)
+
+diff --git a/chrome/browser/ui/layout_constants.cc b/chrome/browser/ui/layout_constants.cc
+index 4cc1a267a1812dd9da24e23eace349600d9a3cde..8c62354307d7f114cbf84f25d72291c2c84b41ba 100644
+--- a/chrome/browser/ui/layout_constants.cc
++++ b/chrome/browser/ui/layout_constants.cc
+@@ -116,6 +116,12 @@ void SetLayoutConstantsFallback() {
+     layout_constant_values[(int)LayoutConstant::kToolbarElementPadding] = touch_ui ? 0 : 4;
+     layout_constant_values[(int)LayoutConstant::kToolbarIconDefaultMargin] = touch_ui ? 0 : 2;
+     layout_constant_values[(int)LayoutConstant::kLocationBarMargin] = touch_ui ? 12 : 9;
++#if defined(VENETIUM_W10M)
++    // Windows 10 Mobile: on a phone the address bar's text needs the room.
++    if (touch_ui) {
++      layout_constant_values[(int)LayoutConstant::kLocationBarMargin] = 4;
++    }
++#endif
+     layout_constant_values[(int)LayoutConstant::kSidePanelInset] = 8;
+     layout_constant_values[(int)LayoutConstant::kPageInfoIconSize] = 20;
+     layout_constant_values[(int)LayoutConstant::kDownloadIconSize] = 20;
+@@ -221,6 +227,13 @@ gfx::Insets GetLayoutInsets(LayoutInset inset) {
+     }
+ 
+     case TOOLBAR_BUTTON:
++#if defined(VENETIUM_W10M)
++      // Windows 10 Mobile: 40 DIP wide (48 tall), so four buttons leave a
++      // 360 DIP phone's address bar about 190 DIP.
++      if (touch_ui) {
++        return gfx::Insets::VH(12, 8);
++      }
++#endif
+       return gfx::Insets(touch_ui ? 12 : 7);
+ 
+     case BROWSER_APP_MENU_CHIP_PADDING:
+diff --git a/chrome/browser/ui/toolbar_controller_util.cc b/chrome/browser/ui/toolbar_controller_util.cc
+index 592a236f686ce5c0785dcc842513a29aa98dffe5..1566cf09aae5a9e8ff640111f85a445cdb8f7665 100644
+--- a/chrome/browser/ui/toolbar_controller_util.cc
++++ b/chrome/browser/ui/toolbar_controller_util.cc
+@@ -14,5 +14,13 @@ void ToolbarControllerUtil::SetPreventOverflowForTesting(
+ 
+ // static
+ bool ToolbarControllerUtil::PreventOverflow() {
++#if defined(VENETIUM_W10M)
++  // Windows 10 Mobile: a phone's toolbar has a fixed set of buttons (Home,
++  // a new tab, the tabs, the menu) and the address bar takes what is left,
++  // as on Chrome for Android. Chrome's responsive toolbar would rather hide
++  // Home behind a "»" button, which then takes Home's place.
++  return true;
++#else
+   return prevent_overflow_for_testing_;
++#endif
+ }
+diff --git a/chrome/browser/ui/views/location_bar/location_bar_view.cc b/chrome/browser/ui/views/location_bar/location_bar_view.cc
+index 414d7c8379ae04f9183bb3a2368e0858773bc3c0..bacddfb58a52cb53ae601bfd06f9516c343d4d5f 100644
+--- a/chrome/browser/ui/views/location_bar/location_bar_view.cc
++++ b/chrome/browser/ui/views/location_bar/location_bar_view.cc
+@@ -468,6 +468,14 @@ void LocationBarView::Init() {
+   std::vector<std::unique_ptr<ContentSettingImageModel>> models =
+       ContentSettingImageModel::GenerateContentSettingImageModels();
+   for (auto& model : models) {
++#if defined(VENETIUM_W10M)
++    // Windows 10 Mobile: the built-in ad blocker blocks something on nearly
++    // every page, and its "ads blocked" icon would take a phone's address
++    // bar from the address. (Site settings still allow ads on a site.)
++    if (model->image_type() == ContentSettingImageModel::ImageType::kAds) {
++      continue;
++    }
++#endif
+     auto image_view = std::make_unique<ContentSettingImageView>(
+         std::move(model), this, this, browser_, page_action_font_list);
+     image_view->SetIconColor(icon_color);
+@@ -575,9 +583,13 @@ void LocationBarView::Init() {
+                                 PageActionIconType::kAiMode);
+   }
+ 
++  // Windows 10 Mobile: the star is in the menu's first row, as on Chrome for
++  // Android; in a phone's address bar it would take the address's room.
++#if !defined(VENETIUM_W10M)
+   if (browser_ && !is_popup_mode_) {
+     params.types_enabled.push_back(PageActionIconType::kBookmarkStar);
+   }
++#endif
+ 
+   params.icon_color = color_provider->GetColor(kColorOmniboxActionIcon);
+   params.between_icon_spacing = kBetweenIconSpacing;
+diff --git a/chrome/browser/ui/views/omnibox/omnibox_view_views.cc b/chrome/browser/ui/views/omnibox/omnibox_view_views.cc
+index a9a4fc45b35adffc2c57820c68d071f76c212dc1..208fc4513d0677ed4bda242739f422449ac22498 100644
+--- a/chrome/browser/ui/views/omnibox/omnibox_view_views.cc
++++ b/chrome/browser/ui/views/omnibox/omnibox_view_views.cc
+@@ -664,7 +664,14 @@ int OmniboxViewViews::GetUnelidedTextWidth() const {
+ }
+ 
+ gfx::Size OmniboxViewViews::GetMinimumSize() const {
++#if defined(VENETIUM_W10M)
++  // Windows 10 Mobile: the toolbar never hides a button for the address bar
++  // (ToolbarControllerUtil), so the address bar must fit a 320 DIP phone
++  // beside four buttons.
++  constexpr int kMinCharacters = 10;
++#else
+   constexpr int kMinCharacters = 20;
++#endif
+   return gfx::Size(
+       GetFontList().GetExpectedTextWidth(kMinCharacters) + GetInsets().width(),
+       GetPreferredSize().height());
+diff --git a/chrome/browser/ui/views/toolbar/toolbar_view.cc b/chrome/browser/ui/views/toolbar/toolbar_view.cc
+index f583e67a3c360af267d445a627753a42135b91c9..7a97ae56a6fdab3208b28c9952ab1f98a74514c5 100644
+--- a/chrome/browser/ui/views/toolbar/toolbar_view.cc
++++ b/chrome/browser/ui/views/toolbar/toolbar_view.cc
+@@ -331,9 +331,12 @@ class PhoneTabCounterButton : public ToolbarButton,
+   // ToolbarButton:
+   gfx::Size CalculatePreferredSize(
+       const views::SizeBounds& available_size) const override {
+-    const int extent =
+-        GetLayoutConstant(LayoutConstant::kToolbarButtonHeight);
+-    return gfx::Size(extent, extent);
++    // As wide as the other toolbar buttons (an icon and the insets), as tall
++    // as the toolbar's.
++    return gfx::Size(
++        GetLayoutConstant(LayoutConstant::kToolbarButtonIconSize) +
++            ::GetLayoutInsets(TOOLBAR_BUTTON).width(),
++        GetLayoutConstant(LayoutConstant::kToolbarButtonHeight));
+   }
+   void PaintButtonContents(gfx::Canvas* canvas) override {
+     const ui::ColorProvider* colors = GetColorProvider();
+@@ -341,7 +344,7 @@ class PhoneTabCounterButton : public ToolbarButton,
+       return;
+     }
+     const SkColor color = colors->GetColor(kColorToolbarButtonIcon);
+-    const float side = std::min(width(), height()) * 0.45f;
++    const float side = std::min(width() * 0.55f, height() * 0.45f);
+     const gfx::RectF box((width() - side) / 2, (height() - side) / 2, side,
+                          side);
+     cc::PaintFlags flags;
+@@ -1431,7 +1434,11 @@ void ToolbarView::ShowBookmarkBubble(const GURL& url, bool already_bookmarked) {
+   views::View* const anchor_view = location_bar_view();
+   views::Button* const bookmark_star_icon =
+       GetPageActionView(kActionBookmarkThisTab);
++#if !defined(VENETIUM_W10M)
++  // (Windows 10 Mobile has no star in the address bar, LocationBarView: the
++  // bubble then hangs from the address bar alone.)
+   CHECK(bookmark_star_icon);
++#endif
+   BookmarkBubbleView::ShowBubble(anchor_view, GetWebContents(),
+                                  bookmark_star_icon, browser_, url,
+                                  already_bookmarked);
+@@ -1557,12 +1564,15 @@ gfx::Size ToolbarView::GetMinimumSize() const {
+         size.SetToMin({size.width(), max_height});
+       }
+       // Overflow button must be part of minimum size calculation.
++      // (Windows 10 Mobile never shows it: ToolbarControllerUtil.)
++#if !defined(VENETIUM_W10M)
+       if (browser_->is_type_normal() && !overflow_button_->GetVisible()) {
+         const int default_margin =
+             GetLayoutConstant(LayoutConstant::kToolbarIconDefaultMargin);
+         size.Enlarge(
+             default_margin + overflow_button_->GetMinimumSize().width(), 0);
+       }
++#endif
+   }
+   size.set_height(size.height() * size_animation_.GetCurrentValue());
+   return size;
