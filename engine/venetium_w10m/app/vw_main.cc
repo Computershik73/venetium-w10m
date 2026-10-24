@@ -452,9 +452,24 @@ void SetUpCommandLine(const EngineConfig& config) {
   // And a GPU channel that could not be made is not answered by shutting
   // "the GPU process" down and starting it again: in this one process that
   // is a second GPU thread beside the first.
-  command_line->AppendSwitchASCII(
-      switches::kDisableFeatures,
-      "BackForwardCache,ShutdownForFailedChannelCreation");
+  //
+  // And PartitionAlloc's hardening of the browser process: in this one
+  // process it also covers the renderer's and the compositor's threads,
+  // which Chrome leaves without it. The scheduler-loop quarantine fills
+  // every freed block with 0xCD and holds it to the end of the task,
+  // BackupRefPtr counts every raw_ptr with atomics (barriers, on ARMv7),
+  // and the advanced checks check every allocation; on a Lumia 650 the
+  // allocator took 5.3% of the renderer thread, 0.5% of it the quarantine.
+  // --vw-pa-hardening keeps them.
+  std::string disabled_features =
+      "BackForwardCache,ShutdownForFailedChannelCreation";
+  if (!HasSwitch(config.switches, "--vw-pa-hardening")) {
+    disabled_features +=
+        ",PartitionAllocSchedulerLoopQuarantine,"
+        "PartitionAllocWithAdvancedChecks,PartitionAllocBackupRefPtr";
+  }
+  command_line->AppendSwitchASCII(switches::kDisableFeatures,
+                                  disabled_features);
   // What memory pressure reaches. On Windows Chromium leaves some of those
   // that listen for it untold (kSuppressMemoryListeners and its mask, a
   // character a listener, in
