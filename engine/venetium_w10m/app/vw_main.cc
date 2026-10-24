@@ -47,6 +47,8 @@
 #include "venetium_w10m/browser/vw_hang_watch.h"
 #endif
 
+extern "C" int VwJitProbeRwx(int allow, uint32_t* error);
+
 namespace venetium_w10m {
 
 namespace {
@@ -614,6 +616,25 @@ extern "C" VW_EXPORT int32_t venetium_w10m_run(
 
   SetUpCommandLine(engine_config);
   SetUpPaths(engine_config);
+  if (engine_config.jit) {
+    uint32_t error = 0;
+    const int rwx = VwJitProbeRwx(
+        !base::CommandLine::ForCurrentProcess()->HasSwitch("vw-jit-wx"),
+        &error);
+    if (rwx == 1) {
+      Note("jit: pages may be writable and executable at once here: V8's "
+           "code is written and run with no page flips");
+    } else if (rwx == 0) {
+      NoteF("jit: pages writable and executable at once are refused (error "
+            "%u): code pages flip between writing and running",
+            error);
+    } else if (rwx == -1) {
+      Note("jit: pages writable and executable at once are allowed, but code "
+           "in one did not run: code pages flip between writing and running");
+    } else {
+      Note("jit: --vw-jit-wx: code pages flip between writing and running");
+    }
+  }
   // Before Chromium starts its threads: each is counted as it is named.
   hang_watch::StartCpuAccounting();
 

@@ -1,0 +1,166 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Sat, 24 Oct 2026 16:53:14 +0400
+Subject: [PATCH] Windows 10 Mobile: JIT code pages without faults where the
+ phone allows
+
+VwJitProbeRwx, called by the embedder before V8 allocates code, checks
+what the phone allows for code pages; PartitionAlloc's layer and V8's own
+then write and run code with no faults or page flips where they can. A
+Lumia 650 paid 0.3 ms in faults and page flips for each write-then-run.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../page_allocator_internals_win.h            | 99 +++++++++++++++++++
+ v8/src/base/platform/platform-win32.cc        | 16 +++
+ 2 files changed, 115 insertions(+)
+
+diff --git a/base/allocator/partition_allocator/src/partition_alloc/page_allocator_internals_win.h b/base/allocator/partition_allocator/src/partition_alloc/page_allocator_internals_win.h
+index 72ab23cd4e50a77f9143c2b92c2fd64d50507258..8bf71eeadc0bdb475b0640cebcdf28290b9a77d1 100644
+--- a/base/allocator/partition_allocator/src/partition_alloc/page_allocator_internals_win.h
++++ b/base/allocator/partition_allocator/src/partition_alloc/page_allocator_internals_win.h
+@@ -178,8 +178,17 @@ bool MakeExecutable(void* address, size_t size) {
+   return Commit(address, size) && Protect(address, size, PAGE_EXECUTE_READ);
+ }
+ 
++std::atomic<int> g_rwx{0};
++
+ // Code V8 will also write: read-execute, and recorded for the handler.
+ bool MakeJit(void* address, size_t size) {
++  if (g_rwx.load(std::memory_order_acquire) > 0) {
++    DWORD old = 0;
++    if (Commit(address, size) &&
++        ::VirtualProtect(address, size, PAGE_EXECUTE_READWRITE, &old)) {
++      return true;
++    }
++  }
+   static std::atomic<bool> handler{false};
+   bool expected = false;
+   if (handler.compare_exchange_strong(expected, true)) {
+@@ -190,7 +199,97 @@ bool MakeJit(void* address, size_t size) {
+   return true;
+ }
+ 
++std::atomic<uintptr_t> g_probe_page{0};
++std::atomic<bool> g_probe_faulted{false};
++
++LONG CALLBACK OnProbeFault(EXCEPTION_POINTERS* info) {
++#if defined(_M_ARM)
++  CONTEXT* const context = info->ContextRecord;
++  const uintptr_t page = g_probe_page.load(std::memory_order_acquire);
++  if (!page || ((context->Pc & ~uintptr_t{1}) & kPageMask) != page) {
++    return EXCEPTION_CONTINUE_SEARCH;
++  }
++  g_probe_faulted.store(true);
++  context->R0 = 0;
++  context->Pc = context->Lr & ~DWORD{1};
++  if (context->Lr & 1) {
++    context->Cpsr |= 0x20;
++  } else {
++    context->Cpsr &= ~DWORD{0x20};
++  }
++  context->Cpsr &= ~DWORD{0x0600FC00};
++  return EXCEPTION_CONTINUE_EXECUTION;
++#else
++  return EXCEPTION_CONTINUE_SEARCH;
++#endif
++}
++
++bool IsRwx(void* page) {
++  MEMORY_BASIC_INFORMATION info{};
++  return ::VirtualQuery(page, &info, sizeof(info)) &&
++         info.Protect == PAGE_EXECUTE_READWRITE;
++}
++
++int ProbeRwx(uint32_t* error) {
++  *error = 0;
++#if defined(_M_ARM)
++  void* const page =
++      ::VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
++  if (!page) {
++    *error = GetLastError();
++    return 0;
++  }
++  volatile uint16_t* const code = static_cast<volatile uint16_t*>(page);
++  code[0] = 0x202a;
++  code[1] = 0x4770;
++  int result = 0;
++  DWORD old = 0;
++  if (!::VirtualProtect(page, 4096, PAGE_EXECUTE_READWRITE, &old)) {
++    *error = GetLastError();
++  } else if (IsRwx(page)) {
++    using Function = int (*)();
++    const Function run =
++        reinterpret_cast<Function>(reinterpret_cast<uintptr_t>(page) | 1);
++    g_probe_faulted.store(false);
++    g_probe_page.store(reinterpret_cast<uintptr_t>(page));
++    PVOID const guard = AddVectoredExceptionHandler(1, &OnProbeFault);
++    int first = 0;
++    int second = 0;
++    if (guard) {
++      FlushInstructionCache(GetCurrentProcess(), page, 4096);
++      first = run();
++      if (first == 42 && !g_probe_faulted.load() && IsRwx(page)) {
++        code[0] = 0x2007;
++        FlushInstructionCache(GetCurrentProcess(), page, 4096);
++        second = run();
++      }
++      RemoveVectoredExceptionHandler(guard);
++    }
++    g_probe_page.store(0);
++    result = guard && first == 42 && second == 7 && !g_probe_faulted.load()
++                 ? 1
++                 : -1;
++  }
++  ::VirtualFree(page, 0, MEM_RELEASE);
++  return result;
++#else
++  return 0;
++#endif
++}
++
+ }  // namespace w10m_jit
++extern "C" int VwJitProbeRwx(int allow, uint32_t* error) {
++  *error = 0;
++  if (!allow) {
++    return -2;
++  }
++  const int result = w10m_jit::ProbeRwx(error);
++  if (result == 1) {
++    w10m_jit::g_rwx.store(1, std::memory_order_release);
++    ::SetEnvironmentVariableW(L"VW_JIT_RWX", L"1");
++  }
++  return result;
++}
+ 
+ // For the embedder (venetium_w10m/browser/vw_hang_watch.cc): the pages
+ // flipped so far, each way.
+diff --git a/v8/src/base/platform/platform-win32.cc b/v8/src/base/platform/platform-win32.cc
+index 23e729365e338da0a38c986a0ef1bd27c2342382..ffe2ee9d697bdce67b15ddee339ce51a261d16f2 100644
+--- a/v8/src/base/platform/platform-win32.cc
++++ b/v8/src/base/platform/platform-win32.cc
+@@ -1036,8 +1036,24 @@ bool MakeExecutable(void* address, size_t size) {
+   return Commit(address, size) && Protect(address, size, PAGE_EXECUTE_READ);
+ }
+ 
++bool RwxAllowed() {
++  static const bool allowed = [] {
++    wchar_t value[4] = {};
++    return ::GetEnvironmentVariableW(L"VW_JIT_RWX", value, 4) == 1 &&
++           value[0] == L'1';
++  }();
++  return allowed;
++}
++
+ // Code V8 will also write: read-execute, and recorded for the handler.
+ bool MakeJit(void* address, size_t size) {
++  if (RwxAllowed()) {
++    DWORD old = 0;
++    if (Commit(address, size) &&
++        ::VirtualProtect(address, size, PAGE_EXECUTE_READWRITE, &old)) {
++      return true;
++    }
++  }
+   static std::atomic<bool> handler{false};
+   bool expected = false;
+   if (handler.compare_exchange_strong(expected, true)) {
