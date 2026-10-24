@@ -33,6 +33,9 @@ LOGS = [
     ("\\LocalState", "venetium.log"),
     ("\\LocalState", "venetium-previous.log"),
     ("\\LocalState", "chromium.log"),
+    # The renderer thread's sampled profile (--vw-sample), for
+    # tools/hot-functions.py.
+    ("\\LocalState", "renderer-profile.txt"),
 ]
 
 

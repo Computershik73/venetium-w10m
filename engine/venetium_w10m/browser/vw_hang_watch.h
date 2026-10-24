@@ -31,7 +31,9 @@ void StartCpuAccounting();
 // log says where its time went (code V8 compiled, V8's builtins and
 // interpreter, the engine's own code, each system DLL), and every minute the
 // engine's hottest code since the start, as engine+offset addresses for
-// llvm-symbolizer --relative-address.
+// llvm-symbolizer --relative-address; the whole count since the start, in
+// 16-byte pieces of the engine, goes to renderer-profile.txt beside the log
+// (LocalState) every minute, for tools/hot-functions.py.
 void SampleCurrentThread();
 
 }  // namespace venetium_w10m::hang_watch

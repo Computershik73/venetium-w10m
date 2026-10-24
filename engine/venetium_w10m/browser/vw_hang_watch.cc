@@ -17,6 +17,8 @@
 #include <vector>
 
 #include "base/command_line.h"
+#include "base/files/file_path.h"
+#include "base/files/file_util.h"
 #include "base/memory/raw_ptr.h"
 #include "base/no_destructor.h"
 #include "base/pending_task.h"
@@ -29,6 +31,7 @@
 #include "base/threading/platform_thread.h"
 #include "base/threading/thread_id_name_manager.h"
 #include "base/time/time.h"
+#include "venetium_w10m/browser/vw_engine.h"
 #include "venetium_w10m/common/vw_log.h"
 
 extern "C" IMAGE_DOS_HEADER __ImageBase;
@@ -422,8 +425,10 @@ class WatchThread : public base::PlatformThread::Delegate {
 
 class SamplerThread : public base::PlatformThread::Delegate {
  public:
-  SamplerThread(Watched* watched, HANDLE thread)
-      : watched_(watched), thread_(thread) {}
+  SamplerThread(Watched* watched, HANDLE thread, base::FilePath profile_file)
+      : watched_(watched),
+        thread_(thread),
+        profile_file_(std::move(profile_file)) {}
 
   void ThreadMain() override {
     base::PlatformThread::SetName("VwSampler");
@@ -479,13 +484,16 @@ class SamplerThread : public base::PlatformThread::Delegate {
     const uintptr_t pc = context.Eip;
 #endif
     ++samples_;
+    ++all_.samples;
     if (pc >= blob_start_ && pc < blob_end_) {
       ++builtins_;
+      ++all_.builtins;
       Hot(pc);
       return;
     }
     if (pc >= image_start_ && pc < image_end_) {
       ++engine_;
+      ++all_.engine;
       Hot(pc);
       return;
     }
@@ -493,26 +501,59 @@ class SamplerThread : public base::PlatformThread::Delegate {
     if (!::VirtualQuery(reinterpret_cast<const void*>(pc), &info,
                         sizeof(info))) {
       ++other_;
+      ++all_.other;
     } else if (info.Type == MEM_PRIVATE) {
       // Not in any image: code V8 compiled.
       ++jit_;
+      ++all_.jit;
     } else if (info.Type == MEM_IMAGE) {
       ++modules_[reinterpret_cast<uintptr_t>(info.AllocationBase)];
+      ++all_.modules[reinterpret_cast<uintptr_t>(info.AllocationBase)];
     } else {
       ++other_;
+      ++all_.other;
     }
   }
 
-  // The engine's code, in 64-byte pieces, counted since the start.
+  // The engine's code, in 16-byte pieces, counted since the start.
   void Hot(uintptr_t pc) {
     ++hot_samples_;
     const uint32_t piece =
-        static_cast<uint32_t>((pc - image_start_) & ~uintptr_t{63});
+        static_cast<uint32_t>((pc - image_start_) & ~uintptr_t{15});
     auto it = hot_.find(piece);
     if (it != hot_.end()) {
       ++it->second;
-    } else if (hot_.size() < 50'000) {
+    } else if (hot_.size() < 200'000) {
       hot_.emplace(piece, 1);
+    }
+  }
+
+  // Everything counted since the start, for tools/hot-functions.py: what the
+  // samples fell in, then every piece of the engine with its count.
+  void WriteProfile() {
+    if (profile_file_.empty()) {
+      return;
+    }
+    std::string text = base::StringPrintf(
+        "# Venetium: where the %s thread's time in tasks went since the "
+        "start, sampled\n"
+        "# builtins blob at engine+0x%x..0x%x\n"
+        "samples %d\njit %d\nbuiltins %d\nengine %d\nother %d\n",
+        watched_->name, static_cast<unsigned>(blob_start_ - image_start_),
+        static_cast<unsigned>(blob_end_ - image_start_), all_.samples,
+        all_.jit, all_.builtins, all_.engine, all_.other);
+    for (const auto& [module_base, n] : all_.modules) {
+      text += base::StringPrintf("module %s %d\n",
+                                 ModuleName(module_base).c_str(), n);
+    }
+    std::vector<std::pair<uint32_t, uint32_t>> pieces(hot_.begin(),
+                                                      hot_.end());
+    std::sort(pieces.begin(), pieces.end());
+    for (const auto& [piece, n] : pieces) {
+      text += base::StringPrintf("piece %x %u\n", piece, n);
+    }
+    if (!base::WriteFile(profile_file_, text)) {
+      Note("sample: the profile could not be written");
     }
   }
 
@@ -573,6 +614,7 @@ class SamplerThread : public base::PlatformThread::Delegate {
     if (hot_samples_ < 100) {
       return;
     }
+    WriteProfile();
     std::vector<std::pair<uint32_t, uint32_t>> top;
     for (const auto& [piece, n] : hot_) {
       top.emplace_back(n, piece);
@@ -594,6 +636,7 @@ class SamplerThread : public base::PlatformThread::Delegate {
 
   const raw_ptr<Watched> watched_;
   const HANDLE thread_;
+  const base::FilePath profile_file_;
   uintptr_t image_start_ = 0;
   uintptr_t image_end_ = 0;
   uintptr_t blob_start_ = 0;
@@ -606,6 +649,14 @@ class SamplerThread : public base::PlatformThread::Delegate {
   int other_ = 0;
   std::map<uintptr_t, int> modules_;
   // Since the start.
+  struct {
+    int samples = 0;
+    int jit = 0;
+    int builtins = 0;
+    int engine = 0;
+    int other = 0;
+    std::map<uintptr_t, int> modules;
+  } all_;
   int hot_samples_ = 0;
   std::unordered_map<uint32_t, uint32_t> hot_;
 };
@@ -644,8 +695,14 @@ void SampleCurrentThread() {
           ::GetLastError());
     return;
   }
+  // Beside the log, in LocalState (the profile directory's parent).
+  const base::FilePath profile_file =
+      VwEngine::Get()->config().profile_dir.empty()
+          ? base::FilePath()
+          : VwEngine::Get()->config().profile_dir.DirName().Append(
+                FILE_PATH_LITERAL("renderer-profile.txt"));
   if (!base::PlatformThread::CreateNonJoinable(
-          0, new SamplerThread(t_watched, thread))) {
+          0, new SamplerThread(t_watched, thread, profile_file))) {
     ::CloseHandle(thread);
     return;
   }
