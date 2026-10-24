@@ -131,14 +131,38 @@ std::wstring FaultDetail(const EXCEPTION_RECORD& record) {
   return text;
 }
 
+// The code around |pc| as it is in memory now, and its page's protection:
+// an illegal instruction where the file has a valid one means the code was
+// changed in memory, or the processor was not in the mode it should be.
+std::wstring CodeAt(uintptr_t pc) {
+  const uintptr_t start = (pc & ~uintptr_t{1}) - 8;
+  MEMORY_BASIC_INFORMATION info{};
+  if (!::VirtualQuery(reinterpret_cast<const void*>(start), &info,
+                      sizeof(info)) ||
+      info.State != MEM_COMMIT ||
+      (info.Protect & (PAGE_NOACCESS | PAGE_GUARD)) ||
+      reinterpret_cast<uintptr_t>(info.BaseAddress) + info.RegionSize <
+          start + 20) {
+    return L"code: not readable";
+  }
+  const auto* half = reinterpret_cast<const uint16_t*>(start);
+  wchar_t buf[160];
+  ::swprintf_s(buf,
+               L"code at pc-8: %04x %04x %04x %04x [%04x %04x] %04x %04x "
+               L"%04x %04x, page protection 0x%lx",
+               half[0], half[1], half[2], half[3], half[4], half[5], half[6],
+               half[7], half[8], half[9], info.Protect);
+  return buf;
+}
+
 std::wstring Registers(const CONTEXT& c) {
   wchar_t buf[400];
   ::swprintf_s(buf,
                L"r0=%08lx r1=%08lx r2=%08lx r3=%08lx r4=%08lx r5=%08lx "
                L"r6=%08lx r7=%08lx r8=%08lx r9=%08lx r10=%08lx r11=%08lx "
-               L"r12=%08lx sp=%08lx lr=%08lx pc=%08lx",
+               L"r12=%08lx sp=%08lx lr=%08lx pc=%08lx cpsr=%08lx",
                c.R0, c.R1, c.R2, c.R3, c.R4, c.R5, c.R6, c.R7, c.R8, c.R9,
-               c.R10, c.R11, c.R12, c.Sp, c.Lr, c.Pc);
+               c.R10, c.R11, c.R12, c.Sp, c.Lr, c.Pc, c.Cpsr);
   return buf;
 }
 
@@ -234,6 +258,7 @@ void Report(const wchar_t* how, PEXCEPTION_POINTERS info) {
                       FaultDetail(record) + L", thread " +
                       std::to_wstring(::GetCurrentThreadId()));
   Log::WriteFromFault(L"crash: " + Registers(*info->ContextRecord));
+  Log::WriteFromFault(L"crash: " + CodeAt(info->ContextRecord->Pc));
   Log::WriteFromFault(L"crash: " + MemoryLine());
   LogStack(*info->ContextRecord);
   LogStackScan(info->ContextRecord->Sp);

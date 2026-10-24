@@ -24,8 +24,9 @@ void WatchCurrentThread(const char* name);
 // before the browser starts its threads.
 void StartCpuAccounting();
 
-// From now on, the calling thread (watched already: WatchCurrentThread) is
-// sampled while it runs a task, some 30 to 100 times a second: it is
+// With --vw-sample: from now on, the calling thread (watched already:
+// WatchCurrentThread) is sampled while it runs a task, some 30 to 100 times a
+// second: it is
 // suspended for as long as reading its program counter takes. Every 10 s the
 // log says where its time went (code V8 compiled, V8's builtins and
 // interpreter, the engine's own code, each system DLL), and every minute the

@@ -16,6 +16,7 @@
 #include <utility>
 #include <vector>
 
+#include "base/command_line.h"
 #include "base/memory/raw_ptr.h"
 #include "base/no_destructor.h"
 #include "base/pending_task.h"
@@ -370,7 +371,10 @@ class WatchThread : public base::PlatformThread::Delegate {
  public:
   void ThreadMain() override {
     base::PlatformThread::SetName("VwHangWatch");
-    if (g_cpu_accounting.load()) {
+    // Only when asked for (--vw-jit-cost): 222.50, which always ran it and
+    // the sampler, died at every start on a Lumia 650.
+    if (g_cpu_accounting.load() &&
+        base::CommandLine::ForCurrentProcess()->HasSwitch("vw-jit-cost")) {
       // Before the first count of flips (ReportJit): the test flips too.
       g_jit_pair_ns = VwJitMeasureFlipPair();
       if (g_jit_pair_ns) {
@@ -624,7 +628,10 @@ void StartCpuAccounting() {
 }
 
 void SampleCurrentThread() {
-  if (!t_watched) {
+  // Only when asked for (--vw-sample): 222.50, which always sampled, died at
+  // every start on a Lumia 650 (an illegal instruction on the UI thread).
+  if (!t_watched ||
+      !base::CommandLine::ForCurrentProcess()->HasSwitch("vw-sample")) {
     return;
   }
   HANDLE thread = nullptr;
