@@ -217,6 +217,8 @@ struct MemoryNumbers {
 };
 
 std::atomic<MemorySink> g_memory_sink{nullptr};
+// Whether the heartbeat says the memory in the log (SetDiagnostics).
+std::atomic<bool> g_diagnostics{false};
 
 std::wstring MemoryLine(MemoryNumbers* numbers = nullptr) {
   std::wstring line = L"memory:";
@@ -289,10 +291,11 @@ DWORD WINAPI Heartbeat(LPVOID) {
   std::wstring last;
   for (;;) {
     ::Sleep(2000);
-    // Only when it moved by a few megabytes: a quiet page logs nothing.
+    // Only with diagnostics, and when it moved by a few megabytes: a quiet
+    // page logs nothing.
     MemoryNumbers numbers;
     const std::wstring line = MemoryLine(&numbers);
-    if (line != last) {
+    if (g_diagnostics.load() && line != last) {
       Log::Write(line);
       last = line;
     }
@@ -324,6 +327,10 @@ void InstallCrashLog() {
     ::CloseHandle(thread);
   }
   Log::Write(L"crash log: installed; " + MemoryLine());
+}
+
+void SetDiagnostics(bool on) {
+  g_diagnostics.store(on);
 }
 
 void SetMemorySink(MemorySink sink) {

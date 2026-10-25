@@ -8,6 +8,9 @@
 // at; for the renderer thread, where pages' scripts run, its program counter
 // is also sampled (SampleCurrentThread).
 
+// All of it only with --vw-diagnostics among the engine switches (the
+// sampler: --vw-sample): every line is a write to the phone's flash.
+
 #ifndef VENETIUM_W10M_BROWSER_VW_HANG_WATCH_H_
 #define VENETIUM_W10M_BROWSER_VW_HANG_WATCH_H_
 

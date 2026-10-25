@@ -668,10 +668,22 @@ bool StartWatchThread() {
   return started;
 }
 
+// Diagnostics only when asked for: --vw-diagnostics (or --vw-sample, which
+// needs the renderer thread watched).
+bool Diagnostics() {
+  static const bool on = [] {
+    const base::CommandLine& command_line =
+        *base::CommandLine::ForCurrentProcess();
+    return command_line.HasSwitch("vw-diagnostics") ||
+           command_line.HasSwitch("vw-sample");
+  }();
+  return on;
+}
+
 }  // namespace
 
 void StartCpuAccounting() {
-  if (g_cpu_accounting.exchange(true)) {
+  if (!Diagnostics() || g_cpu_accounting.exchange(true)) {
     return;
   }
   base::ThreadIdNameManager::GetInstance()->AddObserver(new NameObserver());
@@ -710,7 +722,7 @@ void SampleCurrentThread() {
 }
 
 void WatchCurrentThread(const char* name) {
-  if (t_watched || !base::CurrentThread::IsSet()) {
+  if (!Diagnostics() || t_watched || !base::CurrentThread::IsSet()) {
     return;
   }
   static base::NoDestructor<base::Lock> lock;

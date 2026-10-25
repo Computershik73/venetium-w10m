@@ -4,3 +4,5 @@ app/VenetiumW10m/AppPackages/
 *.pfx
 __pycache__/
 *.pyc
+# Logs, profiles and builds' output from the phone and this machine
+work/

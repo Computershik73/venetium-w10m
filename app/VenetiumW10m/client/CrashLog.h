@@ -29,4 +29,8 @@ using MemorySink = void (*)(int32_t largest_free_mb, int32_t free_mb,
 // (null: no more). The sink is called on the heartbeat's thread. Any thread.
 void SetMemorySink(MemorySink sink);
 
+// The memory every 2 s in the log, or not (--vw-diagnostics among the engine
+// switches); the engine gets the numbers either way.
+void SetDiagnostics(bool on);
+
 }  // namespace venetium_w10m::client

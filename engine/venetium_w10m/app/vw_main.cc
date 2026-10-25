@@ -631,6 +631,12 @@ extern "C" VW_EXPORT int32_t venetium_w10m_run(
 
   SetUpCommandLine(engine_config);
   SetUpPaths(engine_config);
+  // Diagnostics in the log only when asked for; ANGLE, which has no command
+  // line of its own, is told through the environment.
+  if (base::CommandLine::ForCurrentProcess()->HasSwitch("vw-diagnostics")) {
+    ::SetEnvironmentVariableW(L"VW_DIAGNOSTICS", L"1");
+    Note("diagnostics: on (--vw-diagnostics)");
+  }
   if (engine_config.jit) {
     uint32_t error = 0;
     const int rwx = VwJitProbeRwx(

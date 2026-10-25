@@ -618,6 +618,7 @@ void MainPage::Start(std::wstring initialUrl) {
   params.scale = rawPerView_;
   params.jit = Settings::Jit();
   params.switches = Narrow(Settings::EngineSwitches());
+  client::SetDiagnostics(params.switches.find("--vw-diagnostics") != std::string::npos);
   if (!Settings::HardwareGraphics()) {
     params.switches += " --vw-present=bitmap";
   } else if (Settings::TakeGraphicsRetry()) {

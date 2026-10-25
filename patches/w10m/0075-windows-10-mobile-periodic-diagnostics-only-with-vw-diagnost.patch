@@ -1,0 +1,248 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Sun, 25 Oct 2026 15:34:41 +0400
+Subject: [PATCH] Windows 10 Mobile: periodic diagnostics only with
+ --vw-diagnostics
+
+The video statistics (every 10 s, every 300 frames copied or decoded), the
+shader cache's and ANGLE's per-shader notes, the vsync statistics and the
+ad blocker's counter now go to the log only with --vw-diagnostics among the
+engine switches (ANGLE, which has no command line, reads VW_DIAGNOSTICS=1
+from the environment). Each line was a write to the phone's flash; a
+release build logs what happens once or rarely.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../core/common/document_subresource_filter.cc | 14 +++++++++++++-
+ .../external_begin_frame_source_w10m.cc        | 14 +++++++++++++-
+ gpu/command_buffer/service/gr_shader_cache.cc  | 14 +++++++++++++-
+ .../windows/d3d11_copying_texture_wrapper.cc   | 14 +++++++++++++-
+ .../gpu/windows/d3d11_video_decoder_wrapper.cc | 14 +++++++++++++-
+ media/renderers/video_renderer_impl.cc         | 18 ++++++++++++++++--
+ .../libANGLE/renderer/d3d/d3d11/Renderer11.cpp | 10 ++++++++++
+ 7 files changed, 91 insertions(+), 7 deletions(-)
+
+diff --git a/components/subresource_filter/core/common/document_subresource_filter.cc b/components/subresource_filter/core/common/document_subresource_filter.cc
+index ea66c872077dc31c985525cd46d48d15c5ab504b..60988f917b8bac1e844f6a2f8daa6895f42da99e 100644
+--- a/components/subresource_filter/core/common/document_subresource_filter.cc
++++ b/components/subresource_filter/core/common/document_subresource_filter.cc
+@@ -34,6 +34,18 @@
+ #include "url/gurl.h"
+ #include "url/origin.h"
+ 
++#if defined(VENETIUM_W10M)
++#include "base/command_line.h"
++
++// Windows 10 Mobile: the embedder's periodic diagnostics go to the log only
++// with --vw-diagnostics among the engine switches.
++static bool W10mDiagnostics() {
++  static const bool on =
++      base::CommandLine::ForCurrentProcess()->HasSwitch("vw-diagnostics");
++  return on;
++}
++#endif
++
+ namespace subresource_filter {
+ 
+ #if defined(VENETIUM_W10M)
+@@ -179,7 +191,7 @@ LoadPolicy DocumentSubresourceFilter::GetLoadPolicy(
+ 
+   CHECK_NE(LoadPolicy::WOULD_DISALLOW, result);
+ #if defined(VENETIUM_W10M)
+-  if (uma_tag_ == "SubresourceFilter") {
++  if (uma_tag_ == "SubresourceFilter" && W10mDiagnostics()) {
+     W10mNoteLoad(subresource_url,
+                  result == LoadPolicy::DISALLOW &&
+                      activation_state_.activation_level ==
+diff --git a/components/viz/service/frame_sinks/external_begin_frame_source_w10m.cc b/components/viz/service/frame_sinks/external_begin_frame_source_w10m.cc
+index 3df63b4f615807c8625f6ef0083af5b7a449a5f4..d54e1f2ced50f31e0b3d4709995c22b2a8493de3 100644
+--- a/components/viz/service/frame_sinks/external_begin_frame_source_w10m.cc
++++ b/components/viz/service/frame_sinks/external_begin_frame_source_w10m.cc
+@@ -27,6 +27,18 @@
+ #include "base/thread_annotations.h"
+ #include "base/threading/platform_thread.h"
+ 
++#if defined(VENETIUM_W10M)
++#include "base/command_line.h"
++
++// Windows 10 Mobile: the embedder's periodic diagnostics go to the log only
++// with --vw-diagnostics among the engine switches.
++static bool W10mDiagnostics() {
++  static const bool on =
++      base::CommandLine::ForCurrentProcess()->HasSwitch("vw-diagnostics");
++  return on;
++}
++#endif
++
+ namespace viz {
+ 
+ namespace {
+@@ -408,7 +420,7 @@ void ExternalBeginFrameSourceW10m::Core::ThreadMain() {
+       base::TimeDelta worst;
+       TakeCounts(&not_taken, &late, &worst);
+       const int ticks = display_ticks + timer_ticks;
+-      LOG(WARNING) << base::StringPrintf(
++      LOG_IF(WARNING, W10mDiagnostics()) << base::StringPrintf(
+           "vsync: %d ticks in %.1f s (%.1f a second): %d from the display's "
+           "vertical blank, %d from a timer; %d not taken before the next, "
+           "%d begun over 4 ms late (worst %.1f ms); interval %.2f ms",
+diff --git a/gpu/command_buffer/service/gr_shader_cache.cc b/gpu/command_buffer/service/gr_shader_cache.cc
+index 4cf7da96147919a0661947ad14aaf2cf90861852..fff24d6ad0a736465f897ff3e7e8afd982d6f4c6 100644
+--- a/gpu/command_buffer/service/gr_shader_cache.cc
++++ b/gpu/command_buffer/service/gr_shader_cache.cc
+@@ -26,6 +26,18 @@
+ #include "skia/ext/skia_utils_base.h"
+ #include "third_party/skia/include/gpu/ganesh/GrDirectContext.h"
+ 
++#if defined(VENETIUM_W10M)
++#include "base/command_line.h"
++
++// Windows 10 Mobile: the embedder's periodic diagnostics go to the log only
++// with --vw-diagnostics among the engine switches.
++static bool W10mDiagnostics() {
++  static const bool on =
++      base::CommandLine::ForCurrentProcess()->HasSwitch("vw-diagnostics");
++  return on;
++}
++#endif
++
+ namespace gpu {
+ namespace raster {
+ namespace {
+@@ -55,7 +67,7 @@ W10mCacheCounts& W10mCounts() {
+ void W10mCacheEvent(int client_id) {
+   W10mCacheCounts& c = W10mCounts();
+   ++c.events;
+-  if (c.events <= 3 || c.events % 20 == 0) {
++  if ((c.events <= 3 || c.events % 20 == 0) && W10mDiagnostics()) {
+     LOG(WARNING) << "W10M shader cache: " << c.populated << " loaded from disk, "
+                  << c.hits << " found, " << c.misses << " not found, " << c.written
+                  << " written to disk, " << c.not_written
+diff --git a/media/gpu/windows/d3d11_copying_texture_wrapper.cc b/media/gpu/windows/d3d11_copying_texture_wrapper.cc
+index 3f917b72d22c19179c1eda73361e4736195be3cb..0522d01bace72d4a8dbad4c00797b982f46b1cff 100644
+--- a/media/gpu/windows/d3d11_copying_texture_wrapper.cc
++++ b/media/gpu/windows/d3d11_copying_texture_wrapper.cc
+@@ -15,6 +15,18 @@
+ #include "media/gpu/windows/d3d11_picture_buffer.h"
+ #include "ui/gfx/color_space.h"
+ 
++#if defined(VENETIUM_W10M)
++#include "base/command_line.h"
++
++// Windows 10 Mobile: the embedder's periodic diagnostics go to the log only
++// with --vw-diagnostics among the engine switches.
++static bool W10mDiagnostics() {
++  static const bool on =
++      base::CommandLine::ForCurrentProcess()->HasSwitch("vw-diagnostics");
++  return on;
++}
++#endif
++
+ namespace media {
+ 
+ // TODO(tmathmeyer) What D3D11 Resources do we need to do the copying?
+@@ -103,7 +115,7 @@ D3D11Status CopyingTexture2DWrapper::ProcessTexture(
+       ++c.frames;
+       c.blt_us += spent;
+       c.worst_blt_us = std::max(c.worst_blt_us, spent);
+-      if (c.frames % 300 == 0) {
++      if (c.frames % 300 == 0 && W10mDiagnostics()) {
+         LOG(WARNING) << "video: 300 frames copied as BGRA, the video "
+                         "processor's Blt "
+                      << c.blt_us / 300 << " us each on the CPU (worst "
+diff --git a/media/gpu/windows/d3d11_video_decoder_wrapper.cc b/media/gpu/windows/d3d11_video_decoder_wrapper.cc
+index 2811048067167d999429d09956c5364077097103..4c5c94f5d86374c320059c406b3b927558740dd5 100644
+--- a/media/gpu/windows/d3d11_video_decoder_wrapper.cc
++++ b/media/gpu/windows/d3d11_video_decoder_wrapper.cc
+@@ -17,6 +17,18 @@
+ #include "media/gpu/windows/d3d11_picture_buffer.h"
+ #include "third_party/abseil-cpp/absl/container/inlined_vector.h"
+ 
++#if defined(VENETIUM_W10M)
++#include "base/command_line.h"
++
++// Windows 10 Mobile: the embedder's periodic diagnostics go to the log only
++// with --vw-diagnostics among the engine switches.
++static bool W10mDiagnostics() {
++  static const bool on =
++      base::CommandLine::ForCurrentProcess()->HasSwitch("vw-diagnostics");
++  return on;
++}
++#endif
++
+ namespace media {
+ 
+ namespace {
+@@ -153,7 +165,7 @@ class D3D11VideoDecoderWrapperImpl : public D3D11VideoDecoderWrapper {
+         waited_us += spent;
+         worst_us = std::max(worst_us, spent);
+       }
+-      if (frames % 300 == 0) {
++      if (frames % 300 == 0 && W10mDiagnostics()) {
+         LOG(WARNING) << "video: 300 frames decoded; " << waited_frames
+                      << " waited for the decoder, " << waited_us / 1000
+                      << " ms in all (worst " << worst_us / 1000 << " ms)";
+diff --git a/media/renderers/video_renderer_impl.cc b/media/renderers/video_renderer_impl.cc
+index ad5e0884eb055ec1a94e76f2629aaa4f59804a01..dc5a8671aad578a8852749d01f2ca8b0ba022658 100644
+--- a/media/renderers/video_renderer_impl.cc
++++ b/media/renderers/video_renderer_impl.cc
+@@ -28,6 +28,18 @@
+ #include "media/base/video_frame.h"
+ #include "third_party/perfetto/include/perfetto/tracing/track.h"
+ 
++#if defined(VENETIUM_W10M)
++#include "base/command_line.h"
++
++// Windows 10 Mobile: the embedder's periodic diagnostics go to the log only
++// with --vw-diagnostics among the engine switches.
++static bool W10mDiagnostics() {
++  static const bool on =
++      base::CommandLine::ForCurrentProcess()->HasSwitch("vw-diagnostics");
++  return on;
++}
++#endif
++
+ namespace media {
+ 
+ namespace {
+@@ -247,7 +259,7 @@ scoped_refptr<VideoFrame> VideoRendererImpl::Render(
+   scoped_refptr<VideoFrame> result =
+       algorithm_->Render(deadline_min, deadline_max, &frames_dropped);
+ #if defined(VENETIUM_W10M)
+-  {
++  if (W10mDiagnostics()) {
+     // Windows 10 Mobile: what reached the screen, said every 10 s of
+     // playback in the foreground.
+     static base::TimeTicks window_start;
+@@ -836,7 +848,9 @@ void VideoRendererImpl::TransitionToHaveNothing() {
+   DCHECK(task_runner_->RunsTasksInCurrentSequence());
+ #if defined(VENETIUM_W10M)
+   // The renderer ran out of frames: decoding did not keep up.
+-  LOG(WARNING) << "video: no frame left to show (decoding fell behind)";
++  if (W10mDiagnostics()) {
++    LOG(WARNING) << "video: no frame left to show (decoding fell behind)";
++  }
+ #endif
+ 
+   base::AutoLock auto_lock(lock_);
+diff --git a/third_party/angle/src/libANGLE/renderer/d3d/d3d11/Renderer11.cpp b/third_party/angle/src/libANGLE/renderer/d3d/d3d11/Renderer11.cpp
+index adca0af4f9bd1b79c3096b405560ca9678d66fbb..302439f584346ed5852d8d8edefb356d5156424a 100644
+--- a/third_party/angle/src/libANGLE/renderer/d3d/d3d11/Renderer11.cpp
++++ b/third_party/angle/src/libANGLE/renderer/d3d/d3d11/Renderer11.cpp
+@@ -3174,6 +3174,16 @@ namespace
+ // shaders waits for all of them.
+ void W10mNoteShader(const std::string &profile, bool compiled, double compileMs, double createMs)
+ {
++    // Only with the embedder's --vw-diagnostics (VW_DIAGNOSTICS=1 in the environment).
++    static const bool diagnostics = [] {
++        char value[4] = {};
++        return ::GetEnvironmentVariableA("VW_DIAGNOSTICS", value, sizeof(value)) == 1 &&
++               value[0] == '1';
++    }();
++    if (!diagnostics)
++    {
++        return;
++    }
+     static std::atomic<int> count{0};
+     static std::atomic<int64_t> totalUs{0};
+     const int n         = ++count;

@@ -82,8 +82,11 @@ void Log::Write(std::wstring_view line) {
     if (g_file != INVALID_HANDLE_VALUE) {
       std::string utf8 = ToUtf8(stamped) + "\r\n";
       DWORD written = 0;
+      // Not flushed: what WriteFile took is the system's, written to the
+      // file even if the app ends the next moment. A flush per line waited
+      // for the phone's flash on whichever thread logged -- the GPU's, the
+      // renderer's -- and only a crash of the system loses unflushed lines.
       ::WriteFile(g_file, utf8.data(), (DWORD)utf8.size(), &written, nullptr);
-      ::FlushFileBuffers(g_file);  // a phone can end the app at any moment
     }
     g_ring.push_back(stamped);
     if (g_ring.size() > kRingCapacity) {
