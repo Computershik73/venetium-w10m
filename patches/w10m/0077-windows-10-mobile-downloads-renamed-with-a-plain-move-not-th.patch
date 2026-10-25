@@ -1,0 +1,55 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Mon, 26 Oct 2026 01:47:25 +0400
+Subject: [PATCH] Windows 10 Mobile: downloads renamed with a plain move, not
+ the shell
+
+BaseFile on Windows renames a download (temporary -> intermediate ->
+final) through the shell: SHCreateItemFromParsingName and IFileOperation.
+Windows 10 Mobile has no shell32 (the delay-load stub fails) and no
+IFileOperation, so every download stopped at its first rename with
+FILE_FAILED and 0 bytes. Under VENETIUM_W10M it is base::Move, as on POSIX.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../download/internal/common/base_file_win.cc       | 13 +++++++++++++
+ 1 file changed, 13 insertions(+)
+
+diff --git a/components/download/internal/common/base_file_win.cc b/components/download/internal/common/base_file_win.cc
+index 2892a8301cd410a0cd0efcadc797684f2c87876a..a26236b65dde9e78c4b04c5e9e9346039e611ffd 100644
+--- a/components/download/internal/common/base_file_win.cc
++++ b/components/download/internal/common/base_file_win.cc
+@@ -13,6 +13,7 @@
+ #include <wrl/client.h>
+ #include <wrl/implements.h>
+ 
++#include "base/files/file_util.h"
+ #include "base/threading/scoped_blocking_call.h"
+ #include "base/win/com_init_util.h"
+ #include "components/download/public/common/download_interrupt_reasons_utils.h"
+@@ -245,6 +246,17 @@ DownloadInterruptReason BaseFile::MoveFileAndAdjustPermissions(
+   base::ScopedBlockingCall scoped_blocking_call(FROM_HERE,
+                                                 base::BlockingType::MAY_BLOCK);
+ 
++#if defined(VENETIUM_W10M)
++  // Windows 10 Mobile has no shell: SHCreateItemFromParsingName is a stub
++  // there and IFileOperation is not registered, so every download failed
++  // (FILE_FAILED, 0 bytes) at its first rename. A plain move, as on POSIX;
++  // within the app's own folders the destination's permissions are what a
++  // move keeps anyway.
++  if (!base::Move(full_path_, new_path)) {
++    return LogSystemError("Move", ::GetLastError());
++  }
++  return DOWNLOAD_INTERRUPT_REASON_NONE;
++#else
+   base::win::AssertComInitialized();
+   Microsoft::WRL::ComPtr<IShellItem> original_path;
+   HRESULT hr = SHCreateItemFromParsingName(full_path_.value().c_str(), nullptr,
+@@ -304,6 +316,7 @@ DownloadInterruptReason BaseFile::MoveFileAndAdjustPermissions(
+   }
+ 
+   return interrupt_reason;
++#endif  // defined(VENETIUM_W10M)
+ }
+ 
+ }  // namespace download
