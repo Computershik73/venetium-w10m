@@ -29,7 +29,7 @@ interface laid out as Chrome for Android's. Brought to the phone the way
 - **A built-in ad and tracker blocker** (Venetium's): EasyList and
   EasyPrivacy through Chromium's subresource filter, on every site.
 - **Downloads** go to the phone's `Downloads\Venetium` (with interop unlock
-  alone they are made in the app's folder and copied there through the
+  alone they are made in the app's folder and moved there through the
   storage API, as gecko-w10m does); *Save as* goes through the phone's save
   picker, and opening a download or its folder opens the copy. Uploads use the
   phone's file picker.

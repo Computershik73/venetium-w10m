@@ -3,11 +3,12 @@
 // With interop unlock alone the engine (Win32, by path) may not write the
 // phone's Downloads: Chrome downloads into LocalState\Downloads, the staging
 // folder (VENETIUM_DOWNLOAD_STAGING, set by the engine), and each finished
-// download is copied out here through the storage API -- into the file picked
-// in a Save As, or into Downloads\Venetium (DownloadsFolder). Opening a
-// download, or showing its folder, then goes to the copy. Staged files are
-// cleared two days after they were copied out. Where the engine may write
-// Downloads itself (root access) there is no staging and nothing to copy.
+// download is moved out here through the storage API -- into the file picked
+// in a Save As, or into Downloads\Venetium (DownloadsFolder). The file is
+// moved there, not copied, and a placeholder of no bytes keeps its old name,
+// so Chrome still lists the download as there; opening it, or showing its
+// folder, goes to the moved file. Where the engine may write Downloads
+// itself (root access) there is no staging and nothing to move.
 #pragma once
 
 #include <functional>
@@ -32,11 +33,12 @@ bool OpenDownloadCopy(std::wstring const& path, bool reveal);
 
 // Save As: the path the engine is to write for |picked| (a StorageFile):
 // the picked file's own when the engine may write it, else a staged file
-// copied into the picked one when the download finishes.
+// moved into the picked one when the download finishes.
 std::wstring PathToSaveInto(winrt::Windows::Storage::StorageFile const& picked);
 
-// Staged downloads copied out two days ago and more, and the folders Save As
-// left behind. On a worker thread.
+// Placeholders of downloads moved out 30 days ago and more, files only
+// copied out two days ago and more, and the folders Save As left behind. On
+// a worker thread.
 void CleanUpStagedDownloads();
 
 }  // namespace venetium_w10m::client

@@ -27,8 +27,12 @@ namespace venetium_w10m::client {
 
 namespace {
 
-// A staged download is kept this long after it was copied out, so Chrome can
-// still show and open it; then only the copy is left.
+// A staged download is moved out and a placeholder of no bytes left under
+// its name, so Chrome, which checks that its downloads' files exist, still
+// lists it as one it can open (and opening it goes to the moved file). The
+// placeholders go after this long; a download that could only be copied out
+// (the move refused) is cleared sooner.
+constexpr unsigned long long kKeepPlaceholderFor = 30ull * 24 * 60 * 60;
 constexpr unsigned long long kKeepStagedFor = 2ull * 24 * 60 * 60;  // seconds
 // The future access list holds a thousand; old copies' entries go first.
 constexpr uint32_t kAccessListRoom = 800;
@@ -179,7 +183,10 @@ void CleanUp(std::wstring const& dir, bool nested) {
       }
       continue;
     }
-    if (AgeSeconds(found.ftLastWriteTime) < kKeepStagedFor) {
+    const bool placeholder =
+        found.nFileSizeHigh == 0 && found.nFileSizeLow == 0;
+    if (AgeSeconds(found.ftLastWriteTime) <
+        (placeholder ? kKeepPlaceholderFor : kKeepStagedFor)) {
       continue;
     }
     if (!Remembered(Token(L'x', path))) {
@@ -218,30 +225,54 @@ void ExportDownload(std::wstring path,
     try {
       StorageFile staged =
           StorageFile::GetFileFromPathAsync(winrt::hstring(path)).get();
-      StorageFile copy{nullptr};
+      StorageFile target{nullptr};
       const std::wstring save_as = Token(L's', path);
-      if (Remembered(save_as)) {
+      const bool saved_as = Remembered(save_as);
+      if (saved_as) {
         // The file picked in a Save As.
         step = L"opening the file picked to save into";
-        copy = StorageApplicationPermissions::FutureAccessList()
-                   .GetFileAsync(winrt::hstring(save_as))
-                   .get();
-        step = L"copying into the file picked";
-        staged.CopyAndReplaceAsync(copy).get();
-        Forget(save_as);
+        target = StorageApplicationPermissions::FutureAccessList()
+                     .GetFileAsync(winrt::hstring(save_as))
+                     .get();
       } else {
         // The phone's Downloads: the system puts an app's files in a folder
         // named after it, Downloads\Venetium.
         step = L"creating the file in Downloads";
-        copy = DownloadsFolder::CreateFileAsync(
-                   staged.Name(), CreationCollisionOption::GenerateUniqueName)
-                   .get();
-        step = L"copying into Downloads";
-        staged.CopyAndReplaceAsync(copy).get();
+        target = DownloadsFolder::CreateFileAsync(
+                     staged.Name(), CreationCollisionOption::GenerateUniqueName)
+                     .get();
       }
+      // Moved, not copied: no second copy of a big download in the app's
+      // folder (on the same volume a move is a rename; onto a memory card
+      // the system copies and deletes). Copied only if the move is refused.
+      bool moved = false;
+      try {
+        step = L"moving it there";
+        staged.MoveAndReplaceAsync(target).get();
+        moved = true;
+      } catch (winrt::hresult_error const& error) {
+        Log::Write(L"files: could not move " + path + L", copying it",
+                   std::wstring(error.message()));
+        step = L"copying it there";
+        staged.CopyAndReplaceAsync(target).get();
+      }
+      if (saved_as) {
+        Forget(save_as);
+      }
+      StorageFile copy = target;
+      // Known before the placeholder exists: opening the download goes to
+      // the moved file from then on (OpenDownloadCopy).
       Remember(Token(L'x', path), copy);
+      if (moved) {
+        // A placeholder under the old name: Chrome still finds a file there.
+        HANDLE h = ::CreateFile2(path.c_str(), GENERIC_WRITE, 0, CREATE_NEW,
+                                 nullptr);
+        if (h != INVALID_HANDLE_VALUE) {
+          ::CloseHandle(h);
+        }
+      }
       const std::wstring where(copy.Path());
-      Log::Write(L"files: " + path + L" copied to " +
+      Log::Write(L"files: " + path + (moved ? L" moved to " : L" copied to ") +
                  (where.empty() ? std::wstring(copy.Name()) : where));
       done(where.empty() ? std::wstring(copy.Name()) : where, L"");
     } catch (winrt::hresult_error const& error) {
