@@ -35,6 +35,7 @@ class VwChromeExtraParts : public ChromeBrowserMainExtraParts {
   void PreEarlyInitialization() override;
   void ToolkitInitialized() override;
   void PreProfileInit() override;
+  void PostProfileInit(Profile* profile, bool is_initial_profile) override;
   void PostBrowserStart() override;
   void PostMainMessageLoopRun() override;
 

@@ -7,6 +7,7 @@
 #include <thread>
 
 #include "client/CrashLog.h"
+#include "client/FileExport.h"
 #include "client/Log.h"
 #include "client/Settings.h"
 #include "engine/EngineHost.h"
@@ -508,8 +509,34 @@ void MainPage::WireEngineEvents() {
     }
   };
   events.downloadDone = [this](std::wstring path, std::wstring mime) {
+    // Copied out of the app's staging folder into Downloads\Venetium, or
+    // into the file picked in a Save As (client/FileExport.h).
     const std::wstring name = path.substr(path.find_last_of(L'\\') + 1);
-    ShowNotice(L"Downloaded " + name);
+    auto dispatcher = CoreWindow::GetForCurrentThread().Dispatcher();
+    client::ExportDownload(path, [this, dispatcher, name](std::wstring where,
+                                                          std::wstring error) {
+      dispatcher.RunAsync(CoreDispatcherPriority::Normal,
+                          [this, name, where, error]() {
+                            if (!error.empty()) {
+                              ShowNotice(L"Downloaded " + name +
+                                         L", but it could not be copied to "
+                                         L"Downloads (the log says why)");
+                              return;
+                            }
+                            const size_t slash = where.find_last_of(L'\\');
+                            std::wstring folder =
+                                slash == std::wstring::npos
+                                    ? std::wstring()
+                                    : where.substr(0, slash);
+                            const size_t data = folder.find(L"\\Downloads");
+                            if (data != std::wstring::npos) {
+                              folder = folder.substr(data + 1);
+                            }
+                            ShowNotice(L"Downloaded " + name +
+                                       (folder.empty() ? L""
+                                                       : L" to " + folder));
+                          });
+    });
   };
   events.dialog = [this](int32_t id, int32_t kind, std::wstring message,
                          std::wstring defaultText) {
@@ -552,8 +579,23 @@ void MainPage::WireEngineEvents() {
         break;
     }
   };
-  events.openPath = [this](std::wstring path, bool folder) {
-    Log::Write(folder ? L"open folder" : L"open file", path);
+  events.openPath = [this](std::wstring path, int32_t how) {
+    Log::Write(how == 0   ? L"open file"
+               : how == 1 ? L"open folder"
+                          : L"open the folder of",
+               path);
+    // A download copied out of the staging folder: the copy is the one the
+    // user knows, so that is the one opened or shown.
+    if (how != 1 && client::OpenDownloadCopy(path, how == 2)) {
+      return;
+    }
+    if (how == 2) {
+      const size_t slash = path.find_last_of(L'\\');
+      if (slash != std::wstring::npos) {
+        path.resize(slash);
+      }
+    }
+    const bool folder = how != 0;
     [](MainPage* page, std::wstring path, bool folder)
         -> winrt::fire_and_forget {
       bool opened = false;
@@ -655,6 +697,12 @@ void MainPage::Start(std::wstring initialUrl) {
       splash_.Visibility(Visibility::Collapsed);
       Log::Write(L"page: first frame on screen");
     });
+    // Downloads copied out two days ago leave the staging folder (once the
+    // engine has said where it is).
+    std::thread([]() {
+      ::Sleep(30000);
+      client::CleanUpStagedDownloads();
+    }).detach();
     engineView_->Start();
     if (!pendingUrl_.empty()) {
       const std::wstring url = std::move(pendingUrl_);
@@ -913,10 +961,37 @@ void MainPage::ShowDialog(int32_t id, int32_t kind, std::wstring const& message,
 
 void MainPage::ChooseFiles(int32_t id, std::wstring const& accept,
                            bool multiple, bool save) {
-  [](int32_t id, bool multiple, bool save) -> winrt::fire_and_forget {
+  [](int32_t id, std::wstring offered, bool multiple,
+     bool save) -> winrt::fire_and_forget {
     std::string paths;
     try {
-      if (!save) {
+      if (save) {
+        // Chrome's Save As; |offered| is the file name it suggests.
+        FileSavePicker picker;
+        picker.SuggestedStartLocation(PickerLocationId::Downloads);
+        std::wstring extension;
+        const size_t dot = offered.rfind(L'.');
+        if (dot != std::wstring::npos && dot + 1 < offered.size()) {
+          extension = offered.substr(dot);
+        }
+        // The type list may not be empty; the picker adds the extension.
+        const std::wstring type = extension.empty() ? L".bin" : extension;
+        picker.FileTypeChoices().Insert(
+            hstring(extension.empty() ? L"File" : extension.substr(1)),
+            single_threaded_vector<hstring>({hstring(type)}));
+        picker.DefaultFileExtension(hstring(type));
+        std::wstring stem = offered;
+        if (!extension.empty()) {
+          stem.resize(dot);
+        }
+        if (!stem.empty()) {
+          picker.SuggestedFileName(hstring(stem));
+        }
+        auto picked = co_await picker.PickSaveFileAsync();
+        if (picked) {
+          paths = Narrow(client::PathToSaveInto(picked));
+        }
+      } else {
         FileOpenPicker picker;
         picker.ViewMode(PickerViewMode::List);
         picker.FileTypeFilter().Append(L"*");
@@ -942,7 +1017,7 @@ void MainPage::ChooseFiles(int32_t id, std::wstring const& accept,
       Log::Write(L"files: picker failed", std::wstring(e.message()));
     }
     if (Api().file_reply) Api().file_reply(id, paths.c_str());
-  }(id, multiple, save);
+  }(id, accept, multiple, save);
 }
 
 void MainPage::ShowNotice(std::wstring const& text) {

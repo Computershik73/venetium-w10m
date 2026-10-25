@@ -288,7 +288,7 @@ void EngineHost::OnShellCommand(int32_t command) {
 
 void EngineHost::OnOpenPath(const char* path, int32_t folder) {
   Get().Post([path = Widen(path), folder]() {
-    if (Get().events_.openPath) Get().events_.openPath(path, folder != 0);
+    if (Get().events_.openPath) Get().events_.openPath(path, folder);
   });
 }
 

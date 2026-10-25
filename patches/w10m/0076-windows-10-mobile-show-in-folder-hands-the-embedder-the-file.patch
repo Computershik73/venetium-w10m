@@ -1,0 +1,44 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Sun, 25 Oct 2026 16:09:55 +0400
+Subject: [PATCH] Windows 10 Mobile: "show in folder" hands the embedder the
+ file
+
+ShowItemInFolder passed the folder; it now passes the file
+(W10mOpen::kItemInFolder), so the embedder can show the folder of a
+download's copy, which is not where Chrome made the file.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ chrome/browser/platform_util.h      | 4 +++-
+ chrome/browser/platform_util_win.cc | 2 +-
+ 2 files changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/chrome/browser/platform_util.h b/chrome/browser/platform_util.h
+index 424909f78991d5a3dc7718abc49109ff04313872..32f216e043eb1a188380630d91855ea744122609 100644
+--- a/chrome/browser/platform_util.h
++++ b/chrome/browser/platform_util.h
+@@ -91,7 +91,9 @@ void OpenExternal(const GURL& url);
+ // ms-settings:), a downloaded file, the folder a download is in -- through
+ // the Windows Runtime launcher. The embedder sets the handler, which may be
+ // called on any thread; with none set, nothing is opened.
+-enum class W10mOpen { kUrl, kFile, kFolder };
++// kItemInFolder: the folder |target| (a file) is in, shown -- the file, not
++// the folder, so the embedder can show its copy's folder instead.
++enum class W10mOpen { kUrl, kFile, kFolder, kItemInFolder };
+ using W10mOpenHandler = void (*)(W10mOpen what, const std::string& target);
+ void SetW10mOpenHandler(W10mOpenHandler handler);
+ #endif
+diff --git a/chrome/browser/platform_util_win.cc b/chrome/browser/platform_util_win.cc
+index 54361f85b21c80c658fa713096d735112bc4bfc3..97c8eabccc250c0200a10c39fd39f8928a0c80d8 100644
+--- a/chrome/browser/platform_util_win.cc
++++ b/chrome/browser/platform_util_win.cc
+@@ -136,7 +136,7 @@ void SetW10mOpenHandler(W10mOpenHandler handler) {
+ 
+ void ShowItemInFolder(Profile* profile, const base::FilePath& full_path) {
+ #if defined(VENETIUM_W10M)
+-  HandToShell(W10mOpen::kFolder, full_path.DirName().AsUTF8Unsafe());
++  HandToShell(W10mOpen::kItemInFolder, full_path.AsUTF8Unsafe());
+   return;
+ #endif
+   base::ThreadPool::CreateCOMSTATaskRunner(

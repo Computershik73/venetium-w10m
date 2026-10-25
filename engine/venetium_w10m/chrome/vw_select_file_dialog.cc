@@ -92,14 +92,24 @@ void VwSelectFileDialog::SelectFileImpl(
                                    weak_factory_.GetWeakPtr(), multiple));
       return;
     }
-    case SELECT_SAVEAS_FILE:
+    case SELECT_SAVEAS_FILE: {
       running_ = true;
+      // The shell's save picker; without a shell, the app's Downloads.
+      VwBrowser* browser = VwEngine::Get()->browser();
+      if (browser && VwEngine::Get()->events().file_chooser) {
+        browser->dialogs()->SaveFile(
+            default_path.BaseName().AsUTF8Unsafe(),
+            base::BindOnce(&VwSelectFileDialog::Picked,
+                           weak_factory_.GetWeakPtr(), false));
+        return;
+      }
       base::ThreadPool::PostTaskAndReplyWithResult(
           FROM_HERE, {base::MayBlock(), base::TaskPriority::USER_BLOCKING},
           base::BindOnce(&SavePath, default_path),
           base::BindOnce(&VwSelectFileDialog::Picked,
                          weak_factory_.GetWeakPtr(), false));
       return;
+    }
     default:
       Note("files: a folder cannot be chosen here");
       answer_later(base::BindOnce(&VwSelectFileDialog::Cancelled,

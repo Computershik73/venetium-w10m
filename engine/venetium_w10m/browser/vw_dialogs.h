@@ -67,6 +67,11 @@ class VwDialogs : public content::JavaScriptDialogManager {
   using PickedCallback =
       base::OnceCallback<void(std::vector<base::FilePath> paths)>;
   void PickFiles(bool multiple, PickedCallback chosen);
+  // A file to save into (Chrome's Save As: a page, a link, an image): the
+  // shell's save picker, |suggested_name| offered. |chosen| hears the path to
+  // write -- the picked file, or a file in the app's staging folder that the
+  // shell copies into the picked one when the download finishes -- or none.
+  void SaveFile(const std::string& suggested_name, PickedCallback chosen);
 
   // A tab is going away: whatever it asked is cancelled.
   void ForgetContents(content::WebContents* web_contents);

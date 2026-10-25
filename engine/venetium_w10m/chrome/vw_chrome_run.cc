@@ -6,6 +6,8 @@
 #include <string>
 #include <utility>
 
+#include <windows.h>
+
 #include "base/base_switches.h"
 #include "base/command_line.h"
 #include "base/debug/dump_without_crashing.h"
@@ -121,10 +123,35 @@ void AddChromeSwitches(const EngineConfig& config,
   }
 }
 
+// Where Chrome downloads. The phone's Downloads\Venetium where the app may
+// write it with Win32 calls (root access); else the app's own
+// LocalState\Downloads, staged: each finished download is copied out by the
+// shell through the storage API (VwDownloadExporter), which finds the staging
+// folder in VENETIUM_DOWNLOAD_STAGING.
+static base::FilePath DownloadsDir(const base::FilePath& local_state) {
+  const base::FilePath direct(
+      FILE_PATH_LITERAL("C:\\Data\\Users\\Public\\Downloads\\Venetium"));
+  base::CreateDirectory(direct);
+  const base::FilePath probe =
+      direct.Append(FILE_PATH_LITERAL(".venetium-write-test"));
+  if (base::WriteFile(probe, "")) {
+    base::DeleteFile(probe);
+    NoteF("download: straight into %s", direct.AsUTF8Unsafe().c_str());
+    return direct;
+  }
+  const base::FilePath staging =
+      local_state.Append(FILE_PATH_LITERAL("Downloads"));
+  base::CreateDirectory(staging);
+  ::SetEnvironmentVariableW(L"VENETIUM_DOWNLOAD_STAGING",
+                            staging.value().c_str());
+  NoteF("download: into %s, then copied to Downloads\\Venetium by the shell",
+        staging.AsUTF8Unsafe().c_str());
+  return staging;
+}
+
 void SetUpChromePaths(const EngineConfig& config) {
   const base::FilePath local_state = config.profile_dir.DirName();
-  const base::FilePath downloads =
-      local_state.Append(FILE_PATH_LITERAL("Downloads"));
+  const base::FilePath downloads = DownloadsDir(local_state);
   base::PathService::Override(chrome::DIR_DEFAULT_DOWNLOADS, downloads);
   base::PathService::Override(chrome::DIR_DEFAULT_DOWNLOADS_SAFE, downloads);
   base::PathService::Override(chrome::DIR_USER_DOCUMENTS, local_state);

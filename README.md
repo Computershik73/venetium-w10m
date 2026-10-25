@@ -28,6 +28,13 @@ interface laid out as Chrome for Android's. Brought to the phone the way
   `codeGeneration` capability.
 - **A built-in ad and tracker blocker** (Venetium's): EasyList and
   EasyPrivacy through Chromium's subresource filter, on every site.
+- **Downloads** go to the phone's `Downloads\Venetium` (with interop unlock
+  alone they are made in the app's folder and copied there through the
+  storage API, as gecko-w10m does); *Save as* goes through the phone's save
+  picker, and opening a download or its folder opens the copy. Uploads use the
+  phone's file picker.
+- **Chrome's own pages** (History, Settings, Downloads, Bookmarks...) are laid
+  out at the phone's width, in their narrow layouts.
 - **Memory**: one process in a 32-bit address space; background tabs are
   unloaded before the phone's limit is reached, and memory pressure is told to
   Chromium from the phone's own numbers.

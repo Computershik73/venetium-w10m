@@ -7,6 +7,7 @@
 
 #include "base/task/single_thread_task_runner.h"
 #include "chrome/browser/platform_util.h"
+#include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/ui/toolbar/app_menu_model.h"
 #include "chrome/browser/ui/views/toolbar/w10m_tab_switcher.h"
 #include "ui/display/win/dpi.h"
@@ -18,6 +19,7 @@
 #include "venetium_w10m/browser/vw_platform.h"
 #include "venetium_w10m/chrome/vw_browser_native_widget.h"
 #include "venetium_w10m/chrome/vw_chrome_host.h"
+#include "venetium_w10m/chrome/vw_download_exporter.h"
 #include "venetium_w10m/chrome/vw_select_file_dialog.h"
 #include "venetium_w10m/chrome/vw_tab_grid.h"
 #include "venetium_w10m/common/vw_log.h"
@@ -39,9 +41,12 @@ void OpenThroughShell(platform_util::W10mOpen what, const std::string& target) {
       break;
     case platform_util::W10mOpen::kFile:
     case platform_util::W10mOpen::kFolder:
+    case platform_util::W10mOpen::kItemInFolder:
       if (events.open_path) {
         events.open_path(target.c_str(),
-                         what == platform_util::W10mOpen::kFolder ? 1 : 0);
+                         what == platform_util::W10mOpen::kFile     ? 0
+                         : what == platform_util::W10mOpen::kFolder ? 1
+                                                                     : 2);
       }
       break;
   }
@@ -94,6 +99,15 @@ void VwChromeExtraParts::PreProfileInit() {
   browser_ = std::make_unique<VwBrowser>(nullptr, VwEngine::Get()->config(),
                                          std::move(host));
   Note("chrome: the window is ready for Chrome's interface");
+}
+
+void VwChromeExtraParts::PostProfileInit(Profile* profile,
+                                         bool is_initial_profile) {
+  // Each download that finishes goes to the shell, which copies it where the
+  // user finds it (VwDownloadExporter).
+  if (is_initial_profile && profile) {
+    VwDownloadExporter::Watch(profile->GetDownloadManager());
+  }
 }
 
 void VwChromeExtraParts::PostBrowserStart() {

@@ -186,6 +186,22 @@ void VwDialogs::PickFiles(bool multiple, PickedCallback chosen) {
   events.file_chooser(id, "", multiple ? 1 : 0, 0);
 }
 
+void VwDialogs::SaveFile(const std::string& suggested_name,
+                         PickedCallback chosen) {
+  const venetium_w10m_events events = VwEngine::Get()->events();
+  if (!events.file_chooser) {
+    std::move(chosen).Run({});
+    return;
+  }
+  const int32_t id = next_id_++;
+  files_[id] = PendingFiles{nullptr, nullptr,
+                            blink::mojom::FileChooserParams::Mode::kSave,
+                            std::move(chosen)};
+  NoteF("files %d: Chrome saves, offering %s", id, suggested_name.c_str());
+  // In save mode the "accept" argument carries the name offered.
+  events.file_chooser(id, suggested_name.c_str(), 0, 1);
+}
+
 void VwDialogs::ForgetContents(content::WebContents* web_contents) {
   CancelDialogs(web_contents, true);
   for (auto it = files_.begin(); it != files_.end();) {

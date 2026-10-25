@@ -89,7 +89,9 @@ struct Events {
   // 3 engine switches, 4 copy the logs).
   std::function<void(int32_t command)> shellCommand;
   // Chrome asks for a file to be opened, or a folder shown.
-  std::function<void(std::wstring path, bool folder)> openPath;
+  // folder: 0 open the file, 1 show the folder, 2 show the folder the file
+  // is in.
+  std::function<void(std::wstring path, int32_t folder)> openPath;
   // venetium_w10m_run returned: the engine has ended, for good.
   std::function<void(int32_t code)> engineStopped;
 };
