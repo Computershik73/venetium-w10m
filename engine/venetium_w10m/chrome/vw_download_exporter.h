@@ -12,7 +12,7 @@
 #ifndef VENETIUM_W10M_CHROME_VW_DOWNLOAD_EXPORTER_H_
 #define VENETIUM_W10M_CHROME_VW_DOWNLOAD_EXPORTER_H_
 
-#include <set>
+#include <map>
 
 #include "base/memory/raw_ptr.h"
 #include "components/download/public/common/download_item.h"
@@ -44,9 +44,15 @@ class VwDownloadExporter : public content::DownloadManager::Observer,
   void OnDownloadDestroyed(download::DownloadItem* item) override;
 
   raw_ptr<content::DownloadManager> manager_;
-  // The downloads of this run still going: those loaded from the history
-  // finished in an earlier one and were handed over then.
-  std::set<download::DownloadItem*> watched_;
+  // The downloads of this run still going (those loaded from the history
+  // finished in an earlier one and were handed over then), with what the log
+  // has said of each: its target, its last interruption, its danger.
+  struct Said {
+    bool target = false;
+    int interrupt_reason = 0;
+    int danger = 0;
+  };
+  std::map<download::DownloadItem*, Said> watched_;
 };
 
 }  // namespace venetium_w10m

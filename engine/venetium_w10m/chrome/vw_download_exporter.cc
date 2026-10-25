@@ -5,6 +5,8 @@
 #include <string>
 
 #include "base/files/file_path.h"
+#include "components/download/public/common/download_danger_type.h"
+#include "components/download/public/common/download_interrupt_reasons.h"
 #include "venetium_w10m/browser/vw_engine.h"
 #include "venetium_w10m/common/vw_log.h"
 
@@ -23,7 +25,7 @@ VwDownloadExporter::VwDownloadExporter(content::DownloadManager* manager)
 }
 
 VwDownloadExporter::~VwDownloadExporter() {
-  for (download::DownloadItem* item : watched_) {
+  for (auto& [item, said] : watched_) {
     item->RemoveObserver(this);
   }
   if (manager_) {
@@ -37,7 +39,10 @@ void VwDownloadExporter::OnDownloadCreated(content::DownloadManager* manager,
     return;
   }
   item->AddObserver(this);
-  watched_.insert(item);
+  watched_[item] = Said();
+  NoteF("download: started from %s (%s)",
+        std::string(item->GetURL().host()).c_str(),
+        item->GetMimeType().c_str());
 }
 
 void VwDownloadExporter::ManagerGoingDown(content::DownloadManager* manager) {
@@ -47,11 +52,37 @@ void VwDownloadExporter::ManagerGoingDown(content::DownloadManager* manager) {
 }
 
 void VwDownloadExporter::OnDownloadUpdated(download::DownloadItem* item) {
+  Said& said = watched_[item];
+  if (!said.target && !item->GetTargetFilePath().empty()) {
+    said.target = true;
+    NoteF("download: going to %s",
+          item->GetTargetFilePath().AsUTF8Unsafe().c_str());
+  }
+  const int danger = static_cast<int>(item->GetDangerType());
+  if (danger != said.danger) {
+    said.danger = danger;
+    if (item->IsDangerous()) {
+      NoteF("download: held as dangerous (%s), waiting to be kept",
+            download::GetDownloadDangerTypeString(item->GetDangerType()));
+    }
+  }
   switch (item->GetState()) {
     case download::DownloadItem::IN_PROGRESS:
-    case download::DownloadItem::INTERRUPTED:  // may be resumed
       return;
+    case download::DownloadItem::INTERRUPTED: {  // may be resumed
+      const int reason = static_cast<int>(item->GetLastReason());
+      if (reason != said.interrupt_reason) {
+        said.interrupt_reason = reason;
+        NoteF("download: interrupted, %s (%lld of %lld bytes)",
+              download::DownloadInterruptReasonToString(item->GetLastReason())
+                  .c_str(),
+              static_cast<long long>(item->GetReceivedBytes()),
+              static_cast<long long>(item->GetTotalBytes()));
+      }
+      return;
+    }
     case download::DownloadItem::CANCELLED:
+      Note("download: cancelled");
       break;
     case download::DownloadItem::COMPLETE: {
       const base::FilePath path = item->GetTargetFilePath();
