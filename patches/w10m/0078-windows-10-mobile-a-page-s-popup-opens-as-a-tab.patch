@@ -1,0 +1,42 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Tue, 27 Oct 2026 03:11:23 +0400
+Subject: [PATCH] Windows 10 Mobile: a page's popup opens as a tab
+
+window.open with features made a popup window, which on a phone's one
+screen sat over the browser; a sign-in with Google stopped at its last page
+(accounts.google.com/gsi/transform) and never got back to the site. A
+page's popup from a normal browser window is now a foreground tab next to
+its opener, as on Chrome for Android: window.close() closes it and the
+opener's tab comes back. An app's popups keep their windows.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ chrome/browser/ui/navigator/browser_navigator.cc | 14 ++++++++++++++
+ 1 file changed, 14 insertions(+)
+
+diff --git a/chrome/browser/ui/navigator/browser_navigator.cc b/chrome/browser/ui/navigator/browser_navigator.cc
+index debd48b34d2486594c91fddaa42061e87916af0e..98b050c4aa8f751864e0bedf529e098365303bb5 100644
+--- a/chrome/browser/ui/navigator/browser_navigator.cc
++++ b/chrome/browser/ui/navigator/browser_navigator.cc
+@@ -556,6 +556,20 @@ base::WeakPtr<content::NavigationHandle> Navigate(NavigateParams* params) {
+     return nullptr;
+   }
+ 
++#if defined(VENETIUM_W10M)
++  // Windows 10 Mobile: a phone shows one window. A page's popup (window.open
++  // with features: a sign-in with Google, a payment) opens as a tab next to
++  // its opener, as on Chrome for Android, and its window.close() closes the
++  // tab and brings the opener's back. As popup windows over the browser, a
++  // sign-in stopped at its last page (accounts.google.com/gsi/transform) and
++  // never got back to the site. An app's popups keep their windows.
++  if (params->disposition == WindowOpenDisposition::NEW_POPUP &&
++      params->app_id.empty() && source_browser &&
++      source_browser->is_type_normal()) {
++    params->disposition = WindowOpenDisposition::NEW_FOREGROUND_TAB;
++  }
++#endif
++
+   // Block navigation requests when in locked fullscreen mode. We allow
+   // navigation requests in the webapp when locked for OnTask (only relevant for
+   // non-web browser scenarios).
