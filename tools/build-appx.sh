@@ -129,11 +129,17 @@ else
   echo "    WARNING: no engine in $ENGINE_OUT -- packaging the shell alone" >&2
 fi
 
-# resources.pri, from the manifest and the Assets only.
+# resources.pri, from the manifest and the Assets only. makepri's default
+# config puts each scale but the first into a resource package of its own
+# (resources.scale-200.pri), which only a bundle installs: this package is
+# one appx, so its <packaging> rules are dropped and every scale of every
+# image is indexed in resources.pri.
 PRITMP="$OUT/pri"
 rm -rf "$PRITMP" && mkdir -p "$PRITMP/Assets"
+rm -f "$STAGE"/resources*.pri
 cp "$STAGE/AppxManifest.xml" "$PRITMP/" && cp "$STAGE/Assets/"* "$PRITMP/Assets/"
 if "$BIN/makepri.exe" createconfig /cf "$(cygpath -w "$PRITMP/priconfig.xml")" /dq en-US /pv 10.0.0 /o > /dev/null 2>&1 &&
+   sed -i '/<packaging>/,/<\/packaging>/d' "$PRITMP/priconfig.xml" &&
    "$BIN/makepri.exe" new /pr "$(cygpath -w "$PRITMP")" /cf "$(cygpath -w "$PRITMP/priconfig.xml")" \
      /mn "$(cygpath -w "$PRITMP/AppxManifest.xml")" /of "$(cygpath -w "$STAGE/resources.pri")" /o > /dev/null 2>&1; then
   echo "    resources.pri"
