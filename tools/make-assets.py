@@ -6,6 +6,9 @@ Each image is the logo centred on transparent ground at the share of the tile
 Windows' design guidance gives a tile's icon (about two thirds), so the tile
 colour (BackgroundColor in the manifest) shows around it. Scale-200 versions
 are made too: a phone's display is scale 200 or more.
+
+The images in app/VenetiumW10m/Assets since 222.63 are drawn by hand (a white
+V on the tile colour) and are not made by this script.
 """
 import os
 import sys
