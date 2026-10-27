@@ -233,7 +233,10 @@ typedef struct {
   // Something was copied to the clipboard by a page (UTF-8 text).
   void (*clipboard_set)(const char* text);
   // Chrome's menu asked for something the shell does: 1 About, 2 the log,
-  // 3 the engine switches, 4 copy the logs to Pictures.
+  // 3 the engine switches, 4 copy the logs to Pictures; 5/6 the JIT on/off
+  // for the next start; 7/8 the black theme on/off (the shell's own colours
+  // and --vw-amoled from then on); 9/10 the toolbar slid away/back as a
+  // page scrolled (the status bar with it).
   void (*shell_command)(int32_t command);
   // Chrome asks for a file to be opened (folder 0: a download, with the
   // app that takes it), a folder to be shown (folder 1), or the folder a file

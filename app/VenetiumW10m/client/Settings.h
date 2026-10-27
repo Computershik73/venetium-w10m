@@ -29,6 +29,12 @@ class Settings {
   static bool Jit();
   static void SetJit(bool jit);
 
+  // The black theme (Chrome's menu, Windows 10 Mobile, Black theme): the
+  // engine's setting, of which the shell keeps a copy for its own colours
+  // before the engine starts. Read at start.
+  static bool Amoled();
+  static void SetAmoled(bool on);
+
   // Frames shown by the GPU (a Direct3D swap chain in a SwapChainPanel)
   // rather than copied into a bitmap. Read at start.
   static bool HardwareGraphics();

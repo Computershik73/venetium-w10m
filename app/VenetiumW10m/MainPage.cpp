@@ -40,7 +40,13 @@ using engine::Narrow;
 
 namespace {
 
-Color ChromeBg() { return ColorHelper::FromArgb(255, 0x1c, 0x1b, 0x22); }
+// The black theme: the shell's surfaces black, as the engine's are.
+bool g_amoled = false;
+
+Color ChromeBg() {
+  return g_amoled ? ColorHelper::FromArgb(255, 0, 0, 0)
+                  : ColorHelper::FromArgb(255, 0x1c, 0x1b, 0x22);
+}
 Color ChromeFg() { return ColorHelper::FromArgb(255, 0xf0, 0xf0, 0xf4); }
 Color FieldBg() { return ColorHelper::FromArgb(255, 0x2b, 0x2a, 0x33); }
 Color Accent() { return ColorHelper::FromArgb(255, 0x7b, 0x5c, 0xff); }
@@ -87,6 +93,7 @@ std::wstring DisplayUrl(std::wstring const& url) {
 }  // namespace
 
 MainPage::MainPage() {
+  g_amoled = Settings::Amoled();
   try {
     rawPerView_ = DisplayInformation::GetForCurrentView().RawPixelsPerViewPixel();
   } catch (...) {
@@ -360,18 +367,7 @@ void MainPage::BuildUi() {
   view.SetDesiredBoundsMode(ApplicationViewBoundsMode::UseVisible);
   view.VisibleBoundsChanged([this](auto&&, auto&&) { ApplyVisibleBounds(); });
   ApplyVisibleBounds();
-  // A view on Continuum's monitor may have no status bar to colour.
-  try {
-    if (ApiInformation::IsTypePresent(
-            L"Windows.UI.ViewManagement.StatusBar")) {
-      auto status = StatusBar::GetForCurrentView();
-      status.BackgroundColor(ChromeBg());
-      status.BackgroundOpacity(1.0);
-      status.ForegroundColor(ChromeFg());
-    }
-  } catch (winrt::hresult_error const& e) {
-    Log::Write(L"view: no status bar", std::wstring(e.message()));
-  }
+  ColorStatusBar();
   DisplayInformation::GetForCurrentView().DpiChanged(
       [this](DisplayInformation const& info, auto&&) {
         rawPerView_ = info.RawPixelsPerViewPixel();
@@ -605,6 +601,20 @@ void MainPage::WireEngineEvents() {
         ShowNotice(command == 5 ? L"JavaScript JIT on after a restart"
                                 : L"JavaScript JIT off after a restart");
         break;
+      case 7:
+      case 8:
+        // The black theme, as the engine has it (said at every start too).
+        g_amoled = command == 7;
+        Settings::SetAmoled(g_amoled);
+        root_.Background(Brush(ChromeBg()));
+        splash_.Background(Brush(ChromeBg()));
+        ColorStatusBar();
+        break;
+      case 9:
+      case 10:
+        // The toolbar slid away as a page scrolled down, or came back.
+        SlideStatusBar(command == 10);
+        break;
     }
   };
   events.openPath = [this](std::wstring path, int32_t how) {
@@ -736,10 +746,16 @@ void MainPage::Start(std::wstring initialUrl) {
     // phone's theme, as Chrome for Android follows Android's.
     try {
       UISettings settings;
-      if (settings.GetColorValue(UIColorType::Background).R < 128) {
+      if (settings.GetColorValue(UIColorType::Background).R < 128 ||
+          Settings::Amoled()) {
         params.switches += " --force-dark-mode";
       }
     } catch (winrt::hresult_error const&) {
+    }
+    // The black theme from the first frame (the engine's setting is the
+    // one that counts; it tells the shell at start).
+    if (Settings::Amoled()) {
+      params.switches += " --vw-amoled";
     }
   }
   // The panel the engine presents into, before it starts.
@@ -914,7 +930,45 @@ void MainPage::RebuildTabList() {
   }
 }
 
+void MainPage::ColorStatusBar() {
+  // A view on Continuum's monitor may have no status bar to colour.
+  try {
+    if (ApiInformation::IsTypePresent(
+            L"Windows.UI.ViewManagement.StatusBar")) {
+      auto status = StatusBar::GetForCurrentView();
+      status.BackgroundColor(ChromeBg());
+      status.BackgroundOpacity(1.0);
+      status.ForegroundColor(ChromeFg());
+    }
+  } catch (winrt::hresult_error const& e) {
+    Log::Write(L"view: no status bar", std::wstring(e.message()));
+  }
+}
+
+void MainPage::SlideStatusBar(bool shown) {
+  // The room keeps its size: the status bar's band stays the chrome's
+  // colour (black in the black theme) rather than the page being resized
+  // each time the toolbar slides.
+  statusSlid_ = !shown;
+  try {
+    if (ApiInformation::IsTypePresent(
+            L"Windows.UI.ViewManagement.StatusBar")) {
+      auto status = StatusBar::GetForCurrentView();
+      if (shown) {
+        status.ShowAsync();
+      } else {
+        status.HideAsync();
+      }
+    }
+  } catch (winrt::hresult_error const&) {
+  }
+}
+
 void MainPage::ApplyVisibleBounds() {
+  // The status bar slid away with the toolbar: the padding stays.
+  if (statusSlid_) {
+    return;
+  }
   auto view = ApplicationView::GetForCurrentView();
   const auto visible = view.VisibleBounds();
   const auto window = Window::Current().Bounds();

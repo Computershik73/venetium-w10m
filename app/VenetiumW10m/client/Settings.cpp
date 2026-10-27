@@ -89,6 +89,14 @@ void Settings::SetJit(bool jit) {
   WriteInt(L"jit2", jit ? 1 : 0);
 }
 
+bool Settings::Amoled() {
+  return ReadInt(L"amoled", 0) != 0;
+}
+
+void Settings::SetAmoled(bool on) {
+  WriteInt(L"amoled", on ? 1 : 0);
+}
+
 bool Settings::HardwareGraphics() {
   return ReadInt(L"hardware_graphics", 1) != 0;
 }

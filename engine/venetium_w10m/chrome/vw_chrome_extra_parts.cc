@@ -10,6 +10,7 @@
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/ui/toolbar/app_menu_model.h"
 #include "chrome/browser/ui/views/toolbar/w10m_tab_switcher.h"
+#include "chrome/browser/ui/w10m_layout.h"
 #include "ui/display/win/dpi.h"
 #include "venetium_w10m/browser/vw_browser.h"
 #include "venetium_w10m/browser/vw_browser_main_parts.h"
@@ -17,6 +18,7 @@
 #include "venetium_w10m/browser/vw_frame_sink.h"
 #include "venetium_w10m/browser/vw_hang_watch.h"
 #include "venetium_w10m/browser/vw_platform.h"
+#include "venetium_w10m/chrome/vw_amoled.h"
 #include "venetium_w10m/chrome/vw_browser_native_widget.h"
 #include "venetium_w10m/chrome/vw_chrome_host.h"
 #include "venetium_w10m/chrome/vw_download_exporter.h"
@@ -61,6 +63,12 @@ void ShellCommand(int command) {
   }
 }
 
+// The toolbar slid away as a page scrolled down, or came back: the shell
+// hides or shows the status bar with it.
+void ToolbarShown(bool shown) {
+  ShellCommand(shown ? 10 : 9);
+}
+
 }  // namespace
 
 VwChromeExtraParts::VwChromeExtraParts() = default;
@@ -93,6 +101,9 @@ void VwChromeExtraParts::PreProfileInit() {
   AppMenuModel::SetW10mShellCommandHandler(&ShellCommand);
   AppMenuModel::SetW10mJitOn(VwEngine::Get()->config().jit);
   AppMenuModel::SetW10mPinAppHandler(&web_apps::PinToStart);
+  w10m::g_toolbar_shown_observer = &ToolbarShown;
+  // After Chrome's colour mixers (appended before this stage).
+  amoled::Install();
   // The tab count button beside the address bar opens Chrome for Android's
   // tab switcher.
   w10m::SetTabSwitcherOpener(&VwTabGrid::Show);
@@ -109,6 +120,7 @@ void VwChromeExtraParts::PostProfileInit(Profile* profile,
   // user finds it (VwDownloadExporter).
   if (is_initial_profile && profile) {
     VwDownloadExporter::Watch(profile->GetDownloadManager());
+    amoled::Watch(profile);
   }
 }
 
@@ -126,6 +138,7 @@ void VwChromeExtraParts::PostMainMessageLoopRun() {
   platform_util::SetW10mOpenHandler(nullptr);
   AppMenuModel::SetW10mShellCommandHandler(nullptr);
   AppMenuModel::SetW10mPinAppHandler(nullptr);
+  w10m::g_toolbar_shown_observer = nullptr;
   w10m::SetTabSwitcherOpener(nullptr);
   host_ = nullptr;
   browser_.reset();

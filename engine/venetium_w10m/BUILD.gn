@@ -128,6 +128,8 @@ shared_library("venetium_engine") {
     "//chrome/app/chrome_main_delegate.cc",
     "//chrome/app/chrome_main_delegate.h",
     "//chrome/app/startup_timestamps.h",
+    "chrome/vw_amoled.cc",
+    "chrome/vw_amoled.h",
     "chrome/vw_browser_native_widget.cc",
     "chrome/vw_browser_native_widget.h",
     "chrome/vw_chrome_browser_client.cc",

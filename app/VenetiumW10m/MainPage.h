@@ -55,6 +55,10 @@ class MainPage {
   void BuildUi();
   void BuildMenu();
   void WireEngineEvents();
+  // The status bar in the chrome's colours.
+  void ColorStatusBar();
+  // The status bar hidden (or shown again) with the toolbar.
+  void SlideStatusBar(bool shown);
   void ApplyVisibleBounds();
 
   void Navigate(std::wstring const& text);
@@ -90,6 +94,8 @@ class MainPage {
   int32_t selected_ = 0;
   bool editingAddress_ = false;
   bool fullscreen_ = false;
+  // The status bar hidden with the toolbar as a page scrolled down.
+  bool statusSlid_ = false;
   bool chromeUi_ = false;
   std::wstring pendingUrl_;
   double rawPerView_ = 1.0;

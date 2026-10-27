@@ -1,0 +1,386 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Wed, 28 Oct 2026 02:15:59 +0400
+Subject: [PATCH] Windows 10 Mobile: a black theme and the toolbar hidden while
+ a page scrolls
+
+---
+ chrome/browser/ui/BUILD.gn                    |  9 +++
+ chrome/browser/ui/browser_ui_prefs.cc         |  2 +
+ chrome/browser/ui/toolbar/app_menu_model.cc   | 24 +++++-
+ chrome/browser/ui/toolbar/app_menu_model.h    |  4 +
+ chrome/browser/ui/views/frame/browser_view.cc |  3 +-
+ .../top_controls_slide_controller_chromeos.cc | 74 +++++++++++++++++++
+ .../top_controls_slide_controller_chromeos.h  | 11 +++
+ chrome/browser/ui/w10m_layout.h               |  5 ++
+ chrome/browser/ui/w10m_prefs.h                |  9 +++
+ 9 files changed, 139 insertions(+), 2 deletions(-)
+
+diff --git a/chrome/browser/ui/BUILD.gn b/chrome/browser/ui/BUILD.gn
+index b669d4f3ee5f390b5b30ea4343b0cf082b72ac02..5c31ac96c5c64a9f9569ed88ab022f3b50f4c7b7 100644
+--- a/chrome/browser/ui/BUILD.gn
++++ b/chrome/browser/ui/BUILD.gn
+@@ -7,6 +7,7 @@ import("//build/config/compiler/compiler.gni")
+ import("//build/config/features.gni")
+ import("//build/config/ozone.gni")
+ import("//build/config/ui.gni")
++import("//build/config/win/w10m.gni")
+ import("//chrome/browser/buildflags.gni")
+ import("//chrome/common/features.gni")
+ import("//components/captive_portal/core/features.gni")
+@@ -3458,6 +3459,14 @@ static_library("ui") {
+   }
+ 
+   if (toolkit_views) {
++    if (is_w10m_target) {
++      # Windows 10 Mobile: the toolbar slides away as a page scrolls, as on
++      # Chrome for Android (ChromeOS's tablet-mode controller).
++      sources += [
++        "views/frame/top_controls_slide_controller_chromeos.cc",
++        "views/frame/top_controls_slide_controller_chromeos.h",
++      ]
++    }
+     sources += [
+       "bubble_anchor_util.h",
+       "toolbar_controller_util.cc",
+diff --git a/chrome/browser/ui/browser_ui_prefs.cc b/chrome/browser/ui/browser_ui_prefs.cc
+index bc63a8c7bc33d18558dfa331acb1d1e76167261a..481dde25c6541dc72ee780dbd9e8b6a6a6b6f445 100644
+--- a/chrome/browser/ui/browser_ui_prefs.cc
++++ b/chrome/browser/ui/browser_ui_prefs.cc
+@@ -140,6 +140,8 @@ void RegisterBrowserUserPrefs(user_prefs::PrefRegistrySyncable* registry) {
+   registry->RegisterBooleanPref(w10m::prefs::kAppThemeColors, true);
+   registry->RegisterBooleanPref(w10m::prefs::kDesktopSiteDefault, false);
+   registry->RegisterDictionaryPref(w10m::prefs::kDesktopSites);
++  registry->RegisterBooleanPref(w10m::prefs::kAmoled, false);
++  registry->RegisterBooleanPref(w10m::prefs::kHideToolbarOnScroll, false);
+ #else
+   registry->RegisterBooleanPref(prefs::kShowForwardButton, true,
+                                 pref_registration_flags);
+diff --git a/chrome/browser/ui/toolbar/app_menu_model.cc b/chrome/browser/ui/toolbar/app_menu_model.cc
+index 8825acdf08c4cf4e7b0ee6d3a604550166a67012..b05c5138eb968f7690c638daab6d0fe8d1af9fd5 100644
+--- a/chrome/browser/ui/toolbar/app_menu_model.cc
++++ b/chrome/browser/ui/toolbar/app_menu_model.cc
+@@ -1438,6 +1438,9 @@ void AppMenuModel::BuildPhoneMenu() {
+   shell->AddItem(kW10mShellCommandFirst + 3, u"Copy logs to Pictures");
+   shell->AddCheckItem(kW10mJitCommand, u"JavaScript JIT (restart)");
+   shell->AddCheckItem(kW10mDesktopByDefaultCommand, u"Desktop site by default");
++  shell->AddCheckItem(kW10mAmoledCommand, u"Black theme (AMOLED)");
++  shell->AddCheckItem(kW10mHideToolbarCommand,
++                      u"Hide the toolbar when scrolling");
+   sub_menus_.push_back(std::move(shell));
+   AddSubMenu(kW10mShellSubmenu, u"Windows 10 Mobile", sub_menus_.back().get());
+ }
+@@ -1471,6 +1474,16 @@ void AppMenuModel::ExecuteCommand(int command_id, int event_flags) {
+     }
+     return;
+   }
++  if (command_id == kW10mAmoledCommand ||
++      command_id == kW10mHideToolbarCommand) {
++    // The embedder and the toolbar's controller watch these.
++    const char* pref = command_id == kW10mAmoledCommand
++                           ? w10m::prefs::kAmoled
++                           : w10m::prefs::kHideToolbarOnScroll;
++    PrefService* prefs = browser_->profile()->GetPrefs();
++    prefs->SetBoolean(pref, !prefs->GetBoolean(pref));
++    return;
++  }
+   if (command_id == kW10mDesktopByDefaultCommand) {
+     PrefService* prefs = browser_->profile()->GetPrefs();
+     prefs->SetBoolean(w10m::prefs::kDesktopSiteDefault,
+@@ -2213,6 +2226,13 @@ bool AppMenuModel::IsCommandIdChecked(int command_id) const {
+     return browser_->profile()->GetPrefs()->GetBoolean(
+         w10m::prefs::kDesktopSiteDefault);
+   }
++  if (command_id == kW10mAmoledCommand) {
++    return browser_->profile()->GetPrefs()->GetBoolean(w10m::prefs::kAmoled);
++  }
++  if (command_id == kW10mHideToolbarCommand) {
++    return browser_->profile()->GetPrefs()->GetBoolean(
++        w10m::prefs::kHideToolbarOnScroll);
++  }
+ #endif
+   PrefService* prefs = browser_->profile()->GetPrefs();
+   if (command_id == IDC_SHOW_BOOKMARK_BAR) {
+@@ -2245,7 +2265,9 @@ bool AppMenuModel::IsCommandIdEnabled(int command_id) const {
+ #if defined(VENETIUM_W10M)
+   if (IsW10mShellCommand(command_id) || command_id == kW10mAppsCommand ||
+       command_id == kW10mAppColorsCommand ||
+-      command_id == kW10mDesktopByDefaultCommand) {
++      command_id == kW10mDesktopByDefaultCommand ||
++      command_id == kW10mAmoledCommand ||
++      command_id == kW10mHideToolbarCommand) {
+     return true;
+   }
+   if (command_id == kW10mBlockAdsCommand) {
+diff --git a/chrome/browser/ui/toolbar/app_menu_model.h b/chrome/browser/ui/toolbar/app_menu_model.h
+index 5aed2da089a3d7ea88bb3fa3201aeb0554c29d7c..246efa49d01de2b92ec659e6f061edc3f4378d14 100644
+--- a/chrome/browser/ui/toolbar/app_menu_model.h
++++ b/chrome/browser/ui/toolbar/app_menu_model.h
+@@ -218,6 +218,10 @@ class AppMenuModel : public ui::SimpleMenuModel,
+   // In the phone's submenu: sites in their desktop pages unless the user
+   // chose otherwise for one ("Desktop site" in the menu is per site).
+   static constexpr int kW10mDesktopByDefaultCommand = 40984;
++  // In the phone's submenu: the black theme; the toolbar hidden while a
++  // page scrolls down.
++  static constexpr int kW10mAmoledCommand = 40985;
++  static constexpr int kW10mHideToolbarCommand = 40986;
+   // Pins the app of |browser|'s window to Start: the embedder's tile.
+   using W10mPinAppHandler = void (*)(Browser* browser);
+   static void SetW10mPinAppHandler(W10mPinAppHandler handler);
+diff --git a/chrome/browser/ui/views/frame/browser_view.cc b/chrome/browser/ui/views/frame/browser_view.cc
+index 1321237aceb6b9c355089a21a85db27743558f35..f95512ffc056ee4ba89883720147c9a59d41f619 100644
+--- a/chrome/browser/ui/views/frame/browser_view.cc
++++ b/chrome/browser/ui/views/frame/browser_view.cc
+@@ -5,6 +5,7 @@
+ #include "chrome/browser/ui/views/frame/browser_view.h"
+ 
+ #if defined(VENETIUM_W10M)
++#include "chrome/browser/ui/views/frame/top_controls_slide_controller_chromeos.h"
+ #include "chrome/browser/ui/w10m_layout.h"
+ #endif
+ 
+@@ -4891,7 +4892,7 @@ void BrowserView::AddedToWidget() {
+ 
+   UpdateTabSearchBubbleHost();
+ 
+-#if BUILDFLAG(IS_CHROMEOS)
++#if BUILDFLAG(IS_CHROMEOS) || defined(VENETIUM_W10M)
+   // TopControlsSlideController must be initialized here in AddedToWidget()
+   // rather than Init() as it depends on the browser frame being ready.
+   // It also needs to be after the |toolbar_| had been initialized since it uses
+diff --git a/chrome/browser/ui/views/frame/top_controls_slide_controller_chromeos.cc b/chrome/browser/ui/views/frame/top_controls_slide_controller_chromeos.cc
+index 04fd90e29afcbcb4c01289d51f733f6fda8ba0d2..7d758d5eb2c817cd5004f88f253b34e32578731a 100644
+--- a/chrome/browser/ui/views/frame/top_controls_slide_controller_chromeos.cc
++++ b/chrome/browser/ui/views/frame/top_controls_slide_controller_chromeos.cc
+@@ -4,6 +4,12 @@
+ 
+ #include "chrome/browser/ui/views/frame/top_controls_slide_controller_chromeos.h"
+ 
++#if defined(VENETIUM_W10M)
++#include "chrome/browser/ui/w10m_layout.h"
++#include "chrome/browser/ui/w10m_prefs.h"
++#include "components/prefs/pref_service.h"
++#endif
++
+ #include <vector>
+ 
+ #include "base/auto_reset.h"
+@@ -54,10 +60,24 @@ void MaybeSetMasksToBounds(views::Widget* widget, bool masks_to_bounds) {
+ }
+ 
+ bool IsSpokenFeedbackEnabled() {
++#if defined(VENETIUM_W10M)
++  return false;
++#else
+   auto* accessibility_manager = ash::AccessibilityManager::Get();
+   return accessibility_manager &&
+          accessibility_manager->IsSpokenFeedbackEnabled();
++#endif
++}
++
++#if defined(VENETIUM_W10M)
++// Windows 10 Mobile: the toolbar slides when the user asked for it (the
++// phone's submenu), where ChromeOS slides it in tablet mode.
++bool W10mSlides(content::BrowserContext* context) {
++  Profile* profile = Profile::FromBrowserContext(context);
++  return profile && profile->GetPrefs()->GetBoolean(
++                        w10m::prefs::kHideToolbarOnScroll);
+ }
++#endif
+ 
+ // Based on the current status of |contents|, returns the browser top controls
+ // shown state constraints, which specifies if the top controls are allowed to
+@@ -69,7 +89,11 @@ cc::BrowserControlsState GetBrowserControlsStateConstraints(
+     content::WebContents* contents) {
+   DCHECK(contents);
+ 
++#if defined(VENETIUM_W10M)
++  if (!W10mSlides(contents->GetBrowserContext()) || contents->IsFullscreen() ||
++#else
+   if (!display::Screen::Get()->InTabletMode() || contents->IsFullscreen() ||
++#endif
+       contents->IsFocusedElementEditable() || contents->IsBeingDestroyed() ||
+       contents->IsCrashed() || IsSpokenFeedbackEnabled()) {
+     return cc::BrowserControlsState::kShown;
+@@ -312,6 +336,17 @@ TopControlsSlideControllerChromeOS::TopControlsSlideControllerChromeOS(
+ 
+   browser_view_->browser()->tab_strip_model()->AddObserver(this);
+ 
++#if defined(VENETIUM_W10M)
++  w10m_prefs_.Init(browser_view_->browser()->profile()->GetPrefs());
++  w10m_prefs_.Add(
++      w10m::prefs::kHideToolbarOnScroll,
++      base::BindRepeating(
++          [](TopControlsSlideControllerChromeOS* controller) {
++            controller->OnEnabledStateChanged(
++                controller->CanEnable(std::nullopt));
++          },
++          base::Unretained(this)));
++#else
+   auto* accessibility_manager = ash::AccessibilityManager::Get();
+   if (accessibility_manager) {
+     accessibility_status_subscription_ =
+@@ -319,6 +354,7 @@ TopControlsSlideControllerChromeOS::TopControlsSlideControllerChromeOS(
+             &TopControlsSlideControllerChromeOS::OnAccessibilityStatusChanged,
+             base::Unretained(this)));
+   }
++#endif
+ 
+   OnEnabledStateChanged(CanEnable(std::nullopt));
+ }
+@@ -349,6 +385,14 @@ void TopControlsSlideControllerChromeOS::SetShownRatio(
+   if (pause_updates_) {
+     return;
+   }
++#if defined(VENETIUM_W10M)
++  // The first time a page moves the toolbar (the renderer scrolled it).
++  static bool w10m_said = false;
++  if (!w10m_said && ratio < 1.f) {
++    w10m_said = true;
++    LOG(WARNING) << "W10M: a page moved the toolbar (shown " << ratio << ")";
++  }
++#endif
+ 
+   // Make sure the value tracked per tab is always updated even when sliding is
+   // disabled, so that we're always synchronized with the renderer.
+@@ -626,16 +670,35 @@ void TopControlsSlideControllerChromeOS::UpdateBrowserControlsStateShown(
+ 
+   const cc::BrowserControlsState current_state =
+       cc::BrowserControlsState::kShown;
++#if defined(VENETIUM_W10M)
++  // What the page is allowed, when it changes (the log of a phone).
++  static int w10m_last_constraints = -1;
++  if (static_cast<int>(constraints_state) != w10m_last_constraints) {
++    w10m_last_constraints = static_cast<int>(constraints_state);
++    LOG(WARNING) << "W10M: the toolbar "
++                 << (constraints_state == cc::BrowserControlsState::kBoth
++                         ? "may slide away on this page"
++                         : "stays on this page")
++                 << " (top controls " << browser_view_->GetTopControlsHeight()
++                 << " DIP)";
++  }
++#endif
+   web_contents->UpdateBrowserControlsState(constraints_state, current_state,
+                                            animate, std::nullopt);
+ }
+ 
+ bool TopControlsSlideControllerChromeOS::CanEnable(
+     std::optional<bool> fullscreen_state) const {
++#if defined(VENETIUM_W10M)
++  return W10mSlides(browser_view_->browser()->profile()) &&
++         !(fullscreen_state.value_or(browser_view_->IsFullscreen()));
++#else
+   return display::Screen::Get()->InTabletMode() &&
+          !(fullscreen_state.value_or(browser_view_->IsFullscreen()));
++#endif
+ }
+ 
++#if !defined(VENETIUM_W10M)
+ void TopControlsSlideControllerChromeOS::OnAccessibilityStatusChanged(
+     const ash::AccessibilityStatusEventDetails& event_details) {
+   if (event_details.notification_type !=
+@@ -645,11 +708,16 @@ void TopControlsSlideControllerChromeOS::OnAccessibilityStatusChanged(
+ 
+   UpdateBrowserControlsStateShown(/*web_contents=*/nullptr, /*animate=*/true);
+ }
++#endif
+ 
+ void TopControlsSlideControllerChromeOS::OnEnabledStateChanged(bool new_state) {
+   if (new_state == is_enabled_) {
+     return;
+   }
++#if defined(VENETIUM_W10M)
++  LOG(WARNING) << "W10M: the toolbar slides as pages scroll: "
++               << (new_state ? "on" : "off");
++#endif
+ 
+   is_enabled_ = new_state;
+ 
+@@ -819,6 +887,12 @@ void TopControlsSlideControllerChromeOS::OnEndSliding() {
+   // Setting the value directly (for example due to renderer crash), or a direct
+   // call from the renderer to set the shown ratio to a terminal value.
+   is_sliding_in_progress_ = false;
++#if defined(VENETIUM_W10M)
++  // The shell hides the status bar with the toolbar.
++  if (w10m::g_toolbar_shown_observer) {
++    w10m::g_toolbar_shown_observer(shown_ratio_ == 1.f);
++  }
++#endif
+ 
+   // At the end of sliding, we reset the transforms of all the attached
+   // NativeViewHostAuras' clipping windows' layers to identity. From now on, the
+diff --git a/chrome/browser/ui/views/frame/top_controls_slide_controller_chromeos.h b/chrome/browser/ui/views/frame/top_controls_slide_controller_chromeos.h
+index 520fd305d357db49f2423e9c3337f6767e86a7e6..8db87550f6cb162201565044ae40a2d904216077 100644
+--- a/chrome/browser/ui/views/frame/top_controls_slide_controller_chromeos.h
++++ b/chrome/browser/ui/views/frame/top_controls_slide_controller_chromeos.h
+@@ -10,7 +10,12 @@
+ 
+ #include "base/containers/flat_map.h"
+ #include "base/memory/raw_ptr.h"
++#if defined(VENETIUM_W10M)
++#include "base/callback_list.h"
++#include "components/prefs/pref_change_registrar.h"
++#else
+ #include "chrome/browser/ash/accessibility/accessibility_manager.h"
++#endif
+ #include "chrome/browser/ui/tabs/tab_strip_model_observer.h"
+ #include "chrome/browser/ui/views/frame/top_controls_slide_controller.h"
+ #include "ui/display/display_observer.h"
+@@ -103,8 +108,10 @@ class TopControlsSlideControllerChromeOS : public TopControlsSlideController,
+   // status of Chromevox, which when enabled, sliding the top-controls should
+   // be disabled. This is important for users who want to touch explore and need
+   // this to be consistent.
++#if !defined(VENETIUM_W10M)
+   void OnAccessibilityStatusChanged(
+       const ash::AccessibilityStatusEventDetails& event_details);
++#endif
+ 
+   void OnEnabledStateChanged(bool new_state);
+ 
+@@ -192,6 +199,10 @@ class TopControlsSlideControllerChromeOS : public TopControlsSlideController,
+       observed_tabs_;
+ 
+   base::CallbackListSubscription accessibility_status_subscription_;
++#if defined(VENETIUM_W10M)
++  // Windows 10 Mobile: the user's "Hide the toolbar when scrolling".
++  PrefChangeRegistrar w10m_prefs_;
++#endif
+ 
+   display::ScopedDisplayObserver display_observer_{this};
+ };
+diff --git a/chrome/browser/ui/w10m_layout.h b/chrome/browser/ui/w10m_layout.h
+index 0ed176b7c1f97d142abe6f059d6b1ed2204621d5..1b03d780a0db1f06657dce125fa3c46c6a3901d9 100644
+--- a/chrome/browser/ui/w10m_layout.h
++++ b/chrome/browser/ui/w10m_layout.h
+@@ -20,6 +20,11 @@ inline bool DesktopLayout() {
+   return desktop;
+ }
+ 
++// Told when the toolbar has slid away as a page scrolled down (false) and
++// when it is back (true): the shell hides the status bar with it. Set by
++// the embedder.
++inline void (*g_toolbar_shown_observer)(bool shown) = nullptr;
++
+ }  // namespace w10m
+ 
+ #endif  // CHROME_BROWSER_UI_W10M_LAYOUT_H_
+diff --git a/chrome/browser/ui/w10m_prefs.h b/chrome/browser/ui/w10m_prefs.h
+index 704a8ce5e147c622abd5a436614c22958c36ff06..8c1fc53327d87b02ca2d85797a263ec19810126b 100644
+--- a/chrome/browser/ui/w10m_prefs.h
++++ b/chrome/browser/ui/w10m_prefs.h
+@@ -19,6 +19,15 @@ inline constexpr char kAppThemeColors[] = "w10m.app_theme_colors";
+ inline constexpr char kDesktopSiteDefault[] = "w10m.desktop_site_default";
+ inline constexpr char kDesktopSites[] = "w10m.desktop_sites";
+ 
++// A black theme for an AMOLED screen: the browser's interface black, its
++// icons and text light grey (the embedder's colour mixer; the shell keeps a
++// copy for its own colours before the engine starts).
++inline constexpr char kAmoled[] = "w10m.amoled";
++
++// The toolbar slides away as a page scrolls down and back as it scrolls up,
++// as on Chrome for Android (with it the shell hides the status bar).
++inline constexpr char kHideToolbarOnScroll[] = "w10m.hide_toolbar_on_scroll";
++
+ }  // namespace w10m::prefs
+ 
+ #endif  // CHROME_BROWSER_UI_W10M_PREFS_H_
