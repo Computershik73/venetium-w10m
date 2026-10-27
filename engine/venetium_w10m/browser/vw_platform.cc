@@ -172,13 +172,31 @@ void VwScreen::Update(const gfx::Size& screen_pixels, float scale) {
   scale_ = scale > 0 ? scale : 1.0f;
   display::Display display(kDisplayId);
   display.SetScaleAndBounds(scale_, gfx::Rect(screen_pixels_));
+  // The work area is the browser's room, not the whole screen: a menu or a
+  // submenu placed to fit the screen went under the navigation bar.
+  if (!room_pixels_.IsEmpty()) {
+    gfx::Rect work(gfx::ScaleToFlooredSize(room_pixels_, 1.0f / scale_));
+    work.Intersect(display.bounds());
+    if (!work.IsEmpty()) {
+      display.set_work_area(work);
+    }
+  }
   display.set_touch_support(display::Display::TouchSupport::AVAILABLE);
   display.set_accelerometer_support(
       display::Display::AccelerometerSupport::UNAVAILABLE);
   ProcessDisplayChanged(display, /*is_primary=*/true);
-  NoteF("screen: %dx%d px at %.2f -> %dx%d dip", screen_pixels_.width(),
-        screen_pixels_.height(), scale_, display.bounds().width(),
-        display.bounds().height());
+  NoteF("screen: %dx%d px at %.2f -> %dx%d dip, work area %dx%d",
+        screen_pixels_.width(), screen_pixels_.height(), scale_,
+        display.bounds().width(), display.bounds().height(),
+        display.work_area().width(), display.work_area().height());
+}
+
+void VwScreen::SetRoom(const gfx::Size& room_pixels) {
+  if (room_pixels.IsEmpty() || room_pixels == room_pixels_) {
+    return;
+  }
+  room_pixels_ = room_pixels;
+  Update(screen_pixels_, scale_);
 }
 
 display::Display VwScreen::GetDisplayNearestWindow(
@@ -309,6 +327,7 @@ VwPlatform::VwPlatform(const gfx::Size& content_pixels,
     screen_ = owned_screen_.get();
     display::Screen::SetScreenInstance(screen_);
   }
+  screen_->SetRoom(content_pixels);
 
   const gfx::Rect bounds(content_pixels.IsEmpty() ? gfx::Size(720, 1100)
                                                   : content_pixels);
@@ -460,6 +479,7 @@ void VwPlatform::Resize(const gfx::Size& content_pixels) {
   // reads it from the panel.
   PanelHost::Get()->SetSize(content_pixels);
   host_->SetBoundsInPixels(gfx::Rect(content_pixels));
+  screen_->SetRoom(content_pixels);
 }
 
 void VwPlatform::SetScreen(const gfx::Size& screen_pixels) {

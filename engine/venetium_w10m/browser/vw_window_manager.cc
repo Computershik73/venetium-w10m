@@ -33,6 +33,10 @@ namespace venetium_w10m {
 
 namespace {
 
+// How far past the screen a popup's, a menu's or a bubble's own shadow may
+// reach (an elevation-16 bubble's is 16 DIP, 28 below), in DIP.
+constexpr int kShadowRoom = 48;
+
 bool FillsTheScreen(const aura::Window* window) {
   switch (window->GetProperty(aura::client::kShowStateKey)) {
     case ui::mojom::WindowShowState::kMaximized:
@@ -48,7 +52,8 @@ bool FillsTheScreen(const aura::Window* window) {
 // Sizes a container's windows. kFill: every child is the container's size
 // (the containers under the root). kWindows: a maximized or fullscreen child
 // is the container's size, and any other is kept on it -- a dialog wider
-// than a phone is made narrower rather than cut off.
+// than a phone is made narrower rather than cut off -- but for the shadow of
+// a popup, a menu or a bubble.
 class VwWindowManager::Layout : public aura::LayoutManager,
                                 public aura::WindowObserver {
  public:
@@ -123,7 +128,16 @@ class VwWindowManager::Layout : public aura::LayoutManager,
       return area;
     }
     gfx::Rect bounds = requested;
-    bounds.AdjustToFit(area);
+    // A popup, a menu or a bubble draws its own shadow around it and places
+    // itself so that what it shows lines up with what it belongs to: the
+    // address bar's suggestions start 22 DIP above the address bar, past the
+    // top of the screen. Only that shadow may leave the screen; kept wholly
+    // on it, the suggestions sat 18 DIP below the address bar and hid it.
+    gfx::Rect room = area;
+    if (child->GetType() != aura::client::WINDOW_TYPE_NORMAL) {
+      room.Inset(-kShadowRoom);
+    }
+    bounds.AdjustToFit(room);
     return bounds;
   }
 

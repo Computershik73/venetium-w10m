@@ -61,6 +61,10 @@ class VwScreen : public display::ScreenBase {
   ~VwScreen() override;
 
   void Update(const gfx::Size& screen_pixels, float scale);
+  // The room the browser has on the screen (below the status bar, above the
+  // navigation bar): the display's work area, which menus and bubbles keep
+  // to.
+  void SetRoom(const gfx::Size& room_pixels);
 
   // display::Screen:
   display::Display GetDisplayNearestWindow(
@@ -68,6 +72,7 @@ class VwScreen : public display::ScreenBase {
 
  private:
   gfx::Size screen_pixels_;
+  gfx::Size room_pixels_;
   float scale_;
 };
 

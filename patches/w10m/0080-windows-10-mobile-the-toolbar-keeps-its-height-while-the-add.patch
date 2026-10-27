@@ -1,0 +1,27 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Wed, 28 Oct 2026 01:41:55 +0400
+Subject: [PATCH] Windows 10 Mobile: the toolbar keeps its height while the
+ address bar is focused
+
+---
+ chrome/browser/ui/views/toolbar/toolbar_view.cc | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/chrome/browser/ui/views/toolbar/toolbar_view.cc b/chrome/browser/ui/views/toolbar/toolbar_view.cc
+index 7a97ae56a6fdab3208b28c9952ab1f98a74514c5..b196a234cd37db966c1fb5f1da0f5976a57720ee 100644
+--- a/chrome/browser/ui/views/toolbar/toolbar_view.cc
++++ b/chrome/browser/ui/views/toolbar/toolbar_view.cc
+@@ -1533,6 +1533,12 @@ gfx::Size ToolbarView::CalculatePreferredSize(
+                                         GetBackForwardButtonSize().height()) +
+                                layout_manager_->interior_margin().height();
+         size.SetToMin({size.width(), max_height});
++#if defined(VENETIUM_W10M)
++        // Windows 10 Mobile: the same height while the address bar spans the
++        // toolbar with its buttons hidden; else the page below jumped 12 DIP
++        // at every focus and blur of the address bar.
++        size.set_height(max_height);
++#endif
+       }
+   }
+   size.set_height(size.height() * size_animation_.GetCurrentValue());
