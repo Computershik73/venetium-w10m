@@ -202,6 +202,20 @@ void VwDialogs::SaveFile(const std::string& suggested_name,
   events.file_chooser(id, suggested_name.c_str(), 0, 1);
 }
 
+void VwDialogs::PickFolder(PickedCallback chosen) {
+  const venetium_w10m_events events = VwEngine::Get()->events();
+  if (!events.file_chooser) {
+    std::move(chosen).Run({});
+    return;
+  }
+  const int32_t id = next_id_++;
+  files_[id] = PendingFiles{nullptr, nullptr,
+                            blink::mojom::FileChooserParams::Mode::kUploadFolder,
+                            std::move(chosen)};
+  NoteF("files %d: Chrome asks for a folder", id);
+  events.file_chooser(id, "", 0, 2);
+}
+
 void VwDialogs::ForgetContents(content::WebContents* web_contents) {
   CancelDialogs(web_contents, true);
   for (auto it = files_.begin(); it != files_.end();) {

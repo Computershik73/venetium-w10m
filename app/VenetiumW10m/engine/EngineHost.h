@@ -81,8 +81,10 @@ struct Events {
   std::function<void(int32_t id, int32_t kind, std::wstring message,
                      std::wstring defaultText)>
       dialog;
+  // mode: 0 open, 1 save (accept is the name offered), 2 a folder (where
+  // downloads go).
   std::function<void(int32_t id, std::wstring accept, bool multiple,
-                     bool save)>
+                     int32_t mode)>
       fileChooser;
   std::function<void(std::wstring text)> clipboardSet;
   // Chrome's menu asked for something of the shell's (1 About, 2 the log,
@@ -92,6 +94,8 @@ struct Events {
   // folder: 0 open the file, 1 show the folder, 2 show the folder the file
   // is in.
   std::function<void(std::wstring path, int32_t folder)> openPath;
+  // A download started (the name of its file).
+  std::function<void(std::wstring name)> downloadStarted;
   // venetium_w10m_run returned: the engine has ended, for good.
   std::function<void(int32_t code)> engineStopped;
 };
@@ -152,6 +156,7 @@ class EngineHost {
   static void OnClipboardSet(const char* text);
   static void OnShellCommand(int32_t command);
   static void OnOpenPath(const char* path, int32_t folder);
+  static void OnDownloadStarted(const char* name);
 
   HMODULE module_ = nullptr;
   Api api_;

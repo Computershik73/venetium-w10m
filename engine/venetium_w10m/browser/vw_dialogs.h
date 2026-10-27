@@ -72,6 +72,10 @@ class VwDialogs : public content::JavaScriptDialogManager {
   // write -- the picked file, or a file in the app's staging folder that the
   // shell copies into the picked one when the download finishes -- or none.
   void SaveFile(const std::string& suggested_name, PickedCallback chosen);
+  // A folder (Chrome's download location): the shell's folder picker.
+  // |chosen| hears the folder's path, which the shell remembers as where
+  // downloads go, or none.
+  void PickFolder(PickedCallback chosen);
 
   // A tab is going away: whatever it asked is cancelled.
   void ForgetContents(content::WebContents* web_contents);

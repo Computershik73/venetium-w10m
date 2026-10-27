@@ -110,8 +110,24 @@ void VwSelectFileDialog::SelectFileImpl(
                          weak_factory_.GetWeakPtr(), false));
       return;
     }
+    case SELECT_FOLDER:
+    case SELECT_EXISTING_FOLDER: {
+      // Chrome's download location: the shell's folder picker. The shell
+      // moves finished downloads there (Chrome keeps writing its staging
+      // folder: DownloadPrefs under W10M).
+      VwBrowser* browser = VwEngine::Get()->browser();
+      if (!browser) {
+        answer_later(base::BindOnce(&VwSelectFileDialog::Cancelled,
+                                    weak_factory_.GetWeakPtr()));
+        return;
+      }
+      running_ = true;
+      browser->dialogs()->PickFolder(base::BindOnce(
+          &VwSelectFileDialog::Picked, weak_factory_.GetWeakPtr(), false));
+      return;
+    }
     default:
-      Note("files: a folder cannot be chosen here");
+      Note("files: a folder to upload cannot be chosen here");
       answer_later(base::BindOnce(&VwSelectFileDialog::Cancelled,
                                   weak_factory_.GetWeakPtr()));
       return;

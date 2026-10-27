@@ -57,6 +57,14 @@ void VwDownloadExporter::OnDownloadUpdated(download::DownloadItem* item) {
     said.target = true;
     NoteF("download: going to %s",
           item->GetTargetFilePath().AsUTF8Unsafe().c_str());
+    // The phone has no downloads button in the toolbar: the shell says it
+    // started. Not for the history's downloads, loaded at start.
+    const venetium_w10m_events events = VwEngine::Get()->events();
+    if (events.download_started &&
+        item->GetState() == download::DownloadItem::IN_PROGRESS) {
+      events.download_started(
+          item->GetTargetFilePath().BaseName().AsUTF8Unsafe().c_str());
+    }
   }
   const int danger = static_cast<int>(item->GetDangerType());
   if (danger != said.danger) {

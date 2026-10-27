@@ -543,8 +543,25 @@ void MainPage::WireEngineEvents() {
     ShowDialog(id, kind, message, defaultText);
   };
   events.fileChooser = [this](int32_t id, std::wstring accept, bool multiple,
-                              bool save) {
-    ChooseFiles(id, accept, multiple, save);
+                              int32_t mode) {
+    if (mode == 2) {
+      // Chrome's Settings, Downloads, Location: where downloads go.
+      PickDownloadsFolder([this, id](StorageFolder folder) {
+        std::wstring path;
+        if (folder) {
+          path = client::SetDownloadsFolder(folder);
+          ShowNotice(L"Downloads go to " + path);
+        }
+        if (Api().file_reply) Api().file_reply(id, Narrow(path).c_str());
+      });
+      return;
+    }
+    ChooseFiles(id, accept, multiple, mode == 1);
+  };
+  events.downloadStarted = [this](std::wstring name) {
+    // A phone's toolbar has no downloads button: this is how one is seen
+    // to start.
+    ShowNotice(L"Downloading " + name);
   };
   events.clipboardSet = [](std::wstring text) {
     DataPackage package;
@@ -585,8 +602,27 @@ void MainPage::WireEngineEvents() {
                           : L"open the folder of",
                path);
     // A download copied out of the staging folder: the copy is the one the
-    // user knows, so that is the one opened or shown.
-    if (how != 1 && client::OpenDownloadCopy(path, how == 2)) {
+    // user knows, so that is the one opened or shown. Its folder is shown
+    // when it is one the user picked; Downloads\Venetium may not be opened
+    // by an app, so the user is asked to pick the folder downloads go to.
+    auto ask_for_folder = [this]() {
+      PickDownloadsFolder([this](StorageFolder folder) {
+        if (!folder) {
+          return;
+        }
+        ShowNotice(L"Downloads go to " + client::SetDownloadsFolder(folder));
+        client::ShowDownloadsFolder();
+      });
+    };
+    if (how != 1 && client::OpenDownloadCopy(path, how == 2, ask_for_folder)) {
+      return;
+    }
+    // Chrome's "open the downloads folder" names its staging folder: the
+    // folder downloads go to is the one meant.
+    if (how == 1 && client::IsStaging(path)) {
+      if (!client::ShowDownloadsFolder()) {
+        ask_for_folder();
+      }
       return;
     }
     if (how == 2) {
@@ -957,6 +993,22 @@ void MainPage::ShowDialog(int32_t id, int32_t kind, std::wstring const& message,
         input ? Narrow(std::wstring(input.Text())) : std::string();
     if (Api().dialog_reply) Api().dialog_reply(id, accepted ? 1 : 0, text.c_str());
   }(this, id, kind, message, defaultText);
+}
+
+void MainPage::PickDownloadsFolder(
+    std::function<void(StorageFolder)> then) {
+  [](std::function<void(StorageFolder)> then) -> winrt::fire_and_forget {
+    StorageFolder folder{nullptr};
+    try {
+      FolderPicker picker;
+      picker.SuggestedStartLocation(PickerLocationId::Downloads);
+      picker.FileTypeFilter().Append(L"*");
+      folder = co_await picker.PickSingleFolderAsync();
+    } catch (winrt::hresult_error const& e) {
+      Log::Write(L"files: folder picker failed", std::wstring(e.message()));
+    }
+    then(folder);
+  }(std::move(then));
 }
 
 void MainPage::ChooseFiles(int32_t id, std::wstring const& accept,

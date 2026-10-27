@@ -153,7 +153,7 @@ bool EngineHost::Load(winrt::Windows::UI::Core::CoreDispatcher const& dispatcher
       &EngineHost::OnDownloadDone, &EngineHost::OnDialog,
       &EngineHost::OnPermission,  &EngineHost::OnFileChooser,
       &EngineHost::OnClipboardSet, &EngineHost::OnShellCommand,
-      &EngineHost::OnOpenPath,
+      &EngineHost::OnOpenPath,     &EngineHost::OnDownloadStarted,
   };
   if (api_.set_event_sink) {
     api_.set_event_sink(&kEvents);
@@ -267,7 +267,7 @@ void EngineHost::OnFileChooser(int32_t id, const char* accept, int32_t multiple,
                                int32_t mode) {
   Get().Post([id, accept = Widen(accept), multiple, mode]() {
     if (Get().events_.fileChooser) {
-      Get().events_.fileChooser(id, accept, multiple != 0, mode == 1);
+      Get().events_.fileChooser(id, accept, multiple != 0, mode);
     } else if (Get().api_.file_reply) {
       Get().api_.file_reply(id, "");
     }
@@ -289,6 +289,12 @@ void EngineHost::OnShellCommand(int32_t command) {
 void EngineHost::OnOpenPath(const char* path, int32_t folder) {
   Get().Post([path = Widen(path), folder]() {
     if (Get().events_.openPath) Get().events_.openPath(path, folder);
+  });
+}
+
+void EngineHost::OnDownloadStarted(const char* name) {
+  Get().Post([name = Widen(name)]() {
+    if (Get().events_.downloadStarted) Get().events_.downloadStarted(name);
   });
 }
 

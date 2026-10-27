@@ -1,0 +1,109 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Wed, 28 Oct 2026 01:47:30 +0400
+Subject: [PATCH] Windows 10 Mobile: downloads without the toolbar button, a
+ downloads page at a phone's width, Downloads in an app's menu, the picked
+ download folder kept for the shell
+
+---
+ .../download/bubble/download_bubble_prefs.cc     |  7 +++++++
+ chrome/browser/download/download_prefs.cc        | 10 ++++++++++
+ chrome/browser/resources/downloads/manager.css   | 16 ++++++++++++++++
+ .../ui/web_applications/web_app_menu_model.cc    |  6 ++++++
+ 4 files changed, 39 insertions(+)
+
+diff --git a/chrome/browser/download/bubble/download_bubble_prefs.cc b/chrome/browser/download/bubble/download_bubble_prefs.cc
+index e1ad7a503c462090d2fe8588b6ec4994adbf9254..9aa996b90322b2c94117670c5e0d52a355a22409 100644
+--- a/chrome/browser/download/bubble/download_bubble_prefs.cc
++++ b/chrome/browser/download/bubble/download_bubble_prefs.cc
+@@ -18,11 +18,18 @@ bool ShouldShowDownloadBubble(Profile* profile) {
+   if (headless::IsHeadlessMode()) {
+     return false;
+   }
++#if defined(VENETIUM_W10M)
++  // Windows 10 Mobile: a phone's toolbar has no room for the downloads
++  // button, nor its screen for the bubble; the app tells of each download
++  // as it starts and ends, and the menu lists them.
++  return false;
++#else
+   // If the download UI is disabled by at least one extension, do not show the
+   // bubble and the toolbar icon.
+   return DownloadCoreServiceFactory::GetForBrowserContext(
+              profile->GetOriginalProfile())
+       ->IsDownloadUiEnabled();
++#endif
+ }
+ 
+ bool IsDownloadBubblePartialViewEnabled(Profile* profile) {
+diff --git a/chrome/browser/download/download_prefs.cc b/chrome/browser/download/download_prefs.cc
+index cd268567f1981e15f71c51ae063e4e96f0189bb3..e80d633c1acdaee4a7af6595d4b78fe65e8e32a4 100644
+--- a/chrome/browser/download/download_prefs.cc
++++ b/chrome/browser/download/download_prefs.cc
+@@ -11,6 +11,7 @@
+ #include <vector>
+ 
+ #include "base/check.h"
++#include "base/environment.h"
+ #include "base/feature_list.h"
+ #include "base/files/file_util.h"
+ #include "base/functional/bind.h"
+@@ -624,6 +625,15 @@ base::FilePath DownloadPrefs::SanitizeDownloadTargetPath(
+   // Fall back to the default download directory for all other paths.
+   return GetDefaultDownloadDirectoryForProfile();
+ #else
++#if defined(VENETIUM_W10M)
++  // Windows 10 Mobile: where the app may not write the phone's folders by
++  // path (no root), Chrome downloads into the app's staging folder, the
++  // default; the folder picked in Settings is the shell's, which moves each
++  // finished download into it.
++  if (base::Environment::Create()->HasVar("VENETIUM_DOWNLOAD_STAGING")) {
++    return GetDefaultDownloadDirectoryForProfile();
++  }
++#endif
+   // If the stored download directory is an absolute path, we presume it's
+   // correct; there's not really much more validation we can do here.
+   if (path.IsAbsolute())
+diff --git a/chrome/browser/resources/downloads/manager.css b/chrome/browser/resources/downloads/manager.css
+index 5d92f27829e9bf3dd0298d5440a7615eb0ab132c..2ab5603755d4cb994d1416002700f7f9f4597008 100644
+--- a/chrome/browser/resources/downloads/manager.css
++++ b/chrome/browser/resources/downloads/manager.css
+@@ -49,6 +49,22 @@ cr-toast-manager {
+     var(--downloads-card-width) + 2 * var(--downloads-card-margin));
+ }
+ 
++/* A phone's width (Windows 10 Mobile: 360 DIP): the cards fill it, with no
++ * floor that makes the page scroll sideways. */
++@media (max-width: 600px) {
++  downloads-item,
++  #downloadsList,
++  cr-toast-manager {
++    --downloads-card-margin: 8px;
++    --downloads-card-width: calc(100% - 16px);
++  }
++
++  #downloadsList,
++  managed-footnote {
++    min-width: 0;
++  }
++}
++
+ #no-downloads,
+ #downloadsList {
+   flex: 1;
+diff --git a/chrome/browser/ui/web_applications/web_app_menu_model.cc b/chrome/browser/ui/web_applications/web_app_menu_model.cc
+index e957fa0ccc3c4f38521f24b78ef444dc379e42c0..050ccb604f4c2acc429f0e406af73bad2c93c458 100644
+--- a/chrome/browser/ui/web_applications/web_app_menu_model.cc
++++ b/chrome/browser/ui/web_applications/web_app_menu_model.cc
+@@ -207,6 +207,12 @@ void WebAppMenuModel::Build() {
+                                    features::IsRoundedIconsEnabled()
+                                        ? kLinkIcon
+                                        : kLinkChromeRefreshOldIcon);
++#if defined(VENETIUM_W10M)
++  // Windows 10 Mobile: an app's downloads are the browser's, and a phone
++  // has no other way to them from an app's window.
++  AddItemWithStringIdAndVectorIcon(this, IDC_SHOW_DOWNLOADS,
++                                   IDS_SHOW_DOWNLOADS, kDownloadIcon);
++#endif
+ 
+   if (ShouldAllowOpenInChrome(browser())) {
+     AddItemWithStringIdAndVectorIcon(

@@ -10,6 +10,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <memory>
 #include <string>
@@ -56,6 +57,10 @@ class MainPage {
   void SetFullscreen(bool on);
   void ShowDialog(int32_t id, int32_t kind, std::wstring const& message,
                   std::wstring const& defaultText);
+  // Asks for the folder downloads are to go to; |then| hears it (nullptr
+  // when none was picked).
+  void PickDownloadsFolder(
+      std::function<void(winrt::Windows::Storage::StorageFolder)> then);
   void ChooseFiles(int32_t id, std::wstring const& accept, bool multiple,
                    bool save);
   void ShowNotice(std::wstring const& text);

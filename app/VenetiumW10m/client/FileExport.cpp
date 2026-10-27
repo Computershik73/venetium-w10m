@@ -48,6 +48,9 @@ bool UnderStaging(std::wstring const& path) {
          Lower(path.substr(0, staging.size() + 1)) == Lower(staging + L"\\");
 }
 
+// The folder picked for downloads, in the future access list.
+constexpr wchar_t kDownloadsFolder[] = L"downloads-folder";
+
 // Future access list tokens, named after the path they are for: "x" a
 // download's copy, by the staged path; "s" the file picked in a Save As, by
 // the staged path handed to the engine instead.
@@ -234,6 +237,17 @@ void ExportDownload(std::wstring path,
         target = StorageApplicationPermissions::FutureAccessList()
                      .GetFileAsync(winrt::hstring(save_as))
                      .get();
+      } else if (Remembered(kDownloadsFolder)) {
+        // The folder picked for downloads.
+        step = L"creating the file in the folder picked for downloads";
+        StorageFolder folder =
+            StorageApplicationPermissions::FutureAccessList()
+                .GetFolderAsync(winrt::hstring(kDownloadsFolder))
+                .get();
+        target = folder
+                     .CreateFileAsync(staged.Name(),
+                                      CreationCollisionOption::GenerateUniqueName)
+                     .get();
       } else {
         // The phone's Downloads: the system puts an app's files in a folder
         // named after it, Downloads\Venetium.
@@ -285,15 +299,17 @@ void ExportDownload(std::wstring path,
   }).detach();
 }
 
-bool OpenDownloadCopy(std::wstring const& path, bool reveal) {
+bool OpenDownloadCopy(std::wstring const& path, bool reveal,
+                      std::function<void()> no_folder) {
   const std::wstring token = Token(L'x', path);
   if (!Remembered(token)) {
     return false;
   }
   StorageApplicationPermissions::FutureAccessList()
       .GetFileAsync(winrt::hstring(token))
-      .Completed([path, reveal](IAsyncOperation<StorageFile> const& op,
-                                AsyncStatus status) {
+      .Completed([path, reveal, no_folder](
+                     IAsyncOperation<StorageFile> const& op,
+                     AsyncStatus status) {
         if (status != AsyncStatus::Completed) {
           Log::Write(L"open: the copy of " + path + L" is gone");
           return;
@@ -304,19 +320,76 @@ bool OpenDownloadCopy(std::wstring const& path, bool reveal) {
           LaunchFile(copy, where);
           return;
         }
-        // Its folder, when the app may see it; else the file itself.
+        // Its folder, when the app may see it (one picked for downloads);
+        // else the shell asks for a folder to keep downloads in.
         copy.GetParentAsync().Completed(
-            [copy, where](IAsyncOperation<StorageFolder> const& parent_op,
-                          AsyncStatus parent_status) {
+            [copy, where, no_folder](
+                IAsyncOperation<StorageFolder> const& parent_op,
+                AsyncStatus parent_status) {
               StorageFolder parent = parent_status == AsyncStatus::Completed
                                          ? parent_op.GetResults()
                                          : nullptr;
               if (parent) {
                 LaunchFolder(parent, std::wstring(parent.Path()));
-              } else {
-                LaunchFile(copy, where);
+                return;
               }
+              Log::Write(L"open: the folder of " + where +
+                         L" may not be shown");
+              if (!no_folder) {
+                LaunchFile(copy, where);
+                return;
+              }
+              winrt::Windows::ApplicationModel::Core::CoreApplication::
+                  MainView()
+                      .Dispatcher()
+                      .RunAsync(
+                          winrt::Windows::UI::Core::CoreDispatcherPriority::
+                              Normal,
+                          [no_folder]() { no_folder(); });
             });
+      });
+  return true;
+}
+
+bool IsStaging(std::wstring const& path) {
+  const std::wstring staging = DownloadStaging();
+  std::wstring trimmed = path;
+  while (!trimmed.empty() && trimmed.back() == L'\\') {
+    trimmed.pop_back();
+  }
+  return !staging.empty() && Lower(trimmed) == Lower(staging);
+}
+
+std::wstring SetDownloadsFolder(StorageFolder const& folder) {
+  try {
+    StorageApplicationPermissions::FutureAccessList().AddOrReplace(
+        winrt::hstring(kDownloadsFolder), folder);
+  } catch (winrt::hresult_error const& error) {
+    Log::Write(L"files: could not remember the downloads folder",
+               std::wstring(error.message()));
+  }
+  std::wstring where(folder.Path());
+  if (where.empty()) {
+    where = std::wstring(folder.Name());
+  }
+  Log::Write(L"files: downloads go to " + where);
+  return where;
+}
+
+bool ShowDownloadsFolder() {
+  if (!Remembered(kDownloadsFolder)) {
+    return false;
+  }
+  StorageApplicationPermissions::FutureAccessList()
+      .GetFolderAsync(winrt::hstring(kDownloadsFolder))
+      .Completed([](IAsyncOperation<StorageFolder> const& op,
+                    AsyncStatus status) {
+        if (status != AsyncStatus::Completed) {
+          Log::Write(L"open: the folder picked for downloads is gone");
+          return;
+        }
+        StorageFolder folder = op.GetResults();
+        LaunchFolder(folder, std::wstring(folder.Path()));
       });
   return true;
 }

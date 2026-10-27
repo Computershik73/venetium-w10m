@@ -224,8 +224,10 @@ typedef struct {
   // 4 notifications. Answer with venetium_w10m_permission_reply.
   void (*permission)(int32_t id, int32_t kind, const char* origin);
   // <input type=file>: accept is the accept attribute, multiple 0/1, mode 0
-  // open, 1 save (Chrome's Save As: accept is then the file name offered).
-  // Answer with venetium_w10m_file_reply.
+  // open, 1 save (Chrome's Save As: accept is then the file name offered),
+  // 2 a folder (Chrome's download location: the shell remembers it as where
+  // downloads go and answers with its path). Answer with
+  // venetium_w10m_file_reply.
   void (*file_chooser)(int32_t id, const char* accept, int32_t multiple,
                        int32_t mode);
   // Something was copied to the clipboard by a page (UTF-8 text).
@@ -237,6 +239,8 @@ typedef struct {
   // app that takes it), a folder to be shown (folder 1), or the folder a file
   // is in (folder 2: "show in folder", the file's path). UTF-8 path.
   void (*open_path)(const char* path, int32_t folder);
+  // A download started: the name of its file (UTF-8).
+  void (*download_started)(const char* name);
 } venetium_w10m_events;
 
 VW_EXPORT void venetium_w10m_set_event_sink(const venetium_w10m_events* sink);
