@@ -6,6 +6,8 @@ Usage:
     python tools/phone.py logs [--dir DIR]       # venetium.log, venetium-previous.log, chromium.log
     python tools/phone.py mem [--watch SEC] [--top N]
                                                  # memory of the browser, the phone and the GPU
+    python tools/phone.py launch                 # start the browser on the phone
+    python tools/phone.py stop                   # end it (its logs can then be read)
 
 Over Wi-Fi, name the phone's portal (Settings > Update & security > For
 developers > Device Portal shows it), before the command:
@@ -13,6 +15,7 @@ developers > Device Portal shows it), before the command:
 or set VW_PORTAL (or GECKO_W10M_PORTAL). With two phones on USB only one gets the USB port.
 """
 import argparse
+import base64
 import glob
 import http.cookiejar
 import json
@@ -95,6 +98,30 @@ def package():
         if p["PackageFullName"].startswith(PACKAGE_PREFIX):
             return p
     sys.exit("the browser is not installed on the phone")
+
+
+def _b64(text):
+    return base64.b64encode(text.encode("utf-8")).decode("ascii")
+
+
+def cmd_launch(_):
+    p = package()
+    get("/api/os/machinename")  # for the CSRF cookie
+    request("/api/taskmanager/app", data=b"", method="POST",
+            appid=_b64(p["PackageRelativeId"]),
+            package=_b64(p["PackageFullName"])).close()
+    print("started", p["PackageFullName"])
+
+
+def cmd_stop(_):
+    p = package()
+    get("/api/os/machinename")  # for the CSRF cookie
+    try:
+        request("/api/taskmanager/app", method="DELETE",
+                package=_b64(p["PackageFullName"])).close()
+        print("stopped", p["PackageFullName"])
+    except urllib.error.HTTPError as e:
+        print("stop:", e.code, "(not running?)")
 
 
 def cmd_version(_):
@@ -241,11 +268,13 @@ def main():
     mp = sub.add_parser("mem")
     mp.add_argument("--watch", type=float, default=0)
     mp.add_argument("--top", type=int, default=10)
+    sub.add_parser("launch")
+    sub.add_parser("stop")
     a = ap.parse_args()
     if a.portal:
         PORTAL = a.portal.rstrip("/")
     sys.exit({"version": cmd_version, "install": cmd_install, "logs": cmd_logs,
-              "mem": cmd_mem}[a.cmd](a))
+              "mem": cmd_mem, "launch": cmd_launch, "stop": cmd_stop}[a.cmd](a))
 
 
 if __name__ == "__main__":

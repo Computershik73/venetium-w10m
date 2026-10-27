@@ -1,0 +1,58 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Tue, 27 Oct 2026 19:38:46 +0400
+Subject: [PATCH] Windows 10 Mobile: a read-only region that opens for writing
+ is accepted
+
+On a phone unlocked with Interop Tools and vcReg (a Lumia 950 XL) the
+system lets a section handle made without write access be duplicated with
+it, so PlatformSharedMemoryRegion::Take found every read-only region
+writable, and the CHECK in Take ended every start at the first renderer's
+shared regions (TransferSharedLastForegroundTime). The guarantee guards a
+process boundary this single-process browser has not got: browser and
+renderer share one address space, where the region is mapped writable
+anyway. Under VENETIUM_W10M such a region is accepted, and the log says so
+once; a writable region that cannot be written is still an error.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../platform_shared_memory_region_win.cc      | 19 +++++++++++++++++++
+ 1 file changed, 19 insertions(+)
+
+diff --git a/base/memory/platform_shared_memory_region_win.cc b/base/memory/platform_shared_memory_region_win.cc
+index 5ee0aa41c28513058e25609ff46640980075ff2b..c614a1edca6e3c81c55069b35154bfc3d2316358 100644
+--- a/base/memory/platform_shared_memory_region_win.cc
++++ b/base/memory/platform_shared_memory_region_win.cc
+@@ -8,6 +8,7 @@
+ #include <stddef.h>
+ #include <stdint.h>
+ 
++#include <atomic>
+ #include <string_view>
+ 
+ #include "base/bits.h"
+@@ -361,6 +362,24 @@ PlatformSharedMemoryRegion::CheckPlatformHandlePermissionsCorrespondToMode(
+   bool is_read_only = !success;
+   bool expected_read_only = mode == Mode::kReadOnly;
+ 
++#if defined(VENETIUM_W10M)
++  // Windows 10 Mobile: on a phone unlocked with Interop Tools and vcReg the
++  // system lets a handle made without write access be duplicated with it, so
++  // every read-only region looks writable here, and the first renderer's
++  // shared regions ended every start. The read-only guarantee guards a
++  // process boundary this browser has not got: browser and renderer are one
++  // process, where the region is mapped writable anyway. Accepted, said once.
++  // A writable region that cannot be written stays an error.
++  if (expected_read_only && !is_read_only) {
++    static std::atomic<bool> said{false};
++    if (!said.exchange(true)) {
++      LOG(WARNING) << "W10M: read-only shared memory can be opened for "
++                      "writing on this phone; accepted (one process)";
++    }
++    return ok();
++  }
++#endif
++
+   if (win::GetVersion() >= win::Version::WIN8_1 && is_read_only != expected_read_only) {
+     return unexpected(expected_read_only ? TakeError::kExpectedReadOnlyButNot
+                                          : TakeError::kExpectedWritableButNot);

@@ -25,6 +25,7 @@
 #include "base/strings/string_split.h"
 #include "base/strings/string_util.h"
 #include "base/strings/utf_string_conversions.h"
+#include "base/win/windows_version.h"
 #include "content/public/app/content_main.h"
 #include "content/public/common/content_switches.h"
 #include "gpu/config/gpu_switches.h"
@@ -628,6 +629,13 @@ extern "C" VW_EXPORT int32_t venetium_w10m_run(
   NoteF("run: %dx%d px at %.2f, jit %d", engine_config.size.width(),
         engine_config.size.height(), engine_config.scale,
         engine_config.jit ? 1 : 0);
+  {
+    // The phone's build of Windows: what differs between phones that do and
+    // do not run something is often there.
+    const base::win::OSInfo::VersionNumber os =
+        base::win::OSInfo::GetInstance()->version_number();
+    NoteF("os: Windows %u.%u.%u.%u", os.major, os.minor, os.build, os.patch);
+  }
 
   SetUpCommandLine(engine_config);
   SetUpPaths(engine_config);
