@@ -1,0 +1,136 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Wed, 28 Oct 2026 02:06:54 +0400
+Subject: [PATCH] Windows 10 Mobile: Chrome laid out for a mouse on Continuum's
+ monitor
+
+---
+ chrome/browser/ui/views/frame/browser_view.cc | 11 ++++++--
+ .../views/location_bar/location_bar_view.cc   |  6 ++++-
+ .../browser/ui/views/toolbar/toolbar_view.cc  | 11 +++++---
+ chrome/browser/ui/w10m_layout.h               | 25 +++++++++++++++++++
+ 4 files changed, 47 insertions(+), 6 deletions(-)
+ create mode 100644 chrome/browser/ui/w10m_layout.h
+
+diff --git a/chrome/browser/ui/views/frame/browser_view.cc b/chrome/browser/ui/views/frame/browser_view.cc
+index 8d31976bcb903ae3dcc1a08192d44279ae1c340f..1321237aceb6b9c355089a21a85db27743558f35 100644
+--- a/chrome/browser/ui/views/frame/browser_view.cc
++++ b/chrome/browser/ui/views/frame/browser_view.cc
+@@ -4,6 +4,10 @@
+ 
+ #include "chrome/browser/ui/views/frame/browser_view.h"
+ 
++#if defined(VENETIUM_W10M)
++#include "chrome/browser/ui/w10m_layout.h"
++#endif
++
+ #include <stdint.h>
+ 
+ #include <algorithm>
+@@ -1351,8 +1355,11 @@ bool BrowserView::ShouldDrawTabStrip() const {
+ #if defined(VENETIUM_W10M)
+   // No tab strip on a phone, as in Chrome for Android: the tabs are still
+   // there, reached through the tabs button beside the address bar
+-  // (features::HasTabSearchToolbarButton).
+-  return false;
++  // (features::HasTabSearchToolbarButton). On a monitor (Continuum) there
++  // is room for it.
++  if (!w10m::DesktopLayout()) {
++    return false;
++  }
+ #endif
+   // Return false if this window does not normally display a tabstrip or if the
+   // tabstrip is currently hidden, e.g. because we're in fullscreen.
+diff --git a/chrome/browser/ui/views/location_bar/location_bar_view.cc b/chrome/browser/ui/views/location_bar/location_bar_view.cc
+index bacddfb58a52cb53ae601bfd06f9516c343d4d5f..075f1954054c6401cbc4abb7ec530561771b8971 100644
+--- a/chrome/browser/ui/views/location_bar/location_bar_view.cc
++++ b/chrome/browser/ui/views/location_bar/location_bar_view.cc
+@@ -4,6 +4,10 @@
+ 
+ #include "chrome/browser/ui/views/location_bar/location_bar_view.h"
+ 
++#if defined(VENETIUM_W10M)
++#include "chrome/browser/ui/w10m_layout.h"
++#endif
++
+ #if defined(VENETIUM_W10M)
+ #include "ui/base/class_property.h"
+ #endif
+@@ -2137,7 +2141,7 @@ DEFINE_UI_CLASS_PROPERTY_KEY(bool, kW10mHiddenWhileTypingKey, false)
+ // come back as the focus goes.
+ void ShowPhoneToolbarButtons(views::View* location_bar, bool show) {
+   views::View* const toolbar = location_bar->parent();
+-  if (!toolbar) {
++  if (!toolbar || w10m::DesktopLayout()) {
+     return;
+   }
+   for (views::View* sibling : toolbar->children()) {
+diff --git a/chrome/browser/ui/views/toolbar/toolbar_view.cc b/chrome/browser/ui/views/toolbar/toolbar_view.cc
+index b196a234cd37db966c1fb5f1da0f5976a57720ee..dfe83bf2c7742e1ab4b542a14a210b7eacca3bb0 100644
+--- a/chrome/browser/ui/views/toolbar/toolbar_view.cc
++++ b/chrome/browser/ui/views/toolbar/toolbar_view.cc
+@@ -62,6 +62,7 @@
+ #include "chrome/browser/ui/tabs/tab_strip_model_observer.h"
+ #include "chrome/browser/ui/views/tab_search_bubble_host.h"
+ #include "chrome/browser/ui/views/toolbar/w10m_tab_switcher.h"
++#include "chrome/browser/ui/w10m_layout.h"
+ #include "ui/gfx/canvas.h"
+ #include "ui/gfx/font_list.h"
+ #include "ui/gfx/geometry/rect_conversions.h"
+@@ -572,11 +573,12 @@ void ToolbarView::Init() {
+ #if defined(VENETIUM_W10M)
+   // Windows 10 Mobile lays Chrome out as Chrome for Android does on a
+   // phone: the address bar, the tabs button and the menu, and no more. Back is the
+-  // phone's own key; Forward and Reload are in the menu.
+-  if (back_) {
++  // phone's own key; Forward and Reload are in the menu. On a monitor
++  // (Continuum) they are in the toolbar as on a desktop.
++  if (back_ && !w10m::DesktopLayout()) {
+     back_->SetVisible(false);
+   }
+-  if (reload_) {
++  if (reload_ && !w10m::DesktopLayout()) {
+     reload_->SetVisible(false);
+   }
+ #endif
+@@ -2107,6 +2109,9 @@ void ToolbarView::OnTouchUiChanged() {
+ }
+ 
+ void ToolbarView::SetForwardButtonVisibility(bool visible) {
++#if defined(VENETIUM_W10M)
++  visible = visible || w10m::DesktopLayout();
++#endif
+   if (features::IsWebUIBackForwardButtonEnabled()) {
+     toolbar_webview_->SetForwardVisible(visible);
+   } else {
+diff --git a/chrome/browser/ui/w10m_layout.h b/chrome/browser/ui/w10m_layout.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..0ed176b7c1f97d142abe6f059d6b1ed2204621d5
+--- /dev/null
++++ b/chrome/browser/ui/w10m_layout.h
+@@ -0,0 +1,25 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_UI_W10M_LAYOUT_H_
++#define CHROME_BROWSER_UI_W10M_LAYOUT_H_
++
++#include "base/command_line.h"
++
++namespace w10m {
++
++// Windows 10 Mobile: whether Chrome is laid out for a monitor, a mouse and a
++// keyboard (Continuum: the app's shell starts the engine with
++// --vw-desktop-ui) instead of as Chrome for Android on a phone: a tab strip,
++// Back, Forward and Reload in the toolbar, which keeps its buttons while
++// the address bar has the focus.
++inline bool DesktopLayout() {
++  static const bool desktop =
++      base::CommandLine::ForCurrentProcess()->HasSwitch("vw-desktop-ui");
++  return desktop;
++}
++
++}  // namespace w10m
++
++#endif  // CHROME_BROWSER_UI_W10M_LAYOUT_H_

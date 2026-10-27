@@ -360,11 +360,17 @@ void MainPage::BuildUi() {
   view.SetDesiredBoundsMode(ApplicationViewBoundsMode::UseVisible);
   view.VisibleBoundsChanged([this](auto&&, auto&&) { ApplyVisibleBounds(); });
   ApplyVisibleBounds();
-  if (ApiInformation::IsTypePresent(L"Windows.UI.ViewManagement.StatusBar")) {
-    auto status = StatusBar::GetForCurrentView();
-    status.BackgroundColor(ChromeBg());
-    status.BackgroundOpacity(1.0);
-    status.ForegroundColor(ChromeFg());
+  // A view on Continuum's monitor may have no status bar to colour.
+  try {
+    if (ApiInformation::IsTypePresent(
+            L"Windows.UI.ViewManagement.StatusBar")) {
+      auto status = StatusBar::GetForCurrentView();
+      status.BackgroundColor(ChromeBg());
+      status.BackgroundOpacity(1.0);
+      status.ForegroundColor(ChromeFg());
+    }
+  } catch (winrt::hresult_error const& e) {
+    Log::Write(L"view: no status bar", std::wstring(e.message()));
   }
   DisplayInformation::GetForCurrentView().DpiChanged(
       [this](DisplayInformation const& info, auto&&) {
@@ -710,6 +716,22 @@ void MainPage::Start(std::wstring initialUrl) {
   if (Api().ui_owner &&
       Api().ui_owner(params.switches.c_str(), params.profileDir.c_str()) == 1) {
     EnterChromeUi();
+    // Continuum (a monitor, a mouse and a keyboard): Chrome laid out for a
+    // mouse -- a tab strip, Back, Forward and Reload, the desktop's sizes --
+    // and sites' desktop pages unless chosen otherwise for one. On the
+    // phone the old interface's desktop switch has no say: Chrome's menu
+    // has "Desktop site".
+    bool continuum = false;
+    try {
+      continuum = UIViewSettings::GetForCurrentView().UserInteractionMode() ==
+                  UserInteractionMode::Mouse;
+    } catch (winrt::hresult_error const&) {
+    }
+    if (continuum) {
+      params.switches += " --vw-desktop-ui";
+      Log::Write(L"view: Continuum (a mouse): Chrome's desktop layout");
+    }
+    if (Api().set_desktop_mode) Api().set_desktop_mode(continuum ? 1 : 0);
     // Chrome's interface, and the pages' prefers-color-scheme, in the
     // phone's theme, as Chrome for Android follows Android's.
     try {
@@ -944,13 +966,17 @@ void MainPage::SetFullscreen(bool on) {
     }
   } catch (winrt::hresult_error const&) {
   }
-  if (ApiInformation::IsTypePresent(L"Windows.UI.ViewManagement.StatusBar")) {
-    auto status = StatusBar::GetForCurrentView();
-    if (on) {
-      status.HideAsync();
-    } else {
-      status.ShowAsync();
+  try {
+    if (ApiInformation::IsTypePresent(
+            L"Windows.UI.ViewManagement.StatusBar")) {
+      auto status = StatusBar::GetForCurrentView();
+      if (on) {
+        status.HideAsync();
+      } else {
+        status.ShowAsync();
+      }
     }
+  } catch (winrt::hresult_error const&) {
   }
   ApplyVisibleBounds();
   if (!on) RefreshChrome();

@@ -76,9 +76,16 @@ void AddChromeSwitches(const EngineConfig& config,
   command_line->AppendSwitch(switches::kNoPings);
   // A phone ends a suspended app; that is not a crash to apologise for.
   command_line->AppendSwitch(switches::kHideCrashRestoreBubble);
-  // Chrome's toolbar and tabs sized for fingers. Chrome reads it once.
-  command_line->AppendSwitchASCII(switches::kTopChromeTouchUi,
-                                  switches::kTopChromeTouchUiEnabled);
+  // Chrome's toolbar and tabs sized for fingers; for a mouse on a monitor
+  // (Continuum: the shell's --vw-desktop-ui) the desktop's sizes. Chrome
+  // reads it once; one given in the engine switches stands.
+  if (!command_line->HasSwitch(switches::kTopChromeTouchUi)) {
+    command_line->AppendSwitchASCII(
+        switches::kTopChromeTouchUi,
+        command_line->HasSwitch("vw-desktop-ui")
+            ? switches::kTopChromeTouchUiDisabled
+            : switches::kTopChromeTouchUiEnabled);
+  }
   // A phone's toolbar, as Chrome for Android's: no profile button beside
   // the address bar (Supermium's switch; one profile, no sign-in here).
   command_line->AppendSwitchASCII("show-avatar-button", "never");

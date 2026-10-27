@@ -353,9 +353,11 @@ void EngineView::OnPointer(PointerRoutedEventArgs const& args, int32_t state) {
   const uint32_t id = pointer.PointerId();
   if (pointer.PointerDeviceType() ==
       winrt::Windows::Devices::Input::PointerDeviceType::Mouse) {
+    if (state == 0) byMouse_ = true;
     if (Api().input_mouse) OnMouse(point, state, x, y);
     return;
   }
+  if (state == 0) byMouse_ = false;
   if (!Api().input_touch) return;
   auto it = std::find_if(fingers_.begin(), fingers_.end(),
                          [id](Finger const& f) { return f.id == id; });
@@ -423,10 +425,30 @@ void EngineView::OnPointer(PointerRoutedEventArgs const& args, int32_t state) {
   if (state >= 2) fingers_.erase(it);
 }
 
+// The modifier keys held now, as the engine's bits (1 shift, 2 control,
+// 4 alt).
+static uint32_t HeldModifiers() {
+  uint32_t modifiers = 0;
+  try {
+    auto window = CoreWindow::GetForCurrentThread();
+    using winrt::Windows::System::VirtualKey;
+    auto down = [&window](VirtualKey key) {
+      return (window.GetKeyState(key) & CoreVirtualKeyStates::Down) ==
+             CoreVirtualKeyStates::Down;
+    };
+    if (down(VirtualKey::Shift)) modifiers |= 1;
+    if (down(VirtualKey::Control)) modifiers |= 2;
+    if (down(VirtualKey::Menu)) modifiers |= 4;
+  } catch (winrt::hresult_error const&) {
+  }
+  return modifiers;
+}
+
 void EngineView::SendKey(int32_t vkey) {
   if (!Api().input_key) return;
-  Api().input_key(vkey, 1, 0);
-  Api().input_key(vkey, 0, 0);
+  const uint32_t modifiers = HeldModifiers();
+  Api().input_key(vkey, 1, modifiers);
+  Api().input_key(vkey, 0, modifiers);
 }
 
 void EngineView::WireKeyboard() {
@@ -483,6 +505,15 @@ void EngineView::WireKeyboard() {
                                        KeyRoutedEventArgs const& args) {
         if (!typing_) return;
         const int32_t code = static_cast<int32_t>(args.Key());
+        // A keyboard's shortcuts (Ctrl+A, C, V, X, Z; Ctrl+L, T, W...)
+        // make no text: with Ctrl or Alt held, a letter or a digit goes to
+        // the engine as a key.
+        if ((HeldModifiers() & (2 | 4)) &&
+            ((code >= 'A' && code <= 'Z') || (code >= '0' && code <= '9'))) {
+          SendKey(code);
+          args.Handled(true);
+          return;
+        }
         switch (code) {
           case 8:   // Back
           case 9:   // Tab
@@ -574,9 +605,13 @@ void EngineView::ApplyInputKind(int32_t kind) {
 bool EngineView::TextInputChanged(uint32_t state) const {
   const uint32_t kind = state & kKindMask;
   const bool wanted = kind && (state & kKeyboardWanted);
+  // A field clicked with a mouse asks for no keyboard (Chrome shows the
+  // on-screen one for touch and pen only) yet has one to type with.
+  const bool clicked = kind && !wanted && byMouse_;
   const uint32_t serial = state >> 8;
   if (wanted && serial != lastTextSerial_) return true;
-  if (!wanted && typing_) return true;
+  if (clicked && !typing_) return true;
+  if (!wanted && !clicked && typing_) return true;
   return typing_ && static_cast<int32_t>(kind) != sinkKind_;
 }
 
@@ -585,8 +620,20 @@ void EngineView::FollowTextInput() {
   const uint32_t state = Api().text_input_state();
   const int32_t kind = static_cast<int32_t>(state & kKindMask);
   const bool wanted = kind && (state & kKeyboardWanted);
+  const bool clicked = kind && !wanted && byMouse_;
   const uint32_t serial = state >> 8;
   auto pane = InputPane::GetForCurrentView();
+  if (clicked && !typing_) {
+    // A field clicked with a mouse (Continuum): the keyboard there, a USB or
+    // Bluetooth one, types into the sink; no on-screen keyboard is raised.
+    typing_ = true;
+    ApplyInputKind(kind);
+    sink_.IsTabStop(true);
+    const bool focused = sink_.Focus(FocusState::Programmatic);
+    Log::Write(std::wstring(L"view: text field clicked, sink ") +
+               (focused ? L"focused" : L"refused"));
+    return;
+  }
   if (wanted && serial != lastTextSerial_) {
     // The page asked for the keyboard: the user tapped a field (a page that
     // focuses one by itself does not ask).
@@ -607,7 +654,7 @@ void EngineView::FollowTextInput() {
       if (pane.OccludedRect().Height > 0) ReportKeyboard(pane.OccludedRect());
     } catch (winrt::hresult_error const&) {
     }
-  } else if (!wanted && typing_) {
+  } else if (!wanted && !clicked && typing_) {
     typing_ = false;
     pane.TryHide();
   } else if (typing_ && kind != sinkKind_) {

@@ -107,6 +107,11 @@ class EngineView {
   // The mouse button held down, as its WM_*DOWN number (0: none).
   int32_t mouseDown_ = 0;
 
+  // Whether the last pointer pressed was a mouse (Continuum's mouse, or the
+  // phone's touchpad there): a field clicked then asks for no on-screen
+  // keyboard, but a keyboard is there to type into it.
+  bool byMouse_ = false;
+
   // Text input.
   bool typing_ = false;
   bool clearing_ = false;
