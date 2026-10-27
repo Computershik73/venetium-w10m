@@ -1,0 +1,331 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Wed, 28 Oct 2026 02:19:49 +0400
+Subject: [PATCH] Windows 10 Mobile: the address bar at the bottom
+
+---
+ chrome/browser/ui/browser_ui_prefs.cc         |  1 +
+ chrome/browser/ui/toolbar/app_menu_model.cc   | 18 ++++++++++++-
+ chrome/browser/ui/toolbar/app_menu_model.h    |  2 ++
+ chrome/browser/ui/views/frame/browser_view.cc | 26 +++++++++++++++++--
+ .../frame/layout/browser_view_layout_impl.cc  | 14 ++++++++++
+ .../layout/browser_view_tabbed_layout_impl.cc | 17 ++++++++++++
+ .../top_controls_slide_controller_chromeos.cc |  6 +++--
+ .../views/location_bar/location_bar_view.cc   | 17 ++++++++++++
+ chrome/browser/ui/w10m_layout.h               | 11 ++++++++
+ chrome/browser/ui/w10m_prefs.h                |  5 ++++
+ 10 files changed, 112 insertions(+), 5 deletions(-)
+
+diff --git a/chrome/browser/ui/browser_ui_prefs.cc b/chrome/browser/ui/browser_ui_prefs.cc
+index 481dde25c6541dc72ee780dbd9e8b6a6a6b6f445..86935351f0be47cdefd32684d86371fe0e47b61f 100644
+--- a/chrome/browser/ui/browser_ui_prefs.cc
++++ b/chrome/browser/ui/browser_ui_prefs.cc
+@@ -142,6 +142,7 @@ void RegisterBrowserUserPrefs(user_prefs::PrefRegistrySyncable* registry) {
+   registry->RegisterDictionaryPref(w10m::prefs::kDesktopSites);
+   registry->RegisterBooleanPref(w10m::prefs::kAmoled, false);
+   registry->RegisterBooleanPref(w10m::prefs::kHideToolbarOnScroll, false);
++  registry->RegisterBooleanPref(w10m::prefs::kToolbarAtBottom, false);
+ #else
+   registry->RegisterBooleanPref(prefs::kShowForwardButton, true,
+                                 pref_registration_flags);
+diff --git a/chrome/browser/ui/toolbar/app_menu_model.cc b/chrome/browser/ui/toolbar/app_menu_model.cc
+index b05c5138eb968f7690c638daab6d0fe8d1af9fd5..fb223660c10b6bf8f2c7c5d21bd6472d0e6f6685 100644
+--- a/chrome/browser/ui/toolbar/app_menu_model.cc
++++ b/chrome/browser/ui/toolbar/app_menu_model.cc
+@@ -124,6 +124,7 @@
+ #if defined(VENETIUM_W10M)
+ #include "chrome/browser/content_settings/host_content_settings_map_factory.h"
+ #include "chrome/browser/ui/singleton_tabs.h"
++#include "chrome/browser/ui/views/frame/browser_view.h"
+ #include "chrome/browser/ui/web_applications/app_browser_controller.h"
+ #include "chrome/browser/ui/w10m_prefs.h"
+ #include "chrome/common/webui_url_constants.h"
+@@ -1441,6 +1442,7 @@ void AppMenuModel::BuildPhoneMenu() {
+   shell->AddCheckItem(kW10mAmoledCommand, u"Black theme (AMOLED)");
+   shell->AddCheckItem(kW10mHideToolbarCommand,
+                       u"Hide the toolbar when scrolling");
++  shell->AddCheckItem(kW10mToolbarAtBottomCommand, u"Address bar at the bottom");
+   sub_menus_.push_back(std::move(shell));
+   AddSubMenu(kW10mShellSubmenu, u"Windows 10 Mobile", sub_menus_.back().get());
+ }
+@@ -1474,6 +1476,15 @@ void AppMenuModel::ExecuteCommand(int command_id, int event_flags) {
+     }
+     return;
+   }
++  if (command_id == kW10mToolbarAtBottomCommand) {
++    PrefService* prefs = browser_->profile()->GetPrefs();
++    prefs->SetBoolean(w10m::prefs::kToolbarAtBottom,
++                      !prefs->GetBoolean(w10m::prefs::kToolbarAtBottom));
++    if (BrowserView* view = BrowserView::GetBrowserViewForBrowser(browser_)) {
++      view->InvalidateLayout();
++    }
++    return;
++  }
+   if (command_id == kW10mAmoledCommand ||
+       command_id == kW10mHideToolbarCommand) {
+     // The embedder and the toolbar's controller watch these.
+@@ -2233,6 +2244,10 @@ bool AppMenuModel::IsCommandIdChecked(int command_id) const {
+     return browser_->profile()->GetPrefs()->GetBoolean(
+         w10m::prefs::kHideToolbarOnScroll);
+   }
++  if (command_id == kW10mToolbarAtBottomCommand) {
++    return browser_->profile()->GetPrefs()->GetBoolean(
++        w10m::prefs::kToolbarAtBottom);
++  }
+ #endif
+   PrefService* prefs = browser_->profile()->GetPrefs();
+   if (command_id == IDC_SHOW_BOOKMARK_BAR) {
+@@ -2267,7 +2282,8 @@ bool AppMenuModel::IsCommandIdEnabled(int command_id) const {
+       command_id == kW10mAppColorsCommand ||
+       command_id == kW10mDesktopByDefaultCommand ||
+       command_id == kW10mAmoledCommand ||
+-      command_id == kW10mHideToolbarCommand) {
++      command_id == kW10mHideToolbarCommand ||
++      command_id == kW10mToolbarAtBottomCommand) {
+     return true;
+   }
+   if (command_id == kW10mBlockAdsCommand) {
+diff --git a/chrome/browser/ui/toolbar/app_menu_model.h b/chrome/browser/ui/toolbar/app_menu_model.h
+index 246efa49d01de2b92ec659e6f061edc3f4378d14..7fa33036d6aacf04cbf3b70ddda9ff21fbad3d84 100644
+--- a/chrome/browser/ui/toolbar/app_menu_model.h
++++ b/chrome/browser/ui/toolbar/app_menu_model.h
+@@ -222,6 +222,8 @@ class AppMenuModel : public ui::SimpleMenuModel,
+   // page scrolls down.
+   static constexpr int kW10mAmoledCommand = 40985;
+   static constexpr int kW10mHideToolbarCommand = 40986;
++  // In the phone's submenu: the address bar at the bottom.
++  static constexpr int kW10mToolbarAtBottomCommand = 40987;
+   // Pins the app of |browser|'s window to Start: the embedder's tile.
+   using W10mPinAppHandler = void (*)(Browser* browser);
+   static void SetW10mPinAppHandler(W10mPinAppHandler handler);
+diff --git a/chrome/browser/ui/views/frame/browser_view.cc b/chrome/browser/ui/views/frame/browser_view.cc
+index f95512ffc056ee4ba89883720147c9a59d41f619..ab77147865d1a5832dad3abac184d1d82695f088 100644
+--- a/chrome/browser/ui/views/frame/browser_view.cc
++++ b/chrome/browser/ui/views/frame/browser_view.cc
+@@ -7,6 +7,7 @@
+ #if defined(VENETIUM_W10M)
+ #include "chrome/browser/ui/views/frame/top_controls_slide_controller_chromeos.h"
+ #include "chrome/browser/ui/w10m_layout.h"
++#include "chrome/browser/ui/w10m_prefs.h"
+ #endif
+ 
+ #include <stdint.h>
+@@ -1191,8 +1192,13 @@ gfx::Rect BrowserView::GetFindBarBoundingBox() const {
+   // otherwise use the contents container.
+   auto* const immersive_mode_controller =
+       ImmersiveModeController::From(browser());
+-  if (!immersive_mode_controller->IsEnabled() ||
+-      immersive_mode_controller->IsRevealed()) {
++#if defined(VENETIUM_W10M)
++  const bool toolbar_above = !w10m::ToolbarAtBottom(this);
++#else
++  const bool toolbar_above = true;
++#endif
++  if (toolbar_above && (!immersive_mode_controller->IsEnabled() ||
++                        immersive_mode_controller->IsRevealed())) {
+     const gfx::Rect bounding_box =
+         ToolbarButtonProvider::From(browser_)->GetFindBarBoundingBox(
+             contents_bounds.bottom());
+@@ -1352,6 +1358,22 @@ bool BrowserView::ShouldDrawTabStrokes() const {
+ #endif  // !BUILDFLAG(IS_CHROMEOS)
+ }
+ 
++#if defined(VENETIUM_W10M)
++bool w10m::ToolbarAtBottom(const views::View* view) {
++  const BrowserView* browser_view = static_cast<const BrowserView*>(view);
++  if (!browser_view || w10m::DesktopLayout() ||
++      !browser_view->GetIsNormalType()) {
++    return false;
++  }
++  if (!browser_view->browser()->profile()->GetPrefs()->GetBoolean(
++          w10m::prefs::kToolbarAtBottom)) {
++    return false;
++  }
++  const LocationBarView* location_bar = browser_view->GetLocationBarView();
++  return !(location_bar && location_bar->HasFocus());
++}
++#endif
++
+ bool BrowserView::ShouldDrawTabStrip() const {
+ #if defined(VENETIUM_W10M)
+   // No tab strip on a phone, as in Chrome for Android: the tabs are still
+diff --git a/chrome/browser/ui/views/frame/layout/browser_view_layout_impl.cc b/chrome/browser/ui/views/frame/layout/browser_view_layout_impl.cc
+index f8c42164612e147de5dbfcd1441814cca57443c1..c1bf953b56ac1ac39ad6a71bdb0cff73ab564442 100644
+--- a/chrome/browser/ui/views/frame/layout/browser_view_layout_impl.cc
++++ b/chrome/browser/ui/views/frame/layout/browser_view_layout_impl.cc
+@@ -4,6 +4,10 @@
+ 
+ #include "chrome/browser/ui/views/frame/layout/browser_view_layout_impl.h"
+ 
++#if defined(VENETIUM_W10M)
++#include "chrome/browser/ui/w10m_layout.h"
++#endif
++
+ #include "chrome/browser/ui/views/bookmarks/bookmark_bar_view.h"
+ #include "chrome/browser/ui/views/frame/custom_corners_background.h"
+ #include "chrome/browser/ui/views/frame/immersive_mode_controller.h"
+@@ -372,6 +376,16 @@ void BrowserViewLayoutImpl::DoPostLayoutCleanup() {}
+ int BrowserViewLayoutImpl::GetDialogTop(const ProposedLayout& layout) const {
+   const int kConstrainedWindowOverlap = 3;
+   const auto* const browser_view = views().browser_view.get();
++#if defined(VENETIUM_W10M)
++  // The toolbar at the bottom: a dialog starts at the page's top.
++  if (w10m::ToolbarAtBottom(browser_view)) {
++    if (const auto contents_rect =
++            layout.GetBoundsFor(views().contents_container, browser_view)) {
++      return contents_rect->y();
++    }
++    return kConstrainedWindowOverlap;
++  }
++#endif
+   if (const auto toolbar_rect =
+           layout.GetBoundsFor(views().toolbar, browser_view)) {
+     return toolbar_rect->bottom() - kConstrainedWindowOverlap;
+diff --git a/chrome/browser/ui/views/frame/layout/browser_view_tabbed_layout_impl.cc b/chrome/browser/ui/views/frame/layout/browser_view_tabbed_layout_impl.cc
+index 9d8905577913459b0b1abfc9f24bc2ace2c6d8e9..3a98e04af51d345b1f680444f49312637b0c00b3 100644
+--- a/chrome/browser/ui/views/frame/layout/browser_view_tabbed_layout_impl.cc
++++ b/chrome/browser/ui/views/frame/layout/browser_view_tabbed_layout_impl.cc
+@@ -4,6 +4,10 @@
+ 
+ #include "chrome/browser/ui/views/frame/layout/browser_view_tabbed_layout_impl.h"
+ 
++#if defined(VENETIUM_W10M)
++#include "chrome/browser/ui/w10m_layout.h"
++#endif
++
+ #include <algorithm>
+ #include <memory>
+ #include <utility>
+@@ -875,7 +879,20 @@ BrowserViewTabbedLayoutImpl::CalculateProposedLayout(
+         top_container_layout, top_container_params, needs_exclusion);
+     top_container_layout.bounds =
+         GetTopContainerBoundsInParent(top_container_local_bounds, params);
++#if defined(VENETIUM_W10M)
++    if (w10m::ToolbarAtBottom(views().browser_view)) {
++      // Windows 10 Mobile: the address bar at the bottom of the screen, the
++      // page (and its infobars) above it.
++      const int height = top_container_layout.bounds.height();
++      top_container_layout.bounds.set_y(params.visual_client_area.bottom() -
++                                        height);
++      params.Inset(gfx::Insets::TLBR(0, 0, height, 0));
++    } else {
++      params.SetTop(top_container_layout.bounds.bottom());
++    }
++#else
+     params.SetTop(top_container_layout.bounds.bottom());
++#endif
+ 
+     // Possibly bump the leading margin of the top container out to cover the
+     // caption buttons, leaving all of the child views in the same absolute
+diff --git a/chrome/browser/ui/views/frame/top_controls_slide_controller_chromeos.cc b/chrome/browser/ui/views/frame/top_controls_slide_controller_chromeos.cc
+index 7d758d5eb2c817cd5004f88f253b34e32578731a..31c3250219f268c8216431411aa5659df25d478c 100644
+--- a/chrome/browser/ui/views/frame/top_controls_slide_controller_chromeos.cc
++++ b/chrome/browser/ui/views/frame/top_controls_slide_controller_chromeos.cc
+@@ -74,8 +74,10 @@ bool IsSpokenFeedbackEnabled() {
+ // phone's submenu), where ChromeOS slides it in tablet mode.
+ bool W10mSlides(content::BrowserContext* context) {
+   Profile* profile = Profile::FromBrowserContext(context);
+-  return profile && profile->GetPrefs()->GetBoolean(
+-                        w10m::prefs::kHideToolbarOnScroll);
++  return profile &&
++         profile->GetPrefs()->GetBoolean(w10m::prefs::kHideToolbarOnScroll) &&
++         // The toolbar slides up off the top; not from the bottom.
++         !profile->GetPrefs()->GetBoolean(w10m::prefs::kToolbarAtBottom);
+ }
+ #endif
+ 
+diff --git a/chrome/browser/ui/views/location_bar/location_bar_view.cc b/chrome/browser/ui/views/location_bar/location_bar_view.cc
+index 075f1954054c6401cbc4abb7ec530561771b8971..cb898a761b6d7e6130c01d328b1d46034789c7a3 100644
+--- a/chrome/browser/ui/views/location_bar/location_bar_view.cc
++++ b/chrome/browser/ui/views/location_bar/location_bar_view.cc
+@@ -5,7 +5,10 @@
+ #include "chrome/browser/ui/views/location_bar/location_bar_view.h"
+ 
+ #if defined(VENETIUM_W10M)
++#include "chrome/browser/ui/views/frame/browser_view.h"
+ #include "chrome/browser/ui/w10m_layout.h"
++#include "chrome/browser/ui/w10m_prefs.h"
++#include "components/prefs/pref_service.h"
+ #endif
+ 
+ #if defined(VENETIUM_W10M)
+@@ -2160,6 +2163,18 @@ void ShowPhoneToolbarButtons(views::View* location_bar, bool show) {
+   }
+ }
+ 
++// With the address bar at the bottom the toolbar goes to the top while one
++// types (w10m::ToolbarAtBottom): the window is laid out again.
++void W10mRelayoutForToolbarPlace(Browser* browser) {
++  if (!browser->profile()->GetPrefs()->GetBoolean(
++          w10m::prefs::kToolbarAtBottom)) {
++    return;
++  }
++  if (BrowserView* view = BrowserView::GetBrowserViewForBrowser(browser)) {
++    view->InvalidateLayout();
++  }
++}
++
+ }  // namespace
+ #endif  // defined(VENETIUM_W10M)
+ 
+@@ -2170,6 +2185,7 @@ void LocationBarView::OnOmniboxFocused() {
+ #if defined(VENETIUM_W10M)
+   if (browser_ && !is_popup_mode_) {
+     ShowPhoneToolbarButtons(this, false);
++    W10mRelayoutForToolbarPlace(browser_);
+   }
+ #endif
+ 
+@@ -2197,6 +2213,7 @@ void LocationBarView::OnOmniboxBlurred() {
+ #if defined(VENETIUM_W10M)
+   if (browser_ && !is_popup_mode_) {
+     ShowPhoneToolbarButtons(this, true);
++    W10mRelayoutForToolbarPlace(browser_);
+   }
+ #endif
+   RefreshBackground();
+diff --git a/chrome/browser/ui/w10m_layout.h b/chrome/browser/ui/w10m_layout.h
+index 1b03d780a0db1f06657dce125fa3c46c6a3901d9..aee71393d259738e12a20f7fca4072a3a569c865 100644
+--- a/chrome/browser/ui/w10m_layout.h
++++ b/chrome/browser/ui/w10m_layout.h
+@@ -7,6 +7,10 @@
+ 
+ #include "base/command_line.h"
+ 
++namespace views {
++class View;
++}
++
+ namespace w10m {
+ 
+ // Windows 10 Mobile: whether Chrome is laid out for a monitor, a mouse and a
+@@ -25,6 +29,13 @@ inline bool DesktopLayout() {
+ // the embedder.
+ inline void (*g_toolbar_shown_observer)(bool shown) = nullptr;
+ 
++// Whether |browser_view|'s toolbar goes at the bottom of the screen: asked
++// for (w10m.toolbar_at_bottom), a phone's normal window, and not while the
++// address bar has the focus -- it goes back to the top while one types, as
++// Chrome for Android's does, above the keyboard and its suggestions below
++// it. |browser_view| is a BrowserView (browser_view.cc).
++bool ToolbarAtBottom(const views::View* browser_view);
++
+ }  // namespace w10m
+ 
+ #endif  // CHROME_BROWSER_UI_W10M_LAYOUT_H_
+diff --git a/chrome/browser/ui/w10m_prefs.h b/chrome/browser/ui/w10m_prefs.h
+index 8c1fc53327d87b02ca2d85797a263ec19810126b..17cbe4876eb0658a20e964e18d0d9dd483ffff53 100644
+--- a/chrome/browser/ui/w10m_prefs.h
++++ b/chrome/browser/ui/w10m_prefs.h
+@@ -28,6 +28,11 @@ inline constexpr char kAmoled[] = "w10m.amoled";
+ // as on Chrome for Android (with it the shell hides the status bar).
+ inline constexpr char kHideToolbarOnScroll[] = "w10m.hide_toolbar_on_scroll";
+ 
++// The toolbar (the address bar) at the bottom of the screen, where a thumb
++// reaches it on a big phone; back at the top while one types, as Chrome for
++// Android does.
++inline constexpr char kToolbarAtBottom[] = "w10m.toolbar_at_bottom";
++
+ }  // namespace w10m::prefs
+ 
+ #endif  // CHROME_BROWSER_UI_W10M_PREFS_H_
