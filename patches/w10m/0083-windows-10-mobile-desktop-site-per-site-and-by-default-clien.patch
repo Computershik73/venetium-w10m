@@ -1,0 +1,191 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Wed, 28 Oct 2026 02:01:55 +0400
+Subject: [PATCH] Windows 10 Mobile: Desktop site per site and by default,
+ client hints as the embedder's user agent
+
+---
+ chrome/browser/ui/browser_commands.cc         | 24 +++++++++++++++++++
+ chrome/browser/ui/browser_ui_prefs.cc         |  2 ++
+ chrome/browser/ui/toolbar/app_menu_model.cc   | 17 ++++++++++++-
+ chrome/browser/ui/toolbar/app_menu_model.h    |  3 +++
+ chrome/browser/ui/w10m_prefs.h                |  6 +++++
+ .../client_hints/browser/client_hints.cc      | 15 ++++++++++++
+ 6 files changed, 66 insertions(+), 1 deletion(-)
+
+diff --git a/chrome/browser/ui/browser_commands.cc b/chrome/browser/ui/browser_commands.cc
+index 98184befe73ccdb129221921717f24a60e1967bc..c927a087f6cb140075b2aec5bbdf209d69545bb6 100644
+--- a/chrome/browser/ui/browser_commands.cc
++++ b/chrome/browser/ui/browser_commands.cc
+@@ -4,6 +4,11 @@
+ 
+ #include "chrome/browser/ui/browser_commands.h"
+ 
++#if defined(VENETIUM_W10M)
++#include "chrome/browser/ui/w10m_prefs.h"
++#include "components/prefs/scoped_user_pref_update.h"
++#endif
++
+ #include <memory>
+ #include <numeric>
+ #include <optional>
+@@ -2568,6 +2573,25 @@ void ToggleRequestTabletSite(BrowserWindowInterface* browser) {
+   if (!entry) {
+     return;
+   }
++#if defined(VENETIUM_W10M)
++  // Windows 10 Mobile: "Desktop site", remembered for the site, as Chrome
++  // for Android's; the embedder gives each navigation the site's user agent
++  // (its desktop one is Chrome's Windows agent). Both the page's host and
++  // the one first asked for (a site that sent a phone to m.example.com is
++  // asked again for its first address).
++  {
++    const bool desktop = !entry->GetIsOverridingUserAgent();
++    ScopedDictPrefUpdate sites(browser->GetProfile()->GetPrefs(),
++                               w10m::prefs::kDesktopSites);
++    for (const GURL& url : {entry->GetURL(), entry->GetOriginalRequestURL()}) {
++      if (url.SchemeIsHTTPOrHTTPS()) {
++        sites->Set(url.host(), desktop);
++      }
++    }
++    controller.LoadOriginalRequestURL();
++    return;
++  }
++#endif
+   if (entry->GetIsOverridingUserAgent()) {
+     entry->SetIsOverridingUserAgent(false);
+   } else {
+diff --git a/chrome/browser/ui/browser_ui_prefs.cc b/chrome/browser/ui/browser_ui_prefs.cc
+index 4ceb090d1f48b231943efa2f6d2249187fd4b8e4..bc63a8c7bc33d18558dfa331acb1d1e76167261a 100644
+--- a/chrome/browser/ui/browser_ui_prefs.cc
++++ b/chrome/browser/ui/browser_ui_prefs.cc
+@@ -138,6 +138,8 @@ void RegisterBrowserUserPrefs(user_prefs::PrefRegistrySyncable* registry) {
+   registry->RegisterBooleanPref(prefs::kShowForwardButton, false,
+                                 pref_registration_flags);
+   registry->RegisterBooleanPref(w10m::prefs::kAppThemeColors, true);
++  registry->RegisterBooleanPref(w10m::prefs::kDesktopSiteDefault, false);
++  registry->RegisterDictionaryPref(w10m::prefs::kDesktopSites);
+ #else
+   registry->RegisterBooleanPref(prefs::kShowForwardButton, true,
+                                 pref_registration_flags);
+diff --git a/chrome/browser/ui/toolbar/app_menu_model.cc b/chrome/browser/ui/toolbar/app_menu_model.cc
+index 389b80392f95980a2c7fab1cb4e5d8f4f57f2a23..8825acdf08c4cf4e7b0ee6d3a604550166a67012 100644
+--- a/chrome/browser/ui/toolbar/app_menu_model.cc
++++ b/chrome/browser/ui/toolbar/app_menu_model.cc
+@@ -1420,6 +1420,8 @@ void AppMenuModel::BuildPhoneMenu() {
+   }
+   AddItem(kW10mAppsCommand, u"Apps");
+   AddCheckItem(kW10mBlockAdsCommand, u"Block ads on this site");
++  // As Chrome for Android's: remembered for the site.
++  AddCheckItem(IDC_TOGGLE_REQUEST_TABLET_SITE, u"Desktop site");
+   AddSeparator(ui::NORMAL_SEPARATOR);
+ 
+   AddItemWithStringIdAndVectorIcon(this, IDC_OPTIONS, IDS_SETTINGS,
+@@ -1435,6 +1437,7 @@ void AppMenuModel::BuildPhoneMenu() {
+   shell->AddItem(kW10mShellCommandFirst + 2, u"Engine switches (restart)");
+   shell->AddItem(kW10mShellCommandFirst + 3, u"Copy logs to Pictures");
+   shell->AddCheckItem(kW10mJitCommand, u"JavaScript JIT (restart)");
++  shell->AddCheckItem(kW10mDesktopByDefaultCommand, u"Desktop site by default");
+   sub_menus_.push_back(std::move(shell));
+   AddSubMenu(kW10mShellSubmenu, u"Windows 10 Mobile", sub_menus_.back().get());
+ }
+@@ -1468,6 +1471,13 @@ void AppMenuModel::ExecuteCommand(int command_id, int event_flags) {
+     }
+     return;
+   }
++  if (command_id == kW10mDesktopByDefaultCommand) {
++    PrefService* prefs = browser_->profile()->GetPrefs();
++    prefs->SetBoolean(w10m::prefs::kDesktopSiteDefault,
++                      !prefs->GetBoolean(w10m::prefs::kDesktopSiteDefault));
++    chrome::Reload(browser_, WindowOpenDisposition::CURRENT_TAB);
++    return;
++  }
+   if (command_id == kW10mAppColorsCommand) {
+     PrefService* prefs = browser_->profile()->GetPrefs();
+     prefs->SetBoolean(w10m::prefs::kAppThemeColors,
+@@ -2199,6 +2209,10 @@ bool AppMenuModel::IsCommandIdChecked(int command_id) const {
+     return browser_->profile()->GetPrefs()->GetBoolean(
+         w10m::prefs::kAppThemeColors);
+   }
++  if (command_id == kW10mDesktopByDefaultCommand) {
++    return browser_->profile()->GetPrefs()->GetBoolean(
++        w10m::prefs::kDesktopSiteDefault);
++  }
+ #endif
+   PrefService* prefs = browser_->profile()->GetPrefs();
+   if (command_id == IDC_SHOW_BOOKMARK_BAR) {
+@@ -2230,7 +2244,8 @@ bool AppMenuModel::IsCommandIdChecked(int command_id) const {
+ bool AppMenuModel::IsCommandIdEnabled(int command_id) const {
+ #if defined(VENETIUM_W10M)
+   if (IsW10mShellCommand(command_id) || command_id == kW10mAppsCommand ||
+-      command_id == kW10mAppColorsCommand) {
++      command_id == kW10mAppColorsCommand ||
++      command_id == kW10mDesktopByDefaultCommand) {
+     return true;
+   }
+   if (command_id == kW10mBlockAdsCommand) {
+diff --git a/chrome/browser/ui/toolbar/app_menu_model.h b/chrome/browser/ui/toolbar/app_menu_model.h
+index 4355f363b926f296e6260f3d29496bd061ecfbdc..5aed2da089a3d7ea88bb3fa3201aeb0554c29d7c 100644
+--- a/chrome/browser/ui/toolbar/app_menu_model.h
++++ b/chrome/browser/ui/toolbar/app_menu_model.h
+@@ -215,6 +215,9 @@ class AppMenuModel : public ui::SimpleMenuModel,
+   static constexpr int kW10mAppsCommand = 40981;
+   static constexpr int kW10mPinToStartCommand = 40982;
+   static constexpr int kW10mAppColorsCommand = 40983;
++  // In the phone's submenu: sites in their desktop pages unless the user
++  // chose otherwise for one ("Desktop site" in the menu is per site).
++  static constexpr int kW10mDesktopByDefaultCommand = 40984;
+   // Pins the app of |browser|'s window to Start: the embedder's tile.
+   using W10mPinAppHandler = void (*)(Browser* browser);
+   static void SetW10mPinAppHandler(W10mPinAppHandler handler);
+diff --git a/chrome/browser/ui/w10m_prefs.h b/chrome/browser/ui/w10m_prefs.h
+index df2e0286ec5a2661651916b06ad018579b5ee339..704a8ce5e147c622abd5a436614c22958c36ff06 100644
+--- a/chrome/browser/ui/w10m_prefs.h
++++ b/chrome/browser/ui/w10m_prefs.h
+@@ -13,6 +13,12 @@ namespace w10m::prefs {
+ // off, the browser's.
+ inline constexpr char kAppThemeColors[] = "w10m.app_theme_colors";
+ 
++// "Desktop site": sites are asked for their desktop pages (Chrome's Windows
++// user agent and client hints) by default; and the sites the user chose
++// for themselves (host -> desktop or not), from the menu's "Desktop site".
++inline constexpr char kDesktopSiteDefault[] = "w10m.desktop_site_default";
++inline constexpr char kDesktopSites[] = "w10m.desktop_sites";
++
+ }  // namespace w10m::prefs
+ 
+ #endif  // CHROME_BROWSER_UI_W10M_PREFS_H_
+diff --git a/components/client_hints/browser/client_hints.cc b/components/client_hints/browser/client_hints.cc
+index 3e96e783bd2a4d8b0cb94f55e87309f47bd7ee3c..ce3408c90760e2a0c25e1ffb59a64642f4a68469 100644
+--- a/components/client_hints/browser/client_hints.cc
++++ b/components/client_hints/browser/client_hints.cc
+@@ -20,6 +20,10 @@
+ #include "components/content_settings/core/common/content_settings_utils.h"
+ #include "components/embedder_support/user_agent_utils.h"
+ #include "content/public/browser/browser_thread.h"
++#if defined(VENETIUM_W10M)
++#include "content/public/browser/content_browser_client.h"
++#include "content/public/common/content_client.h"
++#endif
+ #include "content/public/browser/render_frame_host.h"
+ #include "content/public/browser/render_process_host.h"
+ #include "services/network/public/cpp/client_hints.h"
+@@ -151,7 +155,18 @@ bool ClientHints::IsJavaScriptAllowed(const GURL& url,
+ }
+ 
+ blink::UserAgentMetadata ClientHints::GetUserAgentMetadata() {
++#if defined(VENETIUM_W10M)
++  // Windows 10 Mobile: the embedder's (a phone's, Android's; or a custom
++  // agent's), the ones navigator.userAgentData gives too. Chrome's own
++  // would send "Windows" in the Sec-CH-UA headers of an Android agent.
++  // (Outside content the browser client is reached this way: the same
++  // client, whatever the name says.)
++  return content::GetContentClientForTesting()
++      ->browser()
++      ->GetUserAgentMetadata();
++#else
+   return embedder_support::GetUserAgentMetadata();
++#endif
+ }
+ 
+ void ClientHints::PersistClientHints(

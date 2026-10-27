@@ -25,6 +25,7 @@ class VwChromeBrowserClient : public ChromeContentBrowserClient {
       bool is_integration_test) override;
   std::string GetUserAgent() override;
   blink::UserAgentMetadata GetUserAgentMetadata() override;
+  void OnWebContentsCreated(content::WebContents* web_contents) override;
   void OverrideWebPreferences(content::WebContents* web_contents,
                               content::SiteInstance& main_frame_site,
                               blink::web_pref::WebPreferences* prefs) override;

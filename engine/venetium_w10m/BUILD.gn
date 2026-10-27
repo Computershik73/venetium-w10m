@@ -143,6 +143,8 @@ shared_library("venetium_engine") {
     "chrome/vw_chrome_renderer_client.h",
     "chrome/vw_chrome_run.cc",
     "chrome/vw_chrome_run.h",
+    "chrome/vw_desktop_site.cc",
+    "chrome/vw_desktop_site.h",
     "chrome/vw_download_exporter.cc",
     "chrome/vw_download_exporter.h",
     "chrome/vw_select_file_dialog.cc",

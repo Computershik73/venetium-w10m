@@ -4,12 +4,16 @@
 
 #include <utility>
 
+#include "base/command_line.h"
 #include "chrome/browser/chrome_browser_main.h"
+#include "components/embedder_support/switches.h"
+#include "components/embedder_support/user_agent_utils.h"
 #include "third_party/blink/public/common/user_agent/user_agent_metadata.h"
 #include "third_party/blink/public/common/web_preferences/web_preferences.h"
 #include "venetium_w10m/browser/vw_browser_client.h"
 #include "venetium_w10m/browser/vw_engine.h"
 #include "venetium_w10m/chrome/vw_chrome_extra_parts.h"
+#include "venetium_w10m/chrome/vw_desktop_site.h"
 #include "venetium_w10m/common/vw_user_agent.h"
 #include "content/public/browser/site_instance.h"
 #include "content/public/common/url_constants.h"
@@ -31,12 +35,34 @@ VwChromeBrowserClient::CreateBrowserMainParts(bool is_integration_test) {
   return parts;
 }
 
+namespace {
+
+// An agent of the user's own (--user-agent in the engine switches): another
+// browser's, an older Chrome's.
+std::string CustomUserAgent() {
+  return base::CommandLine::ForCurrentProcess()->GetSwitchValueASCII(
+      embedder_support::kUserAgent);
+}
+
+}  // namespace
+
 std::string VwChromeBrowserClient::GetUserAgent() {
-  return MobileUserAgent();
+  const std::string custom = CustomUserAgent();
+  return custom.empty() ? MobileUserAgent() : custom;
 }
 
 blink::UserAgentMetadata VwChromeBrowserClient::GetUserAgentMetadata() {
-  return MobileUserAgentMetadata();
+  // A custom agent's client hints are Chrome's minimal ones, which claim
+  // nothing a custom agent may contradict.
+  return CustomUserAgent().empty() ? MobileUserAgentMetadata()
+                                   : embedder_support::GetUserAgentMetadata();
+}
+
+void VwChromeBrowserClient::OnWebContentsCreated(
+    content::WebContents* web_contents) {
+  ChromeContentBrowserClient::OnWebContentsCreated(web_contents);
+  // Every page's navigations ask for the site's desktop or phone pages.
+  DesktopSite::CreateForWebContents(web_contents);
 }
 
 namespace {
