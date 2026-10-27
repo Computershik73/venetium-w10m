@@ -149,6 +149,8 @@ shared_library("venetium_engine") {
     "chrome/vw_select_file_dialog.h",
     "chrome/vw_tab_grid.cc",
     "chrome/vw_tab_grid.h",
+    "chrome/vw_web_apps.cc",
+    "chrome/vw_web_apps.h",
   ]
 
   deps = [

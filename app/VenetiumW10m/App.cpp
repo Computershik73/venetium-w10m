@@ -155,6 +155,17 @@ struct App : ApplicationT<App, winrt::Windows::UI::Xaml::Markup::IXamlMetadataPr
   // later ones open |url| in a new tab.
   void Show(std::wstring const& url) {
     ShowWindow();
+    // An installed app's tile: the browser starts (or is there), then the
+    // engine opens the app's window.
+    const size_t prefix = wcslen(kAppTileArguments);
+    if (url.compare(0, prefix, kAppTileArguments) == 0) {
+      if (!started_) {
+        started_ = true;
+        page_->Start(L"");
+      }
+      page_->LaunchApp(url.substr(prefix));
+      return;
+    }
     if (!started_) {
       started_ = true;
       page_->Start(url);

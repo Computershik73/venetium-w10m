@@ -125,6 +125,7 @@ bool EngineHost::Load(winrt::Windows::UI::Core::CoreDispatcher const& dispatcher
   VW_RESOLVE(set_search_url);
   VW_RESOLVE(set_desktop_mode);
   VW_RESOLVE(set_event_sink);
+  VW_RESOLVE(launch_app);
   VW_RESOLVE(dialog_reply);
   VW_RESOLVE(permission_reply);
   VW_RESOLVE(file_reply);
@@ -154,6 +155,7 @@ bool EngineHost::Load(winrt::Windows::UI::Core::CoreDispatcher const& dispatcher
       &EngineHost::OnPermission,  &EngineHost::OnFileChooser,
       &EngineHost::OnClipboardSet, &EngineHost::OnShellCommand,
       &EngineHost::OnOpenPath,     &EngineHost::OnDownloadStarted,
+      &EngineHost::OnPinApp,
   };
   if (api_.set_event_sink) {
     api_.set_event_sink(&kEvents);
@@ -289,6 +291,13 @@ void EngineHost::OnShellCommand(int32_t command) {
 void EngineHost::OnOpenPath(const char* path, int32_t folder) {
   Get().Post([path = Widen(path), folder]() {
     if (Get().events_.openPath) Get().events_.openPath(path, folder);
+  });
+}
+
+void EngineHost::OnPinApp(const char* app_id, const char* name,
+                          const char* icon) {
+  Get().Post([id = Widen(app_id), name = Widen(name), icon = Widen(icon)]() {
+    if (Get().events_.pinApp) Get().events_.pinApp(id, name, icon);
   });
 }
 

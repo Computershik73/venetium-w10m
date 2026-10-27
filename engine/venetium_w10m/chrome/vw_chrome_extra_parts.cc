@@ -22,6 +22,7 @@
 #include "venetium_w10m/chrome/vw_download_exporter.h"
 #include "venetium_w10m/chrome/vw_select_file_dialog.h"
 #include "venetium_w10m/chrome/vw_tab_grid.h"
+#include "venetium_w10m/chrome/vw_web_apps.h"
 #include "venetium_w10m/common/vw_log.h"
 
 namespace venetium_w10m {
@@ -91,6 +92,7 @@ void VwChromeExtraParts::PreProfileInit() {
   platform_util::SetW10mOpenHandler(&OpenThroughShell);
   AppMenuModel::SetW10mShellCommandHandler(&ShellCommand);
   AppMenuModel::SetW10mJitOn(VwEngine::Get()->config().jit);
+  AppMenuModel::SetW10mPinAppHandler(&web_apps::PinToStart);
   // The tab count button beside the address bar opens Chrome for Android's
   // tab switcher.
   w10m::SetTabSwitcherOpener(&VwTabGrid::Show);
@@ -123,6 +125,7 @@ void VwChromeExtraParts::PostMainMessageLoopRun() {
   VwEngine::Get()->BrowserStopping();
   platform_util::SetW10mOpenHandler(nullptr);
   AppMenuModel::SetW10mShellCommandHandler(nullptr);
+  AppMenuModel::SetW10mPinAppHandler(nullptr);
   w10m::SetTabSwitcherOpener(nullptr);
   host_ = nullptr;
   browser_.reset();

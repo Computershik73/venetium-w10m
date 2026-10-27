@@ -21,6 +21,7 @@
 #include "venetium_w10m/browser/vw_panel.h"
 #include "venetium_w10m/browser/vw_platform.h"
 #include "venetium_w10m/browser/vw_tab.h"
+#include "venetium_w10m/chrome/vw_web_apps.h"
 #include "venetium_w10m/common/vw_log.h"
 
 using venetium_w10m::VwBrowser;
@@ -343,6 +344,19 @@ VW_EXPORT void venetium_w10m_set_desktop_mode(int32_t desktop) {
 
 VW_EXPORT void venetium_w10m_set_event_sink(const venetium_w10m_events* sink) {
   VwEngine::Get()->SetEventSink(sink);
+}
+
+VW_EXPORT void venetium_w10m_launch_app(const char* app_id) {
+  if (!app_id || !*app_id) {
+    return;
+  }
+  Post(base::BindOnce(
+      [](std::string id, VwBrowser* browser) {
+        if (browser->chrome()) {
+          venetium_w10m::web_apps::Launch(id);
+        }
+      },
+      std::string(app_id)));
 }
 
 VW_EXPORT void venetium_w10m_dialog_reply(int32_t id,

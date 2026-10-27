@@ -23,6 +23,7 @@ using namespace winrt::Windows::Storage::Pickers;
 using namespace winrt::Windows::System;
 using namespace winrt::Windows::UI;
 using namespace winrt::Windows::UI::Core;
+using namespace winrt::Windows::UI::StartScreen;
 using namespace winrt::Windows::UI::ViewManagement;
 using namespace winrt::Windows::UI::Xaml;
 using namespace winrt::Windows::UI::Xaml::Controls;
@@ -558,6 +559,10 @@ void MainPage::WireEngineEvents() {
     }
     ChooseFiles(id, accept, multiple, mode == 1);
   };
+  events.pinApp = [this](std::wstring id, std::wstring name,
+                         std::wstring icon) {
+    PinAppTile(id, name, icon);
+  };
   events.downloadStarted = [this](std::wstring name) {
     // A phone's toolbar has no downloads button: this is how one is seen
     // to start.
@@ -993,6 +998,56 @@ void MainPage::ShowDialog(int32_t id, int32_t kind, std::wstring const& message,
         input ? Narrow(std::wstring(input.Text())) : std::string();
     if (Api().dialog_reply) Api().dialog_reply(id, accepted ? 1 : 0, text.c_str());
   }(this, id, kind, message, defaultText);
+}
+
+void MainPage::LaunchApp(std::wstring const& app_id) {
+  Log::Write(L"apps: tile for " + app_id);
+  if (Api().launch_app) Api().launch_app(Narrow(app_id).c_str());
+}
+
+// A secondary tile for an installed app: its icon (copied into the app's
+// own folder, where a tile's image may come from), its name, and arguments
+// that bring the app back (App's activation, then LaunchApp).
+void MainPage::PinAppTile(std::wstring id, std::wstring name,
+                          std::wstring icon) {
+  [](MainPage* page, std::wstring id, std::wstring name,
+     std::wstring icon) -> winrt::fire_and_forget {
+    // Tile ids are letters and digits; an app's id is 32 letters.
+    const std::wstring tile_id = L"app" + id;
+    Uri logo(L"ms-appx:///Assets/Square150x150Logo.png");
+    if (!icon.empty()) {
+      try {
+        auto tiles = co_await ApplicationData::Current()
+                         .LocalFolder()
+                         .CreateFolderAsync(L"tiles",
+                                            CreationCollisionOption::OpenIfExists);
+        auto source = co_await StorageFile::GetFileFromPathAsync(hstring(icon));
+        co_await source.CopyAsync(tiles, hstring(tile_id + L".png"),
+                                  NameCollisionOption::ReplaceExisting);
+        logo = Uri(hstring(L"ms-appdata:///local/tiles/" + tile_id + L".png"));
+      } catch (winrt::hresult_error const& e) {
+        Log::Write(L"apps: the icon for the tile", std::wstring(e.message()));
+      }
+    }
+    bool pinned = false;
+    try {
+      if (SecondaryTile::Exists(hstring(tile_id))) {
+        page->ShowNotice(name + L" is on Start already");
+        co_return;
+      }
+      SecondaryTile tile(hstring(tile_id), hstring(name),
+                         hstring(std::wstring(kAppTileArguments) + id), logo,
+                         TileSize::Square150x150);
+      tile.VisualElements().ShowNameOnSquare150x150Logo(true);
+      pinned = co_await tile.RequestCreateAsync();
+    } catch (winrt::hresult_error const& e) {
+      Log::Write(L"apps: no tile", std::wstring(e.message()));
+    }
+    Log::Write(pinned ? L"apps: pinned " + name : L"apps: not pinned " + name);
+    if (!pinned) {
+      page->ShowNotice(name + L" could not be pinned to Start");
+    }
+  }(this, std::move(id), std::move(name), std::move(icon));
 }
 
 void MainPage::PickDownloadsFolder(

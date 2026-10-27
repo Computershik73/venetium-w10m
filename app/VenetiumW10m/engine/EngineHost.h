@@ -55,6 +55,7 @@ struct Api {
   decltype(&venetium_w10m_set_search_url) set_search_url = nullptr;
   decltype(&venetium_w10m_set_desktop_mode) set_desktop_mode = nullptr;
   decltype(&venetium_w10m_set_event_sink) set_event_sink = nullptr;
+  decltype(&venetium_w10m_launch_app) launch_app = nullptr;
   decltype(&venetium_w10m_dialog_reply) dialog_reply = nullptr;
   decltype(&venetium_w10m_permission_reply) permission_reply = nullptr;
   decltype(&venetium_w10m_file_reply) file_reply = nullptr;
@@ -96,6 +97,10 @@ struct Events {
   std::function<void(std::wstring path, int32_t folder)> openPath;
   // A download started (the name of its file).
   std::function<void(std::wstring name)> downloadStarted;
+  // An installed app asks for a tile on Start: its id, its name, its icon
+  // (a PNG file, or empty).
+  std::function<void(std::wstring id, std::wstring name, std::wstring icon)>
+      pinApp;
   // venetium_w10m_run returned: the engine has ended, for good.
   std::function<void(int32_t code)> engineStopped;
 };
@@ -157,6 +162,7 @@ class EngineHost {
   static void OnShellCommand(int32_t command);
   static void OnOpenPath(const char* path, int32_t folder);
   static void OnDownloadStarted(const char* name);
+  static void OnPinApp(const char* app_id, const char* name, const char* icon);
 
   HMODULE module_ = nullptr;
   Api api_;

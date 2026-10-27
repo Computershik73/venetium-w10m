@@ -1,0 +1,407 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Wed, 28 Oct 2026 01:56:55 +0400
+Subject: [PATCH] Windows 10 Mobile: the page's tools and installed apps in the
+ phone's menu, apps pinned to Start, an app's window in the browser's colours,
+ dialogs no wider than a phone
+
+---
+ chrome/browser/ui/browser_ui_prefs.cc         |   5 +
+ chrome/browser/ui/toolbar/app_menu_model.cc   | 117 +++++++++++++++++-
+ chrome/browser/ui/toolbar/app_menu_model.h    |  13 ++
+ .../web_app_install_dialog_delegate.cc        |   5 +
+ chrome/browser/ui/w10m_prefs.h                |  18 +++
+ .../web_app_browser_controller.cc             |  18 +++
+ .../ui/web_applications/web_app_menu_model.cc |   6 +
+ ui/views/layout/layout_provider.cc            |  33 +++++
+ 8 files changed, 214 insertions(+), 1 deletion(-)
+ create mode 100644 chrome/browser/ui/w10m_prefs.h
+
+diff --git a/chrome/browser/ui/browser_ui_prefs.cc b/chrome/browser/ui/browser_ui_prefs.cc
+index 78b39b8f642d529708bd1450afff566ad8e4e4d7..4ceb090d1f48b231943efa2f6d2249187fd4b8e4 100644
+--- a/chrome/browser/ui/browser_ui_prefs.cc
++++ b/chrome/browser/ui/browser_ui_prefs.cc
+@@ -4,6 +4,10 @@
+ 
+ #include "chrome/browser/ui/browser_ui_prefs.h"
+ 
++#if defined(VENETIUM_W10M)
++#include "chrome/browser/ui/w10m_prefs.h"
++#endif
++
+ #include <memory>
+ #include <string>
+ 
+@@ -133,6 +137,7 @@ void RegisterBrowserUserPrefs(user_prefs::PrefRegistrySyncable* registry) {
+   // A phone's toolbar has no room for it; Forward is in the menu.
+   registry->RegisterBooleanPref(prefs::kShowForwardButton, false,
+                                 pref_registration_flags);
++  registry->RegisterBooleanPref(w10m::prefs::kAppThemeColors, true);
+ #else
+   registry->RegisterBooleanPref(prefs::kShowForwardButton, true,
+                                 pref_registration_flags);
+diff --git a/chrome/browser/ui/toolbar/app_menu_model.cc b/chrome/browser/ui/toolbar/app_menu_model.cc
+index bd4f52d1eacc5b45f4c9b75350cd31af9d944f7f..389b80392f95980a2c7fab1cb4e5d8f4f57f2a23 100644
+--- a/chrome/browser/ui/toolbar/app_menu_model.cc
++++ b/chrome/browser/ui/toolbar/app_menu_model.cc
+@@ -121,6 +121,15 @@
+ #include "components/password_manager/core/common/password_manager_pref_names.h"
+ #include "components/prefs/pref_member.h"
+ #include "components/prefs/pref_service.h"
++#if defined(VENETIUM_W10M)
++#include "chrome/browser/content_settings/host_content_settings_map_factory.h"
++#include "chrome/browser/ui/singleton_tabs.h"
++#include "chrome/browser/ui/web_applications/app_browser_controller.h"
++#include "chrome/browser/ui/w10m_prefs.h"
++#include "chrome/common/webui_url_constants.h"
++#include "components/content_settings/core/browser/host_content_settings_map.h"
++#include "content/public/common/url_constants.h"
++#endif
+ #include "components/profile_metrics/browser_profile_type.h"
+ #include "components/saved_tab_groups/public/features.h"
+ #include "components/signin/public/base/signin_metrics.h"
+@@ -1292,6 +1301,26 @@ constexpr int kW10mShellSubmenu = kW10mShellCommandFirst + 9;
+ constexpr int kW10mJitCommand = kW10mShellCommandFirst + 4;
+ AppMenuModel::W10mShellCommandHandler g_w10m_shell_command = nullptr;
+ bool g_w10m_jit_on = false;
++AppMenuModel::W10mPinAppHandler g_w10m_pin_app = nullptr;
++
++// The page's address when the built-in ad blocker may work on it.
++GURL W10mAdBlockSite(Browser* browser) {
++  content::WebContents* contents =
++      browser->tab_strip_model()->GetActiveWebContents();
++  if (!contents) {
++    return GURL();
++  }
++  const GURL url = contents->GetLastCommittedURL();
++  return url.SchemeIsHTTPOrHTTPS() ? url : GURL();
++}
++
++// Whether the ad blocker works on |url| (an "Ads" exception that allows
++// them turns it off for the site).
++bool W10mBlocksAds(Profile* profile, const GURL& url) {
++  return HostContentSettingsMapFactory::GetForProfile(profile)
++             ->GetContentSetting(url, url, ContentSettingsType::ADS) !=
++         CONTENT_SETTING_ALLOW;
++}
+ 
+ bool IsW10mShellCommand(int command_id) {
+   return (command_id >= kW10mShellCommandFirst &&
+@@ -1311,6 +1340,16 @@ void AppMenuModel::SetW10mShellCommandHandler(
+ void AppMenuModel::SetW10mJitOn(bool on) {
+   g_w10m_jit_on = on;
+ }
++
++// static
++void AppMenuModel::SetW10mPinAppHandler(W10mPinAppHandler handler) {
++  g_w10m_pin_app = handler;
++}
++
++// static
++AppMenuModel::W10mPinAppHandler AppMenuModel::GetW10mPinAppHandler() {
++  return g_w10m_pin_app;
++}
+ #endif  // defined(VENETIUM_W10M)
+ 
+ #if defined(VENETIUM_W10M)
+@@ -1357,6 +1396,32 @@ void AppMenuModel::BuildPhoneMenu() {
+                                       sub_menus_.back().get(), kDevicesIcon);
+   AddSeparator(ui::NORMAL_SEPARATOR);
+ 
++  // The page: find in it, zoom, print; install it as an app, or open the
++  // installed apps; the ad blocker on it.
++  AddItemWithStringIdAndVectorIcon(
++      this, IDC_FIND, IDS_FIND,
++      features::IsRoundedIconsEnabled() ? kFindInPageIcon : kSearchMenuOldIcon);
++  CreateZoomMenu();
++  AddItemWithStringIdAndVectorIcon(
++      this, IDC_PRINT, IDS_PRINT,
++      features::IsRoundedIconsEnabled() ? kPrintIcon : kPrintMenuOldIcon);
++  if (std::u16string install_item = GetInstallPWALabel(browser_);
++      !install_item.empty()) {
++    AddItemWithIcon(IDC_INSTALL_PWA, install_item,
++                    GetInstallPWAIcon(browser_));
++  } else if (std::u16string open_item = GetOpenPWALabel(browser_);
++             !open_item.empty()) {
++    AddItemWithIcon(IDC_OPEN_IN_PWA_WINDOW, open_item,
++                    ui::ImageModel::FromVectorIcon(
++                        features::IsRoundedIconsEnabled()
++                            ? kDesktopWindowsIcon
++                            : kDesktopWindowsChromeRefreshOldIcon,
++                        ui::kColorMenuIcon, kDefaultIconSize));
++  }
++  AddItem(kW10mAppsCommand, u"Apps");
++  AddCheckItem(kW10mBlockAdsCommand, u"Block ads on this site");
++  AddSeparator(ui::NORMAL_SEPARATOR);
++
+   AddItemWithStringIdAndVectorIcon(this, IDC_OPTIONS, IDS_SETTINGS,
+                                    kSettingsIcon);
+   AddItemWithStringIdAndVectorIcon(this, IDC_HELP_PAGE_VIA_MENU,
+@@ -1377,6 +1442,41 @@ void AppMenuModel::BuildPhoneMenu() {
+ 
+ void AppMenuModel::ExecuteCommand(int command_id, int event_flags) {
+ #if defined(VENETIUM_W10M)
++  if (command_id == kW10mBlockAdsCommand) {
++    // Decided as a page loads: the page is loaded again.
++    const GURL site = W10mAdBlockSite(browser_);
++    if (site.is_valid()) {
++      HostContentSettingsMapFactory::GetForProfile(browser_->profile())
++          ->SetContentSettingDefaultScope(
++              site, GURL(), ContentSettingsType::ADS,
++              W10mBlocksAds(browser_->profile(), site)
++                  ? CONTENT_SETTING_ALLOW
++                  : CONTENT_SETTING_DEFAULT);
++      chrome::Reload(browser_, WindowOpenDisposition::CURRENT_TAB);
++    }
++    return;
++  }
++  if (command_id == kW10mAppsCommand) {
++    ShowSingletonTab(browser_->GetBrowserForOpeningWebUi(),
++                     GURL(std::string(content::kChromeUIScheme) + "://" +
++                          chrome::kChromeUIAppLauncherPageHost));
++    return;
++  }
++  if (command_id == kW10mPinToStartCommand) {
++    if (g_w10m_pin_app && browser_->app_controller()) {
++      g_w10m_pin_app(browser_);
++    }
++    return;
++  }
++  if (command_id == kW10mAppColorsCommand) {
++    PrefService* prefs = browser_->profile()->GetPrefs();
++    prefs->SetBoolean(w10m::prefs::kAppThemeColors,
++                      !prefs->GetBoolean(w10m::prefs::kAppThemeColors));
++    if (browser_->app_controller()) {
++      browser_->app_controller()->DidChangeThemeColor();
++    }
++    return;
++  }
+   if (command_id == kW10mJitCommand) {
+     g_w10m_jit_on = !g_w10m_jit_on;
+     if (g_w10m_shell_command) {
+@@ -2091,6 +2191,14 @@ bool AppMenuModel::IsCommandIdChecked(int command_id) const {
+   if (command_id == kW10mJitCommand) {
+     return g_w10m_jit_on;
+   }
++  if (command_id == kW10mBlockAdsCommand) {
++    const GURL site = W10mAdBlockSite(browser_);
++    return site.is_valid() && W10mBlocksAds(browser_->profile(), site);
++  }
++  if (command_id == kW10mAppColorsCommand) {
++    return browser_->profile()->GetPrefs()->GetBoolean(
++        w10m::prefs::kAppThemeColors);
++  }
+ #endif
+   PrefService* prefs = browser_->profile()->GetPrefs();
+   if (command_id == IDC_SHOW_BOOKMARK_BAR) {
+@@ -2121,9 +2229,16 @@ bool AppMenuModel::IsCommandIdChecked(int command_id) const {
+ 
+ bool AppMenuModel::IsCommandIdEnabled(int command_id) const {
+ #if defined(VENETIUM_W10M)
+-  if (IsW10mShellCommand(command_id)) {
++  if (IsW10mShellCommand(command_id) || command_id == kW10mAppsCommand ||
++      command_id == kW10mAppColorsCommand) {
+     return true;
+   }
++  if (command_id == kW10mBlockAdsCommand) {
++    return W10mAdBlockSite(browser_).is_valid();
++  }
++  if (command_id == kW10mPinToStartCommand) {
++    return g_w10m_pin_app && browser_->app_controller();
++  }
+ #endif
+   GlobalError* error =
+       GlobalErrorServiceFactory::GetForProfile(browser_->profile())
+diff --git a/chrome/browser/ui/toolbar/app_menu_model.h b/chrome/browser/ui/toolbar/app_menu_model.h
+index 50b779cac10cae4f46d668dbc2b7c5d836e6fc5d..4355f363b926f296e6260f3d29496bd061ecfbdc 100644
+--- a/chrome/browser/ui/toolbar/app_menu_model.h
++++ b/chrome/browser/ui/toolbar/app_menu_model.h
+@@ -206,6 +206,19 @@ class AppMenuModel : public ui::SimpleMenuModel,
+   // The first row of the phone's menu, as Chrome for Android's: back,
+   // forward, bookmark, download and reload as icons (AppMenu draws it).
+   static constexpr int kW10mNavigationRow = 40989;
++
++  // Windows 10 Mobile's own items, beside Chrome's commands. In the
++  // phone's menu: the built-in ad blocker on this site (checked: it
++  // blocks), the installed apps (chrome://apps). In an app's menu: pin the
++  // app to Start, and its window in the app's colours or the browser's.
++  static constexpr int kW10mBlockAdsCommand = 40980;
++  static constexpr int kW10mAppsCommand = 40981;
++  static constexpr int kW10mPinToStartCommand = 40982;
++  static constexpr int kW10mAppColorsCommand = 40983;
++  // Pins the app of |browser|'s window to Start: the embedder's tile.
++  using W10mPinAppHandler = void (*)(Browser* browser);
++  static void SetW10mPinAppHandler(W10mPinAppHandler handler);
++  static W10mPinAppHandler GetW10mPinAppHandler();
+ #endif
+ 
+   DECLARE_CLASS_ELEMENT_IDENTIFIER_VALUE(kCreateNewTabGroupTopLevel);
+diff --git a/chrome/browser/ui/views/web_apps/web_app_install_dialog_delegate.cc b/chrome/browser/ui/views/web_apps/web_app_install_dialog_delegate.cc
+index e25a3be63e30c83ac17fff4aeb876cf0f2dc6aa1..a40035b22dc9bf7be8bc7e011324409ddc54d2fd 100644
+--- a/chrome/browser/ui/views/web_apps/web_app_install_dialog_delegate.cc
++++ b/chrome/browser/ui/views/web_apps/web_app_install_dialog_delegate.cc
+@@ -137,6 +137,11 @@ std::u16string NormalizeSuggestedAppTitle(const std::u16string& title) {
+ }
+ 
+ bool IsWidgetCurrentSizeSmallerThanPreferredSize(views::Widget* widget) {
++#if defined(VENETIUM_W10M)
++  // Windows 10 Mobile: a phone's screen is narrower than the dialog would
++  // like; it is laid out to fit it rather than closed as unseen.
++  return false;
++#endif
+   const gfx::Size& current_size = widget->GetSize();
+   const gfx::Size& preferred_size =
+       widget->GetContentsView()->GetPreferredSize();
+diff --git a/chrome/browser/ui/w10m_prefs.h b/chrome/browser/ui/w10m_prefs.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..df2e0286ec5a2661651916b06ad018579b5ee339
+--- /dev/null
++++ b/chrome/browser/ui/w10m_prefs.h
+@@ -0,0 +1,18 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_UI_W10M_PREFS_H_
++#define CHROME_BROWSER_UI_W10M_PREFS_H_
++
++// Windows 10 Mobile's own profile settings, set from the phone's menus and
++// registered with the browser's (browser_ui_prefs.cc).
++namespace w10m::prefs {
++
++// An installed app's window takes the app's colours (its theme-color);
++// off, the browser's.
++inline constexpr char kAppThemeColors[] = "w10m.app_theme_colors";
++
++}  // namespace w10m::prefs
++
++#endif  // CHROME_BROWSER_UI_W10M_PREFS_H_
+diff --git a/chrome/browser/ui/web_applications/web_app_browser_controller.cc b/chrome/browser/ui/web_applications/web_app_browser_controller.cc
+index 049bc04d6a33b5be6b680d4f62813d2a255ea7a9..bd2ee0a7f23ce8bae7b4dfd14ee5dcb355bf9f18 100644
+--- a/chrome/browser/ui/web_applications/web_app_browser_controller.cc
++++ b/chrome/browser/ui/web_applications/web_app_browser_controller.cc
+@@ -26,6 +26,10 @@
+ #include "chrome/browser/profiles/keep_alive/profile_keep_alive_types.h"
+ #include "chrome/browser/profiles/keep_alive/scoped_profile_keep_alive.h"
+ #include "chrome/browser/profiles/profile.h"
++#if defined(VENETIUM_W10M)
++#include "chrome/browser/ui/w10m_prefs.h"
++#include "components/prefs/pref_service.h"
++#endif
+ #include "chrome/browser/ui/browser.h"
+ #include "chrome/browser/ui/browser_commands.h"
+ #include "chrome/browser/ui/browser_window.h"
+@@ -554,6 +558,14 @@ ui::ImageModel WebAppBrowserController::GetWindowIcon() const {
+ }
+ 
+ std::optional<SkColor> WebAppBrowserController::GetThemeColor() const {
++#if defined(VENETIUM_W10M)
++  // Windows 10 Mobile: the browser's colours, when the user asked for them
++  // (the app's menu).
++  if (!browser()->GetProfile()->GetPrefs()->GetBoolean(
++          w10m::prefs::kAppThemeColors)) {
++    return std::nullopt;
++  }
++#endif
+ #if BUILDFLAG(IS_CHROMEOS)
+   // System App popups (settings pages) always use default theme.
+   if (system_app() && browser()->is_type_app_popup()) {
+@@ -592,6 +604,12 @@ std::optional<SkColor> WebAppBrowserController::GetThemeColor() const {
+ }
+ 
+ std::optional<SkColor> WebAppBrowserController::GetBackgroundColor() const {
++#if defined(VENETIUM_W10M)
++  if (!browser()->GetProfile()->GetPrefs()->GetBoolean(
++          w10m::prefs::kAppThemeColors)) {
++    return std::nullopt;
++  }
++#endif
+   std::optional<SkColor> web_contents_color =
+       AppBrowserController::GetBackgroundColor();
+   std::optional<SkColor> manifest_color = GetResolvedManifestBackgroundColor();
+diff --git a/chrome/browser/ui/web_applications/web_app_menu_model.cc b/chrome/browser/ui/web_applications/web_app_menu_model.cc
+index 050ccb604f4c2acc429f0e406af73bad2c93c458..db5fdb2f71800fe519a16fa465f4e6d5be6cba63 100644
+--- a/chrome/browser/ui/web_applications/web_app_menu_model.cc
++++ b/chrome/browser/ui/web_applications/web_app_menu_model.cc
+@@ -212,6 +212,12 @@ void WebAppMenuModel::Build() {
+   // has no other way to them from an app's window.
+   AddItemWithStringIdAndVectorIcon(this, IDC_SHOW_DOWNLOADS,
+                                    IDS_SHOW_DOWNLOADS, kDownloadIcon);
++  // The phone's way back to an installed app is a tile on Start; and the
++  // app's toolbar in its own colours, or the browser's.
++  if (AppMenuModel::GetW10mPinAppHandler()) {
++    AddItem(kW10mPinToStartCommand, u"Pin to Start");
++  }
++  AddCheckItem(kW10mAppColorsCommand, u"App's own colours");
+ #endif
+ 
+   if (ShouldAllowOpenInChrome(browser())) {
+diff --git a/ui/views/layout/layout_provider.cc b/ui/views/layout/layout_provider.cc
+index 43a34addd0cfdafc08ff62ac796da465ee0c6377..e66c99aeb3696b3e426a52b9cfcfc65c80ca4603 100644
+--- a/ui/views/layout/layout_provider.cc
++++ b/ui/views/layout/layout_provider.cc
+@@ -11,6 +11,10 @@
+ #include "base/logging.h"
+ #include "ui/base/ui_base_features.h"
+ #include "ui/gfx/font_list.h"
++#if defined(VENETIUM_W10M)
++#include "ui/display/display.h"
++#include "ui/display/screen.h"
++#endif
+ #include "ui/views/controls/focus_ring.h"
+ #include "ui/views/style/typography_provider.h"
+ #include "ui/views/views_delegate.h"
+@@ -79,6 +83,23 @@ gfx::Insets LayoutProvider::GetInsetsMetric(int metric) const {
+   NOTREACHED();
+ }
+ 
++#if defined(VENETIUM_W10M)
++namespace {
++
++// Windows 10 Mobile: a dialog's or a bubble's width, no wider than the
++// screen (a phone's is 360 DIP) less a margin each side.
++int FitScreen(int width) {
++  display::Screen* screen = display::Screen::Get();
++  if (!screen) {
++    return width;
++  }
++  const int room = screen->GetPrimaryDisplay().work_area().width() - 16;
++  return room > 200 ? std::min(width, room) : width;
++}
++
++}  // namespace
++#endif
++
+ int LayoutProvider::GetDistanceMetric(int metric) const {
+   DCHECK_GE(metric, VIEWS_DISTANCE_START);
+   DCHECK_LT(metric, VIEWS_DISTANCE_END);
+@@ -87,7 +108,11 @@ int LayoutProvider::GetDistanceMetric(int metric) const {
+     case DISTANCE_BUBBLE_HEADER_VECTOR_ICON_SIZE:
+       return 20;
+     case DISTANCE_BUBBLE_PREFERRED_WIDTH:
++#if defined(VENETIUM_W10M)
++      return FitScreen(kSmallDialogWidth);
++#else
+       return kSmallDialogWidth;
++#endif
+     case DISTANCE_BUTTON_HORIZONTAL_PADDING:
+       return 16;
+     case DISTANCE_BUTTON_MAX_LINKABLE_WIDTH:
+@@ -122,9 +147,17 @@ int LayoutProvider::GetDistanceMetric(int metric) const {
+     case DISTANCE_DROPDOWN_BUTTON_LEFT_MARGIN:
+       return 16;
+     case DISTANCE_MODAL_DIALOG_PREFERRED_WIDTH:
++#if defined(VENETIUM_W10M)
++      return FitScreen(kMediumDialogWidth);
++#else
+       return kMediumDialogWidth;
++#endif
+     case DISTANCE_LARGE_MODAL_DIALOG_PREFERRED_WIDTH:
++#if defined(VENETIUM_W10M)
++      return FitScreen(kLargeDialogWidth);
++#else
+       return kLargeDialogWidth;
++#endif
+     case DISTANCE_RELATED_BUTTON_HORIZONTAL:
+       return 8;
+     case DISTANCE_RELATED_CONTROL_HORIZONTAL:

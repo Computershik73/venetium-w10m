@@ -241,9 +241,17 @@ typedef struct {
   void (*open_path)(const char* path, int32_t folder);
   // A download started: the name of its file (UTF-8).
   void (*download_started)(const char* name);
+  // An installed app's menu asks for a tile on Start: its id (for
+  // venetium_w10m_launch_app), its name and its icon as a PNG file (empty
+  // when it has none). UTF-8.
+  void (*pin_app)(const char* app_id, const char* name, const char* icon);
 } venetium_w10m_events;
 
 VW_EXPORT void venetium_w10m_set_event_sink(const venetium_w10m_events* sink);
+
+// Opens an installed app (pin_app's id) in its window: its tile on Start was
+// tapped. May come before the browser has started.
+VW_EXPORT void venetium_w10m_launch_app(const char* app_id);
 
 VW_EXPORT void venetium_w10m_dialog_reply(int32_t id, int32_t accepted,
                                           const char* text);

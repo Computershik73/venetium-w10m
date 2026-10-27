@@ -20,6 +20,10 @@
 
 namespace venetium_w10m {
 
+// A tile on Start for an installed app opens the app with these arguments
+// followed by the app's id.
+inline constexpr wchar_t kAppTileArguments[] = L"venetium-app:";
+
 class MainPage {
  public:
   MainPage();
@@ -30,6 +34,9 @@ class MainPage {
   void Start(std::wstring initialUrl);
   // A URL from outside (a link in another app, this being the default
   // browser): a new tab.
+  // An installed app's tile on Start was tapped (its arguments are
+  // kAppTileArguments and the app's id): the engine opens the app.
+  void LaunchApp(std::wstring const& app_id);
   void OpenExternalUrl(std::wstring const& url);
   void OnSuspending();
   void OnResuming();
@@ -57,6 +64,7 @@ class MainPage {
   void SetFullscreen(bool on);
   void ShowDialog(int32_t id, int32_t kind, std::wstring const& message,
                   std::wstring const& defaultText);
+  void PinAppTile(std::wstring id, std::wstring name, std::wstring icon);
   // Asks for the folder downloads are to go to; |then| hears it (nullptr
   // when none was picked).
   void PickDownloadsFolder(
