@@ -1,0 +1,37 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Wed, 28 Oct 2026 05:31:16 +0400
+Subject: [PATCH] Windows 10 Mobile: a tap in a menu counts for the item it
+ began on
+
+---
+ ui/views/controls/menu/menu_controller.cc | 16 ++++++++++++++++
+ 1 file changed, 16 insertions(+)
+
+diff --git a/ui/views/controls/menu/menu_controller.cc b/ui/views/controls/menu/menu_controller.cc
+index 00f21acdd93ea3fff933ad547397cd29a5dd14d1..75c98bd218e6fe465f939d1950a76bbea6686558 100644
+--- a/ui/views/controls/menu/menu_controller.cc
++++ b/ui/views/controls/menu/menu_controller.cc
+@@ -1183,6 +1183,22 @@ void MenuController::OnGestureEvent(SubmenuView* source,
+   }
+ 
+   MenuPart part = GetMenuPart(source, event->location());
++#if defined(VENETIUM_W10M)
++  // Windows 10 Mobile: a tap counts for the item it began on. The press on
++  // an item with a submenu opens the submenu at once, and on a phone's
++  // narrow screen the submenu lies over that item: the tap's end then fell
++  // on one of the submenu's items, which ran though nobody had touched it.
++  // Only compared, never followed: the item may be gone by the tap's end.
++  static const void* w10m_tap_down_item = nullptr;
++  if (event->type() == ui::EventType::kGestureTapDown) {
++    w10m_tap_down_item = part.menu.get();
++  } else if (event->type() == ui::EventType::kGestureTap &&
++             part.menu.get() != w10m_tap_down_item) {
++    w10m_tap_down_item = nullptr;
++    event->StopPropagation();
++    return;
++  }
++#endif
+   if (event->type() == ui::EventType::kGestureTapDown) {
+     SetSelectionOnPointerDown(source, event);
+     event->StopPropagation();
