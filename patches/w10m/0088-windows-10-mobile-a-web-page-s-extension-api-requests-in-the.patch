@@ -1,0 +1,113 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Wed, 28 Oct 2026 22:52:57 +0400
+Subject: [PATCH] Windows 10 Mobile: a web page's extension API requests in the
+ one process (the Chrome Web Store installs)
+
+---
+ extensions/browser/extension_function.cc | 13 +++++++
+ extensions/browser/process_map.cc        | 43 ++++++++++++++++++++++++
+ 2 files changed, 56 insertions(+)
+
+diff --git a/extensions/browser/extension_function.cc b/extensions/browser/extension_function.cc
+index 5c9587cdd2f174b07dbf644708b21671f6daf205..b7047c81f24be220bb2ffc692792fecc0af7af80 100644
+--- a/extensions/browser/extension_function.cc
++++ b/extensions/browser/extension_function.cc
+@@ -753,6 +753,19 @@ void ExtensionFunction::SendResponseImpl(bool success) {
+   } else {
+     results = std::move(*results_);
+   }
++#if defined(VENETIUM_W10M)
++  // Windows 10 Mobile: what the Chrome Web Store asks of the browser and
++  // what it hears back, in the phone's log (its install button follows
++  // these answers).
++  if (name_ && std::string_view(name_).starts_with("webstorePrivate.")) {
++    std::string said = results.DebugString();
++    if (said.size() > 300) {
++      said.resize(300);
++    }
++    LOG(WARNING) << "W10M: the store asked " << name_ << ": "
++                 << (success ? "answered " + said : "failed: " + GetError());
++  }
++#endif
+ 
+   extensions::mojom::ExtraResponseDataPtr extra_data;
+   if (!transferred_blobs_.empty()) {
+diff --git a/extensions/browser/process_map.cc b/extensions/browser/process_map.cc
+index 08d2b74e79305f49f2c631c3e888269302930aa9..04dc926f38281e37a2028f14f74833bf1b6a80ce 100644
+--- a/extensions/browser/process_map.cc
++++ b/extensions/browser/process_map.cc
+@@ -4,6 +4,11 @@
+ 
+ #include "extensions/browser/process_map.h"
+ 
++#if defined(VENETIUM_W10M)
++#include "base/command_line.h"
++#include "content/public/common/content_switches.h"
++#endif
++
+ #include <algorithm>
+ #include <string>
+ #include <tuple>
+@@ -141,6 +146,25 @@ bool ProcessMap::IsPrivilegedExtensionProcess(
+           extension.location() == mojom::ManifestLocation::kComponent);
+ }
+ 
++#if defined(VENETIUM_W10M)
++namespace {
++
++// Windows 10 Mobile: one process hosts every page -- web pages, Chrome's own
++// (WebUI) and extensions' -- so the process cannot tell what a context is;
++// the renderer tells it by the frame's URL (ScriptContextSet), and so does
++// this. Before, every web page's request was refused as soon as a chrome://
++// page or an extension had run: the Chrome Web Store's install button stayed
++// grey ("Invalid context type provided.").
++bool W10mSingleProcess() {
++  static const bool single =
++      base::CommandLine::ForCurrentProcess()->HasSwitch(
++          ::switches::kSingleProcess);
++  return single;
++}
++
++}  // namespace
++#endif
++
+ bool ProcessMap::CanProcessHostContextType(
+     const Extension* extension,
+     const content::RenderProcessHost& process,
+@@ -180,6 +204,13 @@ bool ProcessMap::CanProcessHostContextType(
+       // browser-verified) origin.
+       [[fallthrough]];
+     case mojom::ContextType::kWebPage:
++#if defined(VENETIUM_W10M)
++      if (W10mSingleProcess()) {
++        // What a web page may call is still checked against its frame's
++        // URL (ExtensionFunction availability).
++        return !extension;
++      }
++#endif
+       // Any context not associated with an extension, not running in an
+       // extension process, and without webui bindings can be considered a
+       // web page process.
+@@ -202,9 +233,21 @@ mojom::ContextType ProcessMap::GetMostLikelyContextType(
+   // TODO(crbug.com/40676105): Move this into the !extension if statement below
+   // or document why we want to return WEBUI_CONTEXT for content scripts in
+   // WebUIs.
++#if defined(VENETIUM_W10M)
++  // One process for every page: a frame's URL, when there is one, says
++  // whether it is Chrome's own.
++  if (W10mSingleProcess() && url) {
++    if (!extension && url->SchemeIs(content::kChromeUIScheme)) {
++      return mojom::ContextType::kWebUi;
++    }
++  } else if (ProcessHasWebUIBindings(process_id)) {
++    return mojom::ContextType::kWebUi;
++  }
++#else
+   if (ProcessHasWebUIBindings(process_id)) {
+     return mojom::ContextType::kWebUi;
+   }
++#endif
+ 
+   if (!extension) {
+     // Note that blob/filesystem schemes associated with an inner URL of
