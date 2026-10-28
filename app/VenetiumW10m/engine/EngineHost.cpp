@@ -155,7 +155,7 @@ bool EngineHost::Load(winrt::Windows::UI::Core::CoreDispatcher const& dispatcher
       &EngineHost::OnPermission,  &EngineHost::OnFileChooser,
       &EngineHost::OnClipboardSet, &EngineHost::OnShellCommand,
       &EngineHost::OnOpenPath,     &EngineHost::OnDownloadStarted,
-      &EngineHost::OnPinApp,
+      &EngineHost::OnPinApp,      &EngineHost::OnDownloadsActive,
   };
   if (api_.set_event_sink) {
     api_.set_event_sink(&kEvents);
@@ -298,6 +298,12 @@ void EngineHost::OnPinApp(const char* app_id, const char* name,
                           const char* icon) {
   Get().Post([id = Widen(app_id), name = Widen(name), icon = Widen(icon)]() {
     if (Get().events_.pinApp) Get().events_.pinApp(id, name, icon);
+  });
+}
+
+void EngineHost::OnDownloadsActive(int32_t count) {
+  Get().Post([count]() {
+    if (Get().events_.downloadsActive) Get().events_.downloadsActive(count);
   });
 }
 

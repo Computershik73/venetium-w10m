@@ -101,6 +101,8 @@ struct Events {
   // (a PNG file, or empty).
   std::function<void(std::wstring id, std::wstring name, std::wstring icon)>
       pinApp;
+  // How many downloads are going, when that changes.
+  std::function<void(int32_t count)> downloadsActive;
   // venetium_w10m_run returned: the engine has ended, for good.
   std::function<void(int32_t code)> engineStopped;
 };
@@ -163,6 +165,7 @@ class EngineHost {
   static void OnOpenPath(const char* path, int32_t folder);
   static void OnDownloadStarted(const char* name);
   static void OnPinApp(const char* app_id, const char* name, const char* icon);
+  static void OnDownloadsActive(int32_t count);
 
   HMODULE module_ = nullptr;
   Api api_;

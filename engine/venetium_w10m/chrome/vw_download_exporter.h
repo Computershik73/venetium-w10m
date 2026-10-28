@@ -43,6 +43,14 @@ class VwDownloadExporter : public content::DownloadManager::Observer,
   void OnDownloadUpdated(download::DownloadItem* item) override;
   void OnDownloadDestroyed(download::DownloadItem* item) override;
 
+  // What OnDownloadUpdated logs and hands the shell for |item|.
+  void Follow(download::DownloadItem* item);
+  // Says how many downloads are going when that changes (events.
+  // downloads_active).
+  void TellActive();
+  // What the shell was last told.
+  int told_active_ = 0;
+
   raw_ptr<content::DownloadManager> manager_;
   // The downloads of this run still going (those loaded from the history
   // finished in an earlier one and were handed over then), with what the log

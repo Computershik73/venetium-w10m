@@ -96,6 +96,14 @@ class MainPage {
   bool fullscreen_ = false;
   // The status bar hidden with the toolbar as a page scrolled down.
   bool statusSlid_ = false;
+  // While downloads go, Windows is asked to keep the app running in the
+  // background (an extended execution session): suspended, it would stop
+  // them. downloadsGoing_ is the engine's count.
+  void KeepRunningForDownloads(int32_t count);
+  winrt::Windows::ApplicationModel::ExtendedExecution::ExtendedExecutionSession
+      downloadSession_{nullptr};
+  int32_t downloadsGoing_ = 0;
+  bool downloadSessionAsked_ = false;
   bool chromeUi_ = false;
   std::wstring pendingUrl_;
   double rawPerView_ = 1.0;

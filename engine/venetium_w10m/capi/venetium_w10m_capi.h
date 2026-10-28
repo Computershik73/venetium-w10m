@@ -248,6 +248,11 @@ typedef struct {
   // venetium_w10m_launch_app), its name and its icon as a PNG file (empty
   // when it has none). UTF-8.
   void (*pin_app)(const char* app_id, const char* name, const char* icon);
+  // How many downloads are going (a file's or an extension's), each time
+  // the number changes: while there are some, the shell asks Windows to
+  // keep the app running when it is put in the background, which would
+  // otherwise suspend it and stop them.
+  void (*downloads_active)(int32_t count);
 } venetium_w10m_events;
 
 VW_EXPORT void venetium_w10m_set_event_sink(const venetium_w10m_events* sink);

@@ -43,6 +43,26 @@ void VwDownloadExporter::OnDownloadCreated(content::DownloadManager* manager,
   NoteF("download: started from %s (%s)",
         std::string(item->GetURL().host()).c_str(),
         item->GetMimeType().c_str());
+  TellActive();
+}
+
+void VwDownloadExporter::TellActive() {
+  int active = 0;
+  for (const auto& [item, said] : watched_) {
+    if (item->GetState() == download::DownloadItem::IN_PROGRESS &&
+        !item->IsPaused()) {
+      ++active;
+    }
+  }
+  if (active == told_active_) {
+    return;
+  }
+  told_active_ = active;
+  NoteF("download: %d going", active);
+  const venetium_w10m_events events = VwEngine::Get()->events();
+  if (events.downloads_active) {
+    events.downloads_active(active);
+  }
 }
 
 void VwDownloadExporter::ManagerGoingDown(content::DownloadManager* manager) {
@@ -52,6 +72,11 @@ void VwDownloadExporter::ManagerGoingDown(content::DownloadManager* manager) {
 }
 
 void VwDownloadExporter::OnDownloadUpdated(download::DownloadItem* item) {
+  Follow(item);
+  TellActive();
+}
+
+void VwDownloadExporter::Follow(download::DownloadItem* item) {
   Said& said = watched_[item];
   if (!said.target && !item->GetTargetFilePath().empty()) {
     said.target = true;
@@ -113,6 +138,7 @@ void VwDownloadExporter::OnDownloadUpdated(download::DownloadItem* item) {
 void VwDownloadExporter::OnDownloadDestroyed(download::DownloadItem* item) {
   item->RemoveObserver(this);
   watched_.erase(item);
+  TellActive();
 }
 
 }  // namespace venetium_w10m

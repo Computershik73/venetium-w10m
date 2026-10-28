@@ -561,6 +561,9 @@ void MainPage::WireEngineEvents() {
     }
     ChooseFiles(id, accept, multiple, mode == 1);
   };
+  events.downloadsActive = [this](int32_t count) {
+    KeepRunningForDownloads(count);
+  };
   events.pinApp = [this](std::wstring id, std::wstring name,
                          std::wstring icon) {
     PinAppTile(id, name, icon);
@@ -1078,6 +1081,72 @@ void MainPage::ShowDialog(int32_t id, int32_t kind, std::wstring const& message,
         input ? Narrow(std::wstring(input.Text())) : std::string();
     if (Api().dialog_reply) Api().dialog_reply(id, accepted ? 1 : 0, text.c_str());
   }(this, id, kind, message, defaultText);
+}
+
+void MainPage::KeepRunningForDownloads(int32_t count) {
+  downloadsGoing_ = count;
+  if (count <= 0) {
+    if (downloadSession_) {
+      downloadSession_.Close();
+      downloadSession_ = nullptr;
+      Log::Write(L"downloads: none going; the app may be suspended again");
+    }
+    return;
+  }
+  if (downloadSession_ || downloadSessionAsked_) {
+    return;
+  }
+  // Asked while the app is in the foreground, as a download starts: put in
+  // the background later, the app keeps running (as long as Windows allows:
+  // it may revoke this, on a low battery for one) instead of being
+  // suspended with the download stopped.
+  downloadSessionAsked_ = true;
+  [](MainPage* page) -> winrt::fire_and_forget {
+    using namespace winrt::Windows::ApplicationModel::ExtendedExecution;
+    ExtendedExecutionSession session;
+    session.Reason(ExtendedExecutionReason::Unspecified);
+    session.Description(L"Downloading");
+    session.Revoked([page](auto&&, ExtendedExecutionRevokedEventArgs const& args) {
+      Log::Write(std::wstring(L"downloads: Windows ended the time to run in "
+                              L"the background (") +
+                 (args.Reason() == ExtendedExecutionRevokedReason::Resumed
+                      ? L"resumed"
+                      : L"system policy") +
+                 L")");
+      // On the UI thread: forget it, and ask again while downloads go.
+      winrt::Windows::ApplicationModel::Core::CoreApplication::MainView()
+          .Dispatcher()
+          .RunAsync(CoreDispatcherPriority::Normal, [page]() {
+            if (page->downloadSession_) {
+              page->downloadSession_.Close();
+              page->downloadSession_ = nullptr;
+            }
+            page->KeepRunningForDownloads(page->downloadsGoing_);
+          });
+    });
+    ExtendedExecutionResult result = ExtendedExecutionResult::Denied;
+    try {
+      result = co_await session.RequestExtensionAsync();
+    } catch (winrt::hresult_error const& e) {
+      Log::Write(L"downloads: no time to run in the background",
+                 std::wstring(e.message()));
+    }
+    page->downloadSessionAsked_ = false;
+    if (result != ExtendedExecutionResult::Allowed) {
+      Log::Write(L"downloads: Windows refused to keep the app running in the "
+                 L"background");
+      session.Close();
+      co_return;
+    }
+    if (page->downloadsGoing_ <= 0) {
+      // They ended while Windows was being asked.
+      session.Close();
+      co_return;
+    }
+    page->downloadSession_ = session;
+    Log::Write(L"downloads: the app keeps running in the background while "
+               L"they go");
+  }(this);
 }
 
 void MainPage::LaunchApp(std::wstring const& app_id) {

@@ -16,6 +16,7 @@
 #include <winrt/Windows.Storage.h>
 #include <winrt/Windows.Storage.Pickers.h>
 #include <winrt/Windows.UI.StartScreen.h>
+#include <winrt/Windows.ApplicationModel.ExtendedExecution.h>
 #include <winrt/Windows.Storage.Streams.h>
 #include <winrt/Windows.System.h>
 #include <winrt/Windows.UI.h>
