@@ -25,7 +25,7 @@
   <Identity
       Name="Venetium"
       Publisher="CN=Computershik"
-      Version="150.7871.222.68"
+      Version="150.7871.222.69"
       ProcessorArchitecture="arm" />
 
   <mp:PhoneIdentity
@@ -64,8 +64,8 @@
           Square44x44Logo="Assets\Square44x44Logo.png">
         <uap:DefaultTile
             ShortName="Venetium"
-            Square71x71Logo="Assets\Square71x71Logo.png"
-            Square310x310Logo="Assets\Square310x310Logo.png"
+            Square71x71Logo="Assets\SmallTile.png"
+            Square310x310Logo="Assets\LargeTile.png"
             Wide310x150Logo="Assets\Wide310x150Logo.png">
           <uap:ShowNameOnTiles>
             <uap:ShowOn Tile="square150x150Logo" />

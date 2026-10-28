@@ -12,6 +12,12 @@ logo has the tile colour under it.
 
 Every image is drawn at its own size (no scaling of a bigger picture), at
 scale 100, 200 and 400: phones' displays are scale 200 to 400.
+
+The images in app/VenetiumW10m/Assets since 222.69 are not this script's:
+they were made from this logo with Visual Studio's visual-assets generator
+(scales 100 to 400, the app list's target sizes, tiles named SmallTile and
+LargeTile as the manifest has them). Running this replaces them with its
+own layout.
 """
 import os
 import sys
@@ -26,11 +32,11 @@ TILE = (0x1C, 0x1B, 0x22)
 #        its centre moved up by this share of the height, opaque ground)
 SIZES = {
     "Square44x44Logo": (44, 44, 0.72, 0.0, None),
-    "Square71x71Logo": (71, 71, 0.62, 0.0, None),
+    "SmallTile": (71, 71, 0.62, 0.0, None),
     # The tile's name is written along its bottom.
     "Square150x150Logo": (150, 150, 0.54, 0.04, None),
     "Wide310x150Logo": (310, 150, 0.54, 0.04, None),
-    "Square310x310Logo": (310, 310, 0.5, 0.0, None),
+    "LargeTile": (310, 310, 0.5, 0.0, None),
     "StoreLogo": (50, 50, 0.8, 0.0, TILE),
     "SplashScreen": (620, 300, 0.55, 0.0, None),
 }
