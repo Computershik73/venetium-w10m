@@ -1,0 +1,168 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Thu, 29 Oct 2026 01:26:08 +0400
+Subject: [PATCH] Windows 10 Mobile: a Chrome Web Store install logged step by
+ step
+
+---
+ .../chrome_download_manager_delegate.cc       |  9 +++++++
+ extensions/browser/crx_installer.cc           | 11 ++++++++
+ extensions/browser/sandboxed_unpacker.cc      |  8 ++++++
+ extensions/browser/webstore_installer.cc      | 26 +++++++++++++++++++
+ extensions/browser/webstore_installer.h       |  3 +++
+ 5 files changed, 57 insertions(+)
+
+diff --git a/chrome/browser/download/chrome_download_manager_delegate.cc b/chrome/browser/download/chrome_download_manager_delegate.cc
+index 90b1e2cec1a076ea450a065892074ba35d17aae0..b02820aeb4fe3251cd9b4115fd70695b03ea5008 100644
+--- a/chrome/browser/download/chrome_download_manager_delegate.cc
++++ b/chrome/browser/download/chrome_download_manager_delegate.cc
+@@ -956,6 +956,11 @@ bool ChromeDownloadManagerDelegate::IsDownloadReadyForCompletion(
+               item, base::BindRepeating(
+                         &ChromeDownloadManagerDelegate::CheckClientDownloadDone,
+                         weak_ptr_factory_.GetWeakPtr(), item->GetId()))) {
++#if defined(VENETIUM_W10M)
++        // Windows 10 Mobile: a download whose bytes are all here waits on
++        // this (Safe Browsing's servers) before it completes.
++        LOG(WARNING) << "W10M: the download waits for Safe Browsing's check";
++#endif
+         return false;
+       }
+     }
+@@ -1764,6 +1769,10 @@ void ChromeDownloadManagerDelegate::GetFileMimeType(
+ void ChromeDownloadManagerDelegate::CheckClientDownloadDone(
+     uint32_t download_id,
+     safe_browsing::DownloadCheckResult result) {
++#if defined(VENETIUM_W10M)
++  LOG(WARNING) << "W10M: Safe Browsing's check of the download: "
++               << static_cast<int>(result);
++#endif
+   if (!download_manager_) {
+     return;
+   }
+diff --git a/extensions/browser/crx_installer.cc b/extensions/browser/crx_installer.cc
+index fc5a1f4a8bee568038ff1beee93dff08cbf0641a..14fc09b823d0a13759877d7fc708e56240c900b8 100644
+--- a/extensions/browser/crx_installer.cc
++++ b/extensions/browser/crx_installer.cc
+@@ -565,6 +565,10 @@ void CrxInstaller::ShouldComputeHashesForOffWebstoreExtension(
+ }
+ 
+ void CrxInstaller::OnUnpackFailure(const CrxInstallError& error) {
++#if defined(VENETIUM_W10M)
++  LOG(WARNING) << "W10M: the extension could not be unpacked: "
++               << error.message();
++#endif
+   DCHECK(GetUnpackerTaskRunner()->RunsTasksInCurrentSequence());
+   if (!content::GetUIThreadTaskRunner({})->PostTask(
+           FROM_HERE, base::BindOnce(&CrxInstaller::ReportFailureFromUIThread,
+@@ -580,6 +584,9 @@ void CrxInstaller::OnUnpackSuccess(
+     const Extension* extension,
+     const SkBitmap& install_icon,
+     base::DictValue ruleset_install_prefs) {
++#if defined(VENETIUM_W10M)
++  LOG(WARNING) << "W10M: the extension was unpacked";
++#endif
+   DCHECK(GetUnpackerTaskRunner()->RunsTasksInCurrentSequence());
+   shared_file_task_runner_->PostTask(
+       FROM_HERE,
+@@ -1022,6 +1029,10 @@ void CrxInstaller::ReportFailureFromSharedFileThread(
+ }
+ 
+ void CrxInstaller::ReportFailureFromUIThread(const CrxInstallError& error) {
++#if defined(VENETIUM_W10M)
++  LOG(WARNING) << "W10M: the extension was not installed: "
++               << error.message();
++#endif
+   DCHECK_CURRENTLY_ON(BrowserThread::UI);
+   DCHECK_NE(CrxInstallErrorType::NONE, error.type());
+ 
+diff --git a/extensions/browser/sandboxed_unpacker.cc b/extensions/browser/sandboxed_unpacker.cc
+index e820e611beb664615978c2b4f3af15c8966e4ef9..a690c93c2619fe468a86b4e7df9ad046a9dd3125 100644
+--- a/extensions/browser/sandboxed_unpacker.cc
++++ b/extensions/browser/sandboxed_unpacker.cc
+@@ -284,6 +284,10 @@ bool SandboxedUnpacker::CreateTempDirectory() {
+ }
+ 
+ void SandboxedUnpacker::StartWithCrx(const CRXFileInfo& crx_info) {
++#if defined(VENETIUM_W10M)
++  LOG(WARNING) << "W10M: unpacking "
++               << crx_info.path.BaseName().AsUTF8Unsafe();
++#endif
+   // We assume that we are started on the thread that the client wants us
+   // to do file IO on.
+   DCHECK(unpacker_io_task_runner_->RunsTasksInCurrentSequence());
+@@ -395,6 +399,10 @@ void SandboxedUnpacker::UnzipDone(const base::FilePath& zip_file,
+                                   const base::FilePath& unzip_dir,
+                                   const std::string& error) {
+   DCHECK(unpacker_io_task_runner_->RunsTasksInCurrentSequence());
++#if defined(VENETIUM_W10M)
++  LOG(WARNING) << "W10M: unzipped"
++               << (error.empty() ? std::string() : ", with an error: " + error);
++#endif
+ 
+   if (!error.empty()) {
+     ReportFailure(SandboxedUnpackerFailureReason::UNZIP_FAILED,
+diff --git a/extensions/browser/webstore_installer.cc b/extensions/browser/webstore_installer.cc
+index f10b082232a53df144e69968d6c28586d64a2fe5..8cde9b7d1b79a6bac36c5c8b8f3c3d4b93af6513 100644
+--- a/extensions/browser/webstore_installer.cc
++++ b/extensions/browser/webstore_installer.cc
+@@ -421,6 +421,25 @@ void WebstoreInstaller::OnDownloadStarted(
+ 
+ void WebstoreInstaller::OnDownloadUpdated(DownloadItem* download) {
+   CHECK_EQ(download_item_, download);
++#if defined(VENETIUM_W10M)
++  // Windows 10 Mobile: each state of the extension's download, once.
++  {
++    const int state = static_cast<int>(download->GetState());
++    if (state != w10m_logged_state_) {
++      w10m_logged_state_ = state;
++      LOG(WARNING) << "W10M: the store's download of " << id_ << " is "
++                   << (download->GetState() == DownloadItem::COMPLETE
++                           ? "complete"
++                       : download->GetState() == DownloadItem::IN_PROGRESS
++                           ? "in progress"
++                       : download->GetState() == DownloadItem::INTERRUPTED
++                           ? "interrupted"
++                           : "cancelled")
++                   << " (" << download->GetReceivedBytes() << " of "
++                   << download->GetTotalBytes() << " bytes)";
++    }
++  }
++#endif
+ 
+   switch (download->GetState()) {
+     case DownloadItem::CANCELLED:
+@@ -677,6 +696,10 @@ void WebstoreInstaller::StartCrxInstaller(const DownloadItem& download) {
+ 
+ void WebstoreInstaller::ReportFailure(const std::string& error,
+                                       FailureReason reason) {
++#if defined(VENETIUM_W10M)
++  LOG(WARNING) << "W10M: the store's install of " << id_
++               << " failed: " << error;
++#endif
+   CHECK(failure_callback_);
+   std::move(failure_callback_).Run(id_, error, reason);
+   success_callback_ = base::NullCallback();
+@@ -690,6 +713,9 @@ void WebstoreInstaller::ReportFailure(const std::string& error,
+ }
+ 
+ void WebstoreInstaller::ReportSuccess() {
++#if defined(VENETIUM_W10M)
++  LOG(WARNING) << "W10M: the store's install of " << id_ << " succeeded";
++#endif
+   CHECK(success_callback_);
+   std::move(success_callback_).Run(id_);
+   failure_callback_ = base::NullCallback();
+diff --git a/extensions/browser/webstore_installer.h b/extensions/browser/webstore_installer.h
+index e93a18a367b92278473349e282de4ed2291dbb2f..abc6f1bbc10f91800c4a4df0787ef7c232d7c46a 100644
+--- a/extensions/browser/webstore_installer.h
++++ b/extensions/browser/webstore_installer.h
+@@ -150,6 +150,9 @@ class WebstoreInstaller : public ExtensionRegistryObserver,
+   // Reports an install `error` to the delegate for the given extension if this
+   // managed its installation. This also removes the associated PendingInstall.
+   void ReportFailure(const std::string& error, FailureReason reason);
++#if defined(VENETIUM_W10M)
++  int w10m_logged_state_ = -1;
++#endif
+ 
+   // Reports a successful install to the delegate for the given extension if
+   // this managed its installation. This also removes the associated
