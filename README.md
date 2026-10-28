@@ -16,7 +16,18 @@ interface laid out as Chrome for Android's. Brought to the phone the way
   tab, the tab count (a grid of tabs) and the menu; the address bar takes the
   whole toolbar while typing; the phone's Back key closes a menu, a dialog or
   the tab grid, leaves fullscreen or the address bar, then goes back in the
-  tab's history.
+  tab's history. Menu → *Windows 10 Mobile* has the address bar at the
+  bottom, the toolbar hidden while a page scrolls down, and a black theme
+  for AMOLED screens.
+- **Desktop site**, as on Chrome for Android: per site from the menu, or for
+  every site (*Windows 10 Mobile* → *Desktop site by default*); the Chrome
+  Web Store always gets it. A user agent of one's own: `--user-agent=...` in
+  *Engine switches*.
+- **Installed apps** (PWAs) pin to Start from their window's menu; *Apps* in
+  the menu lists them.
+- **Continuum**: on the monitor Chrome is laid out for a mouse (tab strip,
+  Back, Forward and Reload) and sites get their desktop pages; a USB or
+  Bluetooth keyboard types.
 - **GPU everywhere it can**: compositing and rasterization through ANGLE on
   Direct3D 11, on feature level 11 phones and on feature level 9_3 ones
   (Lumia 550/650 class, Adreno 304), with a fallback to software when the
@@ -27,12 +38,15 @@ interface laid out as Chrome for Android's. Brought to the phone the way
 - **JavaScript JIT**: V8's compilers with executable memory from the
   `codeGeneration` capability.
 - **A built-in ad and tracker blocker** (Venetium's): EasyList and
-  EasyPrivacy through Chromium's subresource filter, on every site.
-- **Downloads** go to the phone's `Downloads\Venetium` (with interop unlock
-  alone they are made in the app's folder and moved there through the
-  storage API, as gecko-w10m does); *Save as* goes through the phone's save
-  picker, and opening a download or its folder opens the copy. Uploads use the
-  phone's file picker.
+  EasyPrivacy through Chromium's subresource filter, on every site unless
+  turned off for one (menu → *Block ads on this site*).
+- **Downloads** go to the phone's `Downloads\Venetium`, or to the folder
+  picked in Settings → Downloads → Location (with interop unlock alone they
+  are made in the app's folder and moved there through the storage API, as
+  gecko-w10m does); *Save as* goes through the phone's save picker; a notice
+  tells of each as it starts and ends, and *Show in folder* opens the folder
+  (asking for one the first time: an app may not open `Downloads\Venetium`
+  itself). Uploads use the phone's file picker.
 - **Chrome's own pages** (History, Settings, Downloads, Bookmarks...) are laid
   out at the phone's width, in their narrow layouts.
 - **Memory**: one process in a 32-bit address space; background tabs are

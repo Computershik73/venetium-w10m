@@ -25,7 +25,7 @@
   <Identity
       Name="Venetium"
       Publisher="CN=Computershik"
-      Version="150.7871.222.64"
+      Version="150.7871.222.68"
       ProcessorArchitecture="arm" />
 
   <mp:PhoneIdentity
@@ -59,7 +59,7 @@
       <uap:VisualElements
           DisplayName="Venetium"
           Description="Venetium: Chromium for Windows 10 Mobile"
-          BackgroundColor="#1C1B22"
+          BackgroundColor="transparent"
           Square150x150Logo="Assets\Square150x150Logo.png"
           Square44x44Logo="Assets\Square44x44Logo.png">
         <uap:DefaultTile
