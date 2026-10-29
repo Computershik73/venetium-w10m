@@ -80,6 +80,7 @@ class VwMediaControls : public system_media_controls::SystemMediaControls {
   // What the log last said.
   int told_state_ = -1;
   std::string told_title_;
+  int told_buttons_ = -1;
   base::WeakPtrFactory<VwMediaControls> weak_factory_{this};
 };
 

@@ -238,14 +238,16 @@ void VwMediaControls::Tell() {
   const std::string artist = base::UTF16ToUTF8(artist_);
   const std::string album = base::UTF16ToUTF8(album_);
   const std::string artwork = artwork_.AsUTF8Unsafe();
-  if (state != told_state_ || title != told_title_) {
+  if (state != told_state_ || title != told_title_ ||
+      buttons_ != told_buttons_) {
     told_state_ = state;
     told_title_ = title;
-    NoteF("media: %s%s%s", state == 0   ? "hidden"
-                           : state == 1 ? "playing"
-                           : state == 2 ? "paused"
-                                        : "stopped",
-          title.empty() ? "" : ", ", title);
+    told_buttons_ = buttons_;
+    NoteF("media: %s, buttons %d%s%s", state == 0   ? "hidden"
+                                       : state == 1 ? "playing"
+                                       : state == 2 ? "paused"
+                                                    : "stopped",
+          buttons_, title.empty() ? "" : ", ", title);
   }
   const venetium_w10m_events events = VwEngine::Get()->events();
   if (events.media_state) {

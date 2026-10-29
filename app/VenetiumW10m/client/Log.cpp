@@ -45,6 +45,15 @@ std::wstring FromUtf8(const char* s) {
   return out;
 }
 
+// The runs before this one: venetium-previous.log the last, then
+// venetium-previous-2.log and so on.
+constexpr int kKeptRuns = 4;
+
+std::wstring RunLogName(int run) {
+  return run == 1 ? std::wstring(L"venetium-previous.log")
+                  : L"venetium-previous-" + std::to_wstring(run) + L".log";
+}
+
 }  // namespace
 
 void Log::Init(std::wstring_view localStatePath) {
@@ -54,11 +63,21 @@ void Log::Init(std::wstring_view localStatePath) {
   if (!g_dir.empty() && g_dir.back() != L'\\') g_dir += L'\\';
   g_path = g_dir + L"venetium.log";
 
-  // Keep one previous run beside this one: the run that crashed is the one
-  // a report needs, and the next launch would otherwise append to it forever.
-  const std::wstring previous = g_dir + L"venetium-previous.log";
-  ::DeleteFileW(previous.c_str());
-  ::MoveFileExW(g_path.c_str(), previous.c_str(), MOVEFILE_REPLACE_EXISTING);
+  // Keep four previous runs beside this one: the run that went wrong is the
+  // one a report needs, and it is not always the last but one (a check on
+  // the phone takes a few launches). The next launch would otherwise append
+  // to it forever.
+  for (int run = kKeptRuns; run >= 1; --run) {
+    const std::wstring older = g_dir + RunLogName(run);
+    if (run == kKeptRuns) {
+      ::DeleteFileW(older.c_str());
+    } else {
+      ::MoveFileExW(older.c_str(), (g_dir + RunLogName(run + 1)).c_str(),
+                    MOVEFILE_REPLACE_EXISTING);
+    }
+  }
+  ::MoveFileExW(g_path.c_str(), (g_dir + RunLogName(1)).c_str(),
+                MOVEFILE_REPLACE_EXISTING);
 
   CREATEFILE2_EXTENDED_PARAMETERS params{};
   params.dwSize = sizeof(params);
@@ -154,8 +173,11 @@ void Log::Mirror() {
       dir = g_dir;
     }
     int copied = 0;
-    for (const wchar_t* name :
-         {L"venetium.log", L"venetium-previous.log", L"chromium.log"}) {
+    std::vector<std::wstring> names = {L"venetium.log", L"chromium.log"};
+    for (int run = 1; run <= kKeptRuns; ++run) {
+      names.push_back(RunLogName(run));
+    }
+    for (const std::wstring& name : names) {
       const std::wstring full = dir + name;
       if (::GetFileAttributesW(full.c_str()) == INVALID_FILE_ATTRIBUTES) {
         continue;

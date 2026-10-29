@@ -3,7 +3,7 @@
 Usage:
     python tools/phone.py version                # installed package of the browser
     python tools/phone.py install [APPX]         # update the app (newest appx by default)
-    python tools/phone.py logs [--dir DIR]       # venetium.log, venetium-previous.log, chromium.log
+    python tools/phone.py logs [--dir DIR]       # venetium.log, venetium-previous*.log, chromium.log
     python tools/phone.py mem [--watch SEC] [--top N]
                                                  # memory of the browser, the phone and the GPU
     python tools/phone.py launch                 # start the browser on the phone
@@ -35,6 +35,9 @@ APPX_DIR = os.path.join(ROOT, "app", "VenetiumW10m", "AppPackages")
 LOGS = [
     ("\\LocalState", "venetium.log"),
     ("\\LocalState", "venetium-previous.log"),
+    ("\\LocalState", "venetium-previous-2.log"),
+    ("\\LocalState", "venetium-previous-3.log"),
+    ("\\LocalState", "venetium-previous-4.log"),
     ("\\LocalState", "chromium.log"),
     # The renderer thread's sampled profile (--vw-sample), for
     # tools/hot-functions.py.

@@ -1261,49 +1261,91 @@ void MainPage::ShowMedia(int32_t state, std::wstring const& title,
         });
     Log::Write(L"media: the phone's media controls are the page's");
   }
-  try {
-    SystemMediaTransportControlsDisplayUpdater display =
-        media_.DisplayUpdater();
-    if (state == 0) {
-      // Nothing plays: the controls go, with what they showed.
+  if (state != mediaState_ || buttons != mediaButtons_ ||
+      title != mediaTitle_) {
+    static const wchar_t* const kStates[] = {L"hidden", L"playing", L"paused",
+                                             L"stopped"};
+    Log::Write(std::wstring(L"media: the phone is told ") +
+               kStates[state >= 0 && state <= 3 ? state : 0] + L", buttons " +
+               std::to_wstring(buttons) +
+               (title.empty() ? L"" : L", " + title));
+    mediaState_ = state;
+    mediaButtons_ = buttons;
+  }
+  // Each part on its own: one the system refuses does not keep the others
+  // from the phone, and the log says which.
+  auto step = [](const wchar_t* what, auto&& apply) {
+    try {
+      apply();
+      return true;
+    } catch (winrt::hresult_error const& e) {
+      Log::Write(std::wstring(L"media: the controls refused ") + what,
+                 std::wstring(e.message()));
+      return false;
+    }
+  };
+  if (state == 0) {
+    // Nothing plays: the controls go, with what they showed.
+    step(L"closing", [&] {
       media_.PlaybackStatus(MediaPlaybackStatus::Closed);
       media_.IsEnabled(false);
-      display.ClearAll();
-      display.Update();
-      mediaTitle_.clear();
-      mediaArtist_.clear();
-      mediaAlbum_.clear();
-      mediaArtwork_.clear();
-      ++mediaArtworkSerial_;
-      return;
-    }
-    media_.IsEnabled(true);
-    media_.IsPlayEnabled((buttons & 1) != 0);
-    media_.IsPauseEnabled((buttons & 1) != 0);
+    });
+    step(L"clearing", [&] {
+      media_.DisplayUpdater().ClearAll();
+      media_.DisplayUpdater().Update();
+    });
+    mediaTitle_.clear();
+    mediaArtist_.clear();
+    mediaAlbum_.clear();
+    mediaArtwork_.clear();
+    ++mediaArtworkSerial_;
+    return;
+  }
+  step(L"being enabled", [&] { media_.IsEnabled(true); });
+  // Play and pause always: Windows shows no controls without them, and the
+  // engine answers a press the page has no handler for by playing or
+  // pausing its media.
+  step(L"the buttons", [&] {
+    media_.IsPlayEnabled(true);
+    media_.IsPauseEnabled(true);
     media_.IsNextEnabled((buttons & 2) != 0);
     media_.IsPreviousEnabled((buttons & 4) != 0);
     media_.IsStopEnabled((buttons & 8) != 0);
-    media_.PlaybackStatus(state == 1   ? MediaPlaybackStatus::Playing
-                          : state == 2 ? MediaPlaybackStatus::Paused
-                                       : MediaPlaybackStatus::Stopped);
-    if (title != mediaTitle_ || artist != mediaArtist_ ||
-        album != mediaAlbum_) {
-      mediaTitle_ = title;
-      mediaArtist_ = artist;
-      mediaAlbum_ = album;
-      // The engine gives the tab's title when the page names nothing, and
-      // the site as the artist.
+  });
+  if (title != mediaTitle_ || artist != mediaArtist_ ||
+      album != mediaAlbum_) {
+    // The engine gives the tab's title when the page names nothing, and the
+    // site as the artist.
+    const bool shown = step(L"the title", [&] {
+      SystemMediaTransportControlsDisplayUpdater display =
+          media_.DisplayUpdater();
       display.Type(MediaPlaybackType::Music);
       MusicDisplayProperties music = display.MusicProperties();
       music.Title(title);
       music.Artist(artist);
       music.AlbumTitle(album);
       display.Update();
+    });
+    if (shown) {
+      mediaTitle_ = title;
+      mediaArtist_ = artist;
+      mediaAlbum_ = album;
+      // What the system holds now, as it says.
+      step(L"being read back", [&] {
+        Log::Write(
+            std::wstring(L"media: the controls show \"") +
+            std::wstring(media_.DisplayUpdater().MusicProperties().Title()) +
+            L"\" by \"" +
+            std::wstring(media_.DisplayUpdater().MusicProperties().Artist()) +
+            L"\", " + (media_.IsEnabled() ? L"enabled" : L"disabled"));
+      });
     }
-  } catch (winrt::hresult_error const& e) {
-    Log::Write(L"media: the controls refused", std::wstring(e.message()));
-    return;
   }
+  step(L"the state", [&] {
+    media_.PlaybackStatus(state == 1   ? MediaPlaybackStatus::Playing
+                          : state == 2 ? MediaPlaybackStatus::Paused
+                                       : MediaPlaybackStatus::Stopped);
+  });
   if (artwork != mediaArtwork_) {
     mediaArtwork_ = artwork;
     ShowMediaArtwork(artwork);

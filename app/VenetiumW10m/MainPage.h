@@ -121,6 +121,9 @@ class MainPage {
   std::wstring mediaArtist_;
   std::wstring mediaAlbum_;
   std::wstring mediaArtwork_;
+  // What the log last said of the controls.
+  int32_t mediaState_ = -1;
+  int32_t mediaButtons_ = -1;
   // Which artwork is the one to show, as files are opened asynchronously.
   int32_t mediaArtworkSerial_ = 0;
   bool chromeUi_ = false;
