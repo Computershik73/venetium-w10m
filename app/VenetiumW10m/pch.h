@@ -17,6 +17,8 @@
 #include <winrt/Windows.Graphics.Display.h>
 #include <winrt/Windows.Media.h>
 #include <winrt/Windows.Media.Capture.h>
+#include <winrt/Windows.Media.Playback.h>
+#include <winrt/Windows.Media.Core.h>
 #include <winrt/Windows.Storage.h>
 #include <winrt/Windows.Storage.Pickers.h>
 #include <winrt/Windows.UI.StartScreen.h>

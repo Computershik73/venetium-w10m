@@ -112,8 +112,15 @@ class MainPage {
                  std::wstring const& artist, std::wstring const& album,
                  std::wstring const& artwork, int32_t buttons);
   void ShowMediaArtwork(std::wstring const& artwork);
-  // The view's controls, made at start, before any sound (see the .cpp).
+  // The controls, made at start, before any sound (see the .cpp).
   void SetUpMediaControls();
+  // The system's player the controls belong to, playing silence while a
+  // page plays (see the .cpp); nothing when the phone has none.
+  void LoadSilence();
+  void PlaySilence(bool playing);
+  winrt::Windows::Media::Playback::MediaPlayer silentPlayer_{nullptr};
+  bool silenceLoaded_ = false;
+  bool silencePlaying_ = false;
   // The phone's consent for the camera (1), the microphone (2) or the
   // location (3), which a site may now use: the system's prompt the first
   // time, the setting when it was turned off; the answer goes to the engine.

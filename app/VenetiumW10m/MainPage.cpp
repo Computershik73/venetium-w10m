@@ -1228,13 +1228,33 @@ void MainPage::AskDeviceAccess(int32_t kind) {
 // after its sound had started, and the app was suspended the first time the
 // screen went off; the second time, its sound had started again after them,
 // and it kept playing. Hidden until something plays.
+//
+// They are a system player's: the view's own controls, with the title set
+// and read back, showed nothing on the lock screen or in the volume flyout
+// of a Windows 10 Mobile phone while a page played. A MediaPlayer with its
+// command manager off leaves its controls to the app; it plays a second of
+// silence over and over while a page plays.
 void MainPage::SetUpMediaControls() {
   using namespace winrt::Windows::Media;
+  using namespace winrt::Windows::Media::Playback;
   try {
-    media_ = SystemMediaTransportControls::GetForCurrentView();
+    silentPlayer_ = MediaPlayer();
+    silentPlayer_.CommandManager().IsEnabled(false);
+    silentPlayer_.AudioCategory(MediaPlayerAudioCategory::Media);
+    silentPlayer_.IsLoopingEnabled(true);
+    silentPlayer_.AutoPlay(false);
+    media_ = silentPlayer_.SystemMediaTransportControls();
+    LoadSilence();
   } catch (winrt::hresult_error const& e) {
-    Log::Write(L"media: no media controls", std::wstring(e.message()));
-    return;
+    Log::Write(L"media: no system player, the view's controls",
+               std::wstring(e.message()));
+    silentPlayer_ = nullptr;
+    try {
+      media_ = SystemMediaTransportControls::GetForCurrentView();
+    } catch (winrt::hresult_error const& e2) {
+      Log::Write(L"media: no media controls", std::wstring(e2.message()));
+      return;
+    }
   }
   try {
     // On a thread of the system's: the engine takes a button from any.
@@ -1287,6 +1307,75 @@ void MainPage::SetUpMediaControls() {
   Log::Write(L"media: the phone's media controls are the page's");
 }
 
+// A second of silence, as a WAV file in memory (8 kHz, mono, 16-bit), for
+// the system's player.
+void MainPage::LoadSilence() {
+  [](MainPage* page) -> winrt::fire_and_forget {
+    using namespace winrt::Windows::Media::Core;
+    using namespace winrt::Windows::Storage::Streams;
+    constexpr uint32_t kRate = 8000;
+    constexpr uint32_t kData = kRate * 2;
+    std::vector<uint8_t> wav(44 + kData, 0);
+    auto put32 = [&wav](size_t at, uint32_t v) {
+      for (int i = 0; i < 4; ++i) wav[at + i] = uint8_t(v >> (8 * i));
+    };
+    auto put16 = [&wav](size_t at, uint16_t v) {
+      wav[at] = uint8_t(v);
+      wav[at + 1] = uint8_t(v >> 8);
+    };
+    memcpy(&wav[0], "RIFF", 4);
+    put32(4, 36 + kData);
+    memcpy(&wav[8], "WAVEfmt ", 8);
+    put32(16, 16);
+    put16(20, 1);              // PCM
+    put16(22, 1);              // mono
+    put32(24, kRate);          // samples a second
+    put32(28, kRate * 2);      // bytes a second
+    put16(32, 2);              // bytes a frame
+    put16(34, 16);             // bits a sample
+    memcpy(&wav[36], "data", 4);
+    put32(40, kData);
+    try {
+      InMemoryRandomAccessStream stream;
+      DataWriter writer(stream);
+      writer.WriteBytes(wav);
+      co_await writer.StoreAsync();
+      writer.DetachStream();
+      stream.Seek(0);
+      if (!page->silentPlayer_) co_return;
+      page->silentPlayer_.Source(
+          MediaSource::CreateFromStream(stream, L"audio/wav"));
+      page->silenceLoaded_ = true;
+      // A page that started playing meanwhile.
+      if (page->silencePlaying_) {
+        page->silencePlaying_ = false;
+        page->PlaySilence(true);
+      }
+    } catch (winrt::hresult_error const& e) {
+      Log::Write(L"media: the silence could not be loaded",
+                 std::wstring(e.message()));
+    }
+  }(this);
+}
+
+void MainPage::PlaySilence(bool playing) {
+  if (!silentPlayer_ || playing == silencePlaying_) return;
+  silencePlaying_ = playing;
+  if (!silenceLoaded_) return;  // Played once it is loaded.
+  try {
+    if (playing) {
+      silentPlayer_.Play();
+    } else {
+      silentPlayer_.Pause();
+    }
+    Log::Write(playing ? L"media: the system's player plays silence"
+                       : L"media: the system's player paused");
+  } catch (winrt::hresult_error const& e) {
+    Log::Write(L"media: the system's player refused",
+               std::wstring(e.message()));
+  }
+}
+
 void MainPage::ShowMedia(int32_t state, std::wstring const& title,
                          std::wstring const& artist,
                          std::wstring const& album,
@@ -1335,8 +1424,10 @@ void MainPage::ShowMedia(int32_t state, std::wstring const& title,
     mediaAlbum_.clear();
     mediaArtwork_.clear();
     ++mediaArtworkSerial_;
+    PlaySilence(false);
     return;
   }
+  PlaySilence(state == 1);
   step(L"being enabled", [&] { media_.IsEnabled(true); });
   // Play and pause always: Windows shows no controls without them, and the
   // engine answers a press the page has no handler for by playing or
