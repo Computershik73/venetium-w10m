@@ -25,6 +25,15 @@ interface laid out as Chrome for Android's. Brought to the phone the way
   *Engine switches*.
 - **Installed apps** (PWAs) pin to Start from their window's menu; *Apps* in
   the menu lists them.
+- **Extensions** from the Chrome Web Store install (Manifest V3 ones, such as
+  uBlock Origin Lite).
+- **Media in the background**: what a page plays goes on with the browser
+  minimised or the screen locked, and shows on the lock screen and in the
+  volume flyout -- the title, artist and artwork the page gives, or the
+  tab's title and the site -- with play, pause, next and previous.
+- **Camera, microphone and location** for sites (video calls, maps): once a
+  site is allowed one, the phone asks for its own consent the first time, or
+  opens the setting where it was turned off.
 - **Continuum**: on the monitor Chrome is laid out for a mouse (tab strip,
   Back, Forward and Reload) and sites get their desktop pages; a USB or
   Bluetooth keyboard types.
@@ -46,7 +55,8 @@ interface laid out as Chrome for Android's. Brought to the phone the way
   gecko-w10m does); *Save as* goes through the phone's save picker; a notice
   tells of each as it starts and ends, and *Show in folder* opens the folder
   (asking for one the first time: an app may not open `Downloads\Venetium`
-  itself). Uploads use the phone's file picker.
+  itself). Downloads go on with the browser in the background. Uploads use
+  the phone's file picker.
 - **Chrome's own pages** (History, Settings, Downloads, Bookmarks...) are laid
   out at the phone's width, in their narrow layouts.
 - **Memory**: one process in a 32-bit address space; background tabs are
@@ -66,7 +76,8 @@ interface laid out as Chrome for Android's. Brought to the phone the way
 ## Reporting a problem
 
 Menu → *Windows 10 Mobile* → *Copy logs to Pictures* puts `venetium.log` and
-`venetium-previous.log` into `Pictures\Venetium logs`. By default the log
+the four runs before it (`venetium-previous.log`, `venetium-previous-2.log`
+...) into `Pictures\Venetium logs`. By default the log
 holds only what happens once or rarely (start, errors, crashes); for slowness
 add `--vw-diagnostics` in *Engine switches (restart)*: long tasks, processor
 use by thread, memory every 2 s, video and shader statistics. Remove it after:
