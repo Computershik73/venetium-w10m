@@ -1,0 +1,123 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Thu, 29 Oct 2026 23:07:15 +0400
+Subject: [PATCH] Windows 10 Mobile: the camera a page asks for last is the one
+ that runs
+
+A phone streams one camera at a time. A page switching cameras asks for the
+new one before it stops the old, and the new one failed to start while the
+old ran -- silently: the page stayed on the front camera whichever it
+picked. As Android's camera service does, the newest request wins: the
+manager stops the other running camera (its tracks end) and starts the new
+one once it has let go of the hardware. Which camera gave way, and a
+device that failed to start, go to the log.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../media/video_capture_manager.cc            | 62 +++++++++++++++++++
+ .../media/video_capture_manager.h             |  5 ++
+ 2 files changed, 67 insertions(+)
+
+diff --git a/content/browser/renderer_host/media/video_capture_manager.cc b/content/browser/renderer_host/media/video_capture_manager.cc
+index e3cc36b23e10c6560139727b7b606a62cb25d576..f20014ae13dfa7605e4b2838c6ae8ba9cbd662d3 100644
+--- a/content/browser/renderer_host/media/video_capture_manager.cc
++++ b/content/browser/renderer_host/media/video_capture_manager.cc
+@@ -323,6 +323,25 @@ void VideoCaptureManager::ProcessDeviceStartRequestQueue() {
+   scoped_refptr<VideoCaptureController> const controller =
+       request->controller();
+ 
++#if defined(VENETIUM_W10M)
++  // Windows 10 Mobile: a phone streams one camera at a time. Opening the
++  // back camera while the front one ran failed, and a page switching
++  // cameras asks for the new one before it stops the old: it stayed on the
++  // old one. As Android's camera service does, the newest request wins: the
++  // other camera is stopped (its tracks end) and this one starts once it has
++  // let go of the hardware.
++  if (controller->stream_type() ==
++          blink::mojom::MediaStreamType::DEVICE_VIDEO_CAPTURE &&
++      W10mStopOtherCameras(controller.get())) {
++    base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
++        FROM_HERE,
++        base::BindOnce(&VideoCaptureManager::ProcessDeviceStartRequestQueue,
++                       weak_factory_.GetWeakPtr()),
++        base::Milliseconds(300));
++    return;
++  }
++#endif
++
+   EmitLogMessage("VideoCaptureManager::ProcessDeviceStartRequestQueue", 3);
+   // The unit test VideoCaptureManagerTest.OpenNotExisting requires us to fail
+   // synchronously if the stream_type is MEDIA_DEVICE_VIDEO_CAPTURE and no
+@@ -418,6 +437,38 @@ void VideoCaptureManager::OnDeviceLaunched(VideoCaptureController* controller) {
+   ProcessDeviceStartRequestQueue();
+ }
+ 
++#if defined(VENETIUM_W10M)
++bool VideoCaptureManager::W10mStopOtherCameras(
++    VideoCaptureController* controller) {
++  bool stopped = false;
++  for (const scoped_refptr<VideoCaptureController>& other : controllers_) {
++    if (other.get() == controller ||
++        other->stream_type() !=
++            blink::mojom::MediaStreamType::DEVICE_VIDEO_CAPTURE ||
++        other->device_id() == controller->device_id() ||
++        !other->IsDeviceAlive()) {
++      continue;
++    }
++    const media::VideoCaptureDeviceInfo* wanted =
++        GetDeviceInfoById(controller->device_id());
++    const media::VideoCaptureDeviceInfo* running =
++        GetDeviceInfoById(other->device_id());
++    LOG(WARNING) << "W10M: "
++                 << (wanted ? wanted->descriptor.display_name()
++                            : std::string("a camera"))
++                 << " wanted: "
++                 << (running ? running->descriptor.display_name()
++                             : std::string("the other camera"))
++                 << " stopped";
++    other->OnError(
++        media::VideoCaptureError::kVideoCaptureManagerDeviceConnectionLost);
++    DoStopDevice(other.get());
++    stopped = true;
++  }
++  return stopped;
++}
++#endif
++
+ void VideoCaptureManager::OnDeviceLaunchFailed(
+     VideoCaptureController* controller,
+     media::VideoCaptureError error) {
+@@ -425,6 +476,17 @@ void VideoCaptureManager::OnDeviceLaunchFailed(
+   string_stream << "Launching device has failed. device_id = "
+                 << controller->device_id();
+   EmitLogMessage(string_stream.str(), 1);
++#if defined(VENETIUM_W10M)
++  // Chromium says nothing of it otherwise.
++  {
++    const media::VideoCaptureDeviceInfo* info =
++        GetDeviceInfoById(controller->device_id());
++    LOG(WARNING) << "W10M: "
++                 << (info ? info->descriptor.display_name()
++                          : std::string("a capture device"))
++                 << " did not start, error " << static_cast<int>(error);
++  }
++#endif
+   controller->OnError(error);
+ 
+   device_start_request_queue_.pop_front();
+diff --git a/content/browser/renderer_host/media/video_capture_manager.h b/content/browser/renderer_host/media/video_capture_manager.h
+index e7ac913a8069fa3d79268c19a4e928177512d2c9..f967404c082d54a66797f8ec4f15490099d21d9d 100644
+--- a/content/browser/renderer_host/media/video_capture_manager.h
++++ b/content/browser/renderer_host/media/video_capture_manager.h
+@@ -330,6 +330,11 @@ class CONTENT_EXPORT VideoCaptureManager
+                         const media::VideoCaptureParams& params);
+   void DoStopDevice(VideoCaptureController* controller);
+   void ProcessDeviceStartRequestQueue();
++#if defined(VENETIUM_W10M)
++  // Stops the cameras other than |controller|'s that are running; true when
++  // there was one.
++  bool W10mStopOtherCameras(VideoCaptureController* controller);
++#endif
+ 
+   void MaybePostDesktopCaptureWindowId(
+       const media::VideoCaptureSessionId& session_id);
