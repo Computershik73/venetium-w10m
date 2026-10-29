@@ -495,6 +495,13 @@ void EngineView::WireKeyboard() {
     clearing_ = false;
   });
 
+  // A paste is the engine's: Ctrl+V reaches it as a key (below) and it
+  // pastes from its own clipboard, which holds the phone's. The sink pasting
+  // as well put the text in twice.
+  sink_.Paste([](IInspectable const&, TextControlPasteEventArgs const& args) {
+    args.Handled(true);
+  });
+
   // Keys that make no text arrive as keys; the rest arrive as the sink's
   // text, never twice. Registered for handled events too: the TextBox marks
   // its editing keys (Back, Delete, the arrows) handled before anyone else
