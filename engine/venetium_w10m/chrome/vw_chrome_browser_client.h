@@ -7,6 +7,7 @@
 #define VENETIUM_W10M_CHROME_VW_CHROME_BROWSER_CLIENT_H_
 
 #include <memory>
+#include <optional>
 #include <string>
 
 #include "chrome/browser/chrome_content_browser_client.h"
@@ -33,6 +34,10 @@ class VwChromeBrowserClient : public ChromeContentBrowserClient {
       content::WebContents* web_contents,
       content::SiteInstance& main_frame_site,
       blink::web_pref::WebPreferences* prefs) override;
+  // The phone's consent for the camera, the microphone and the location
+  // (chrome/vw_device_access).
+  std::optional<bool> W10mDeviceAccess(int kind) override;
+  void W10mAskDeviceAccess(int kind, base::OnceClosure done) override;
 };
 
 }  // namespace venetium_w10m

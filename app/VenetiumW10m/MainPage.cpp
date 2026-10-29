@@ -56,6 +56,33 @@ SolidColorBrush Brush(Color c) { return SolidColorBrush(c); }
 
 const engine::Api& Api() { return EngineHost::Get().api(); }
 
+// One request for the camera's or the microphone's consent: the
+// MediaCapture whose start raises the system's prompt, and that start. They
+// are kept for as long as the app runs: let go while the prompt was up, the
+// freed completion handler was called all the same when the user answered,
+// and the app fell over (gecko-w10m, on the HP Elite x3). One per prompt,
+// which stops coming once it is answered.
+struct CaptureAsk {
+  int32_t kind = 0;
+  winrt::Windows::Media::Capture::MediaCapture capture{nullptr};
+  winrt::Windows::Foundation::IAsyncAction start{nullptr};
+  std::atomic<bool> answered{false};
+};
+std::vector<std::shared_ptr<CaptureAsk>> g_captureAsks;
+
+const wchar_t* DeviceName(int32_t kind) {
+  return kind == 1 ? L"camera" : kind == 2 ? L"microphone" : L"location";
+}
+
+void ReplyDeviceAccess(int32_t kind, bool allowed, std::wstring const& why) {
+  if (Api().device_access_reply) {
+    Api().device_access_reply(kind, allowed ? 1 : 0);
+  }
+  Log::Write(std::wstring(L"permissions: ") + DeviceName(kind) +
+             (allowed ? L" allowed" : L" refused") +
+             (why.empty() ? L"" : L", " + why));
+}
+
 Button IconButton(std::wstring_view glyph) {
   Button b;
   FontIcon icon;
@@ -564,6 +591,7 @@ void MainPage::WireEngineEvents() {
   events.downloadsActive = [this](int32_t count) {
     KeepRunningForDownloads(count);
   };
+  events.deviceAccess = [this](int32_t kind) { AskDeviceAccess(kind); };
   events.mediaState = [this](int32_t state, std::wstring title,
                              std::wstring artist, std::wstring album,
                              std::wstring artwork, int32_t buttons) {
@@ -1086,6 +1114,110 @@ void MainPage::ShowDialog(int32_t id, int32_t kind, std::wstring const& message,
         input ? Narrow(std::wstring(input.Text())) : std::string();
     if (Api().dialog_reply) Api().dialog_reply(id, accepted ? 1 : 0, text.c_str());
   }(this, id, kind, message, defaultText);
+}
+
+void MainPage::AskDeviceAccess(int32_t kind) {
+  using namespace winrt::Windows::Devices::Enumeration;
+  using namespace winrt::Windows::Devices::Geolocation;
+  using namespace winrt::Windows::Media::Capture;
+  DeviceAccessStatus status = DeviceAccessStatus::Unspecified;
+  try {
+    status = DeviceAccessInformation::CreateFromDeviceClass(
+                 kind == 1   ? DeviceClass::VideoCapture
+                 : kind == 2 ? DeviceClass::AudioCapture
+                             : DeviceClass::Location)
+                 .CurrentStatus();
+  } catch (winrt::hresult_error const&) {
+  }
+  if (status == DeviceAccessStatus::Allowed) {
+    ReplyDeviceAccess(kind, true, L"");
+    return;
+  }
+  if (status == DeviceAccessStatus::DeniedByUser ||
+      status == DeviceAccessStatus::DeniedBySystem) {
+    // Turned off -- for this app, or for every app: Settings is the only
+    // place it can be turned back on, so that is where the user goes.
+    try {
+      Launcher::LaunchUriAsync(Uri(kind == 1   ? L"ms-settings:privacy-webcam"
+                                   : kind == 2 ? L"ms-settings:privacy-microphone"
+                                               : L"ms-settings:privacy-location"));
+    } catch (winrt::hresult_error const&) {
+    }
+    ShowNotice(std::wstring(L"Allow Venetium to use the ") + DeviceName(kind) +
+               L" in Settings");
+    ReplyDeviceAccess(kind, false, L"off in Settings, opened them");
+    return;
+  }
+  Log::Write(std::wstring(L"permissions: asking the phone for the ") +
+             DeviceName(kind));
+  if (kind == 3) {
+    [](int32_t kind) -> winrt::fire_and_forget {
+      GeolocationAccessStatus access = GeolocationAccessStatus::Unspecified;
+      std::wstring why;
+      try {
+        access = co_await Geolocator::RequestAccessAsync();
+      } catch (winrt::hresult_error const& e) {
+        why = std::wstring(e.message());
+      }
+      ReplyDeviceAccess(kind, access == GeolocationAccessStatus::Allowed, why);
+    }(kind);
+    return;
+  }
+  // The camera and the microphone: the system asks the first time a
+  // MediaCapture starts, on this thread. It is closed again at once, so the
+  // engine gets the device.
+  try {
+    MediaCaptureInitializationSettings settings;
+    settings.StreamingCaptureMode(kind == 1 ? StreamingCaptureMode::Video
+                                            : StreamingCaptureMode::Audio);
+    auto ask = std::make_shared<CaptureAsk>();
+    ask->kind = kind;
+    ask->capture = MediaCapture();
+    g_captureAsks.push_back(ask);
+    auto dispatcher = CoreWindow::GetForCurrentThread().Dispatcher();
+    ask->start = ask->capture.InitializeAsync(settings);
+    ask->start.Completed([ask, dispatcher](IAsyncAction const& op,
+                                           AsyncStatus done) {
+      const std::shared_ptr<CaptureAsk> mine = ask;
+      if (mine->answered.exchange(true)) return;
+      HRESULT code = S_OK;
+      if (done != AsyncStatus::Completed) {
+        try {
+          code = op.ErrorCode();
+        } catch (...) {
+          code = E_FAIL;
+        }
+      }
+      // Only a refusal is final; anything else (no such device, the capture
+      // pipeline unhappy) is left to the engine's own capture to try.
+      const bool allowed =
+          done == AsyncStatus::Completed || code != E_ACCESSDENIED;
+      std::wstring why;
+      if (done != AsyncStatus::Completed) {
+        wchar_t text[64];
+        swprintf_s(text, L"MediaCapture said 0x%08x",
+                   static_cast<unsigned>(code));
+        why = text;
+      }
+      // Not from inside its own completion, on a media thread: closed and
+      // answered on the UI thread.
+      try {
+        dispatcher.RunAsync(CoreDispatcherPriority::Normal,
+                            [mine, allowed, why]() {
+                              try {
+                                mine->capture.Close();
+                              } catch (...) {
+                              }
+                              ReplyDeviceAccess(mine->kind, allowed, why);
+                            });
+      } catch (...) {
+        ReplyDeviceAccess(mine->kind, allowed, why);
+      }
+    });
+  } catch (winrt::hresult_error const& e) {
+    ReplyDeviceAccess(kind, e.code() != E_ACCESSDENIED,
+                      std::wstring(e.message()));
+  }
 }
 
 void MainPage::ShowMedia(int32_t state, std::wstring const& title,

@@ -21,6 +21,7 @@
 #include "venetium_w10m/browser/vw_panel.h"
 #include "venetium_w10m/browser/vw_platform.h"
 #include "venetium_w10m/browser/vw_tab.h"
+#include "venetium_w10m/chrome/vw_device_access.h"
 #include "venetium_w10m/chrome/vw_media_controls.h"
 #include "venetium_w10m/chrome/vw_web_apps.h"
 #include "venetium_w10m/common/vw_log.h"
@@ -397,6 +398,15 @@ VW_EXPORT void venetium_w10m_media_button(int32_t button) {
         venetium_w10m::VwMediaControls::Press(button);
       },
       button));
+}
+
+VW_EXPORT void venetium_w10m_device_access_reply(int32_t kind,
+                                                 int32_t allowed) {
+  Post(base::BindOnce(
+      [](int32_t kind, bool allowed, VwBrowser* browser) {
+        venetium_w10m::device_access::Answered(kind, allowed);
+      },
+      kind, allowed != 0));
 }
 
 }  // extern "C"

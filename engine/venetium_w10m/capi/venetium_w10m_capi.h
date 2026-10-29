@@ -263,6 +263,11 @@ typedef struct {
   void (*media_state)(int32_t state, const char* title, const char* artist,
                       const char* album, const char* artwork,
                       int32_t buttons);
+  // A site may use the camera (kind 1), the microphone (2) or the location
+  // (3), and the phone's own consent for the app (Settings > Privacy) is
+  // still to be given: the shell asks for it -- or, when it was turned off,
+  // opens the setting -- and answers with venetium_w10m_device_access_reply.
+  void (*device_access)(int32_t kind);
 } venetium_w10m_events;
 
 VW_EXPORT void venetium_w10m_set_event_sink(const venetium_w10m_events* sink);
@@ -281,6 +286,9 @@ VW_EXPORT void venetium_w10m_clipboard_phone_text(const char* text);
 // A button of the phone's media controls was pressed: 1 play, 2 pause,
 // 3 next, 4 previous, 5 stop, 6 play/pause.
 VW_EXPORT void venetium_w10m_media_button(int32_t button);
+// The phone's consent for a device_access kind: allowed 1 or 0.
+VW_EXPORT void venetium_w10m_device_access_reply(int32_t kind,
+                                                 int32_t allowed);
 
 #ifdef __cplusplus
 }  // extern "C"

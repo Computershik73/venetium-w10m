@@ -61,6 +61,7 @@ struct Api {
   decltype(&venetium_w10m_file_reply) file_reply = nullptr;
   decltype(&venetium_w10m_clipboard_phone_text) clipboard_phone_text = nullptr;
   decltype(&venetium_w10m_media_button) media_button = nullptr;
+  decltype(&venetium_w10m_device_access_reply) device_access_reply = nullptr;
   decltype(&venetium_w10m_set_panel) set_panel = nullptr;
   decltype(&venetium_w10m_presenting) presenting = nullptr;
   decltype(&venetium_w10m_presented_frames) presented_frames = nullptr;
@@ -112,6 +113,9 @@ struct Events {
                      std::wstring album, std::wstring artwork,
                      int32_t buttons)>
       mediaState;
+  // A site may use the camera (1), the microphone (2) or the location (3):
+  // the phone's consent for the app is to be asked for.
+  std::function<void(int32_t kind)> deviceAccess;
   // venetium_w10m_run returned: the engine has ended, for good.
   std::function<void(int32_t code)> engineStopped;
 };
@@ -178,6 +182,7 @@ class EngineHost {
   static void OnMediaState(int32_t state, const char* title,
                            const char* artist, const char* album,
                            const char* artwork, int32_t buttons);
+  static void OnDeviceAccess(int32_t kind);
 
   HMODULE module_ = nullptr;
   Api api_;

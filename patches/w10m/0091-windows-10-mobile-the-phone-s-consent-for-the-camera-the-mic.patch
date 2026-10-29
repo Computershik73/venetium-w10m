@@ -1,0 +1,168 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Thu, 29 Oct 2026 20:25:59 +0400
+Subject: [PATCH] Windows 10 Mobile: the phone's consent for the camera, the
+ microphone and the location
+
+Windows keeps the camera, the microphone and the location behind a consent
+of the app's own (Settings > Privacy), apart from a site's permission, and
+only the app's UI thread -- the embedder's shell -- can raise its prompt.
+Once the user lets a site have them, Chrome asks the embedder
+(ContentBrowserClient::W10mDeviceAccess) whether the app has them, and when
+the user is still to be asked, has it ask (W10mAskDeviceAccess) and goes on
+once they have answered, as Chrome does with the Mac's system permissions:
+the media access handler for getUserMedia, the geolocation service for a
+position. Refused there, the site is refused.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../permission_bubble_media_access_handler.cc | 40 +++++++++++++++++++
+ .../geolocation/geolocation_service_impl.cc   | 23 +++++++++++
+ .../public/browser/content_browser_client.cc  | 11 +++++
+ .../public/browser/content_browser_client.h   | 12 ++++++
+ 4 files changed, 86 insertions(+)
+
+diff --git a/chrome/browser/media/webrtc/permission_bubble_media_access_handler.cc b/chrome/browser/media/webrtc/permission_bubble_media_access_handler.cc
+index 33ab110f87c5cc2e1c7e56a6e69e9dd2e997d2e3..4edb4f034153811bbb45bec9f0e0c179c58a75ac 100644
+--- a/chrome/browser/media/webrtc/permission_bubble_media_access_handler.cc
++++ b/chrome/browser/media/webrtc/permission_bubble_media_access_handler.cc
+@@ -25,6 +25,8 @@
+ #include "components/webrtc/media_stream_devices_controller.h"
+ #include "content/public/browser/browser_task_traits.h"
+ #include "content/public/browser/browser_thread.h"
++#include "content/public/browser/content_browser_client.h"
++#include "content/public/common/content_client.h"
+ #include "content/public/browser/permission_controller.h"
+ #include "content/public/browser/permission_descriptor_util.h"
+ #include "content/public/browser/render_frame_host.h"
+@@ -423,6 +425,44 @@ void PermissionBubbleMediaAccessHandler::OnAccessRequestResponse(
+   }
+ #endif  // BUILDFLAG(IS_MAC)
+ 
++#if defined(VENETIUM_W10M)
++  // The site may have them: the phone's own consent for the app comes next
++  // (Settings > Privacy > Camera, Microphone), asked for the first time, as
++  // the Mac's above, and this runs again when the user has answered.
++  if (result == blink::mojom::MediaStreamRequestResult::OK) {
++    const content::MediaStreamRequest& request = request_it->second.request;
++    content::ContentBrowserClient* phone =
++        content::GetContentClientForTesting()->browser();
++    const int kinds[] = {
++        request.video_type == blink::mojom::MediaStreamType::DEVICE_VIDEO_CAPTURE
++            ? 1
++            : 0,
++        request.audio_type == blink::mojom::MediaStreamType::DEVICE_AUDIO_CAPTURE
++            ? 2
++            : 0};
++    for (const int kind : kinds) {
++      if (!kind) {
++        continue;
++      }
++      const std::optional<bool> allowed = phone->W10mDeviceAccess(kind);
++      if (!allowed.has_value()) {
++        phone->W10mAskDeviceAccess(
++            kind,
++            base::BindOnce(&PermissionBubbleMediaAccessHandler::
++                               OnAccessRequestResponseForBinding,
++                           weak_factory_.GetWeakPtr(),
++                           base::UnsafeDangling(web_contents), request_id,
++                           stream_devices_set.Clone(), result, std::move(ui)));
++        return;
++      }
++      if (!*allowed) {
++        final_result =
++            blink::mojom::MediaStreamRequestResult::PERMISSION_DENIED_BY_SYSTEM;
++      }
++    }
++  }
++#endif
++
+   MediaResponseCallback callback = std::move(request_it->second.callback);
+   requests_map.erase(request_it);
+ 
+diff --git a/content/browser/geolocation/geolocation_service_impl.cc b/content/browser/geolocation/geolocation_service_impl.cc
+index d7bca56dccb56370e177d1100fcb6b0e796e55d9..6a04f146d3a91f414afb03aa6fe2e7f3f7c73d8e 100644
+--- a/content/browser/geolocation/geolocation_service_impl.cc
++++ b/content/browser/geolocation/geolocation_service_impl.cc
+@@ -14,6 +14,8 @@
+ #include "content/browser/web_contents/web_contents_impl.h"
+ #include "content/common/features.h"
+ #include "content/public/browser/browser_context.h"
++#include "content/public/browser/content_browser_client.h"
++#include "content/public/common/content_client.h"
+ #include "content/public/browser/permission_controller.h"
+ #include "content/public/browser/permission_descriptor_util.h"
+ #include "content/public/browser/permission_request_description.h"
+@@ -211,6 +213,27 @@ void GeolocationServiceImpl::CreateGeolocationWithPermissionResult(
+   GeolocationPermissionLevel permission_level =
+       GetPermissionLevel(permission_result);
+ 
++#if defined(VENETIUM_W10M)
++  // The site may have the location: the phone's own consent for the app
++  // comes next (Settings > Privacy > Location), asked for the first time,
++  // and this runs again when the user has answered.
++  if (permission_level != GeolocationPermissionLevel::kDenied) {
++    ContentBrowserClient* phone = GetContentClient()->browser();
++    const std::optional<bool> allowed = phone->W10mDeviceAccess(3);
++    if (!allowed.has_value()) {
++      phone->W10mAskDeviceAccess(
++          3, base::BindOnce(
++                 &GeolocationServiceImpl::CreateGeolocationWithPermissionResult,
++                 weak_factory_.GetWeakPtr(), std::move(receiver),
++                 std::move(callback), permission_result));
++      return;
++    }
++    if (!*allowed) {
++      permission_level = GeolocationPermissionLevel::kDenied;
++    }
++  }
++#endif
++
+   device::mojom::GeolocationContext* geolocation_context =
+       GetGeolocationContext();
+   if (permission_level == GeolocationPermissionLevel::kDenied ||
+diff --git a/content/public/browser/content_browser_client.cc b/content/public/browser/content_browser_client.cc
+index f14f214d26bf8d41ff599a99f11b12641dd70d72..f243920161cb51d29144793206c5132776d035ba 100644
+--- a/content/public/browser/content_browser_client.cc
++++ b/content/public/browser/content_browser_client.cc
+@@ -832,6 +832,17 @@ ContentBrowserClient::GetGeolocationSystemPermissionManager() {
+   return nullptr;
+ }
+ 
++#if defined(VENETIUM_W10M)
++std::optional<bool> ContentBrowserClient::W10mDeviceAccess(int kind) {
++  return true;
++}
++
++void ContentBrowserClient::W10mAskDeviceAccess(int kind,
++                                               base::OnceClosure done) {
++  std::move(done).Run();
++}
++#endif
++
+ #if BUILDFLAG(IS_ANDROID)
+ bool ContentBrowserClient::ShouldUseGmsCoreGeolocationProvider() {
+   return false;
+diff --git a/content/public/browser/content_browser_client.h b/content/public/browser/content_browser_client.h
+index 6702d9295a99e14258f93d66dcdfadb65dfdf48b..ebc9777bfd087b5a412d9e841b53e46da3938bf2 100644
+--- a/content/public/browser/content_browser_client.h
++++ b/content/public/browser/content_browser_client.h
+@@ -1333,6 +1333,18 @@ class CONTENT_EXPORT ContentBrowserClient {
+   virtual device::GeolocationSystemPermissionManager*
+   GetGeolocationSystemPermissionManager();
+ 
++#if defined(VENETIUM_W10M)
++  // Windows 10 Mobile: the phone's own consent for the app to use the camera
++  // (kind 1), the microphone (2) or the location (3), which only the app's
++  // shell can ask its user for. W10mDeviceAccess says whether the app has
++  // it, or nothing when the user is still to be asked;
++  // W10mAskDeviceAccess asks and runs |done| once they have answered (after
++  // which W10mDeviceAccess has an answer). By default the app has it. UI
++  // thread.
++  virtual std::optional<bool> W10mDeviceAccess(int kind);
++  virtual void W10mAskDeviceAccess(int kind, base::OnceClosure done);
++#endif
++
+ #if BUILDFLAG(IS_ANDROID)
+   // Allows an embedder to decide whether to use the GmsCoreLocationProvider.
+   virtual bool ShouldUseGmsCoreGeolocationProvider();

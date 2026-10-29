@@ -14,6 +14,7 @@
 #include "venetium_w10m/browser/vw_engine.h"
 #include "venetium_w10m/chrome/vw_chrome_extra_parts.h"
 #include "venetium_w10m/chrome/vw_desktop_site.h"
+#include "venetium_w10m/chrome/vw_device_access.h"
 #include "venetium_w10m/common/vw_user_agent.h"
 #include "content/public/browser/site_instance.h"
 #include "content/public/common/url_constants.h"
@@ -107,6 +108,15 @@ bool VwChromeBrowserClient::OverrideWebPreferencesAfterNavigation(
                                             prefs);
   changed |= ApplyChromePageLayout(main_frame_site, prefs);
   return changed;
+}
+
+std::optional<bool> VwChromeBrowserClient::W10mDeviceAccess(int kind) {
+  return device_access::Decided(kind);
+}
+
+void VwChromeBrowserClient::W10mAskDeviceAccess(int kind,
+                                                base::OnceClosure done) {
+  device_access::Ask(kind, std::move(done));
 }
 
 }  // namespace venetium_w10m

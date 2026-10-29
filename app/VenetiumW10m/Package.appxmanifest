@@ -120,5 +120,11 @@
     <uap:Capability Name="removableStorage" />
     <uap3:Capability Name="backgroundMediaPlayback" />
     <rescap:Capability Name="codeGeneration" />
+    <!-- Sites' calls, recordings and maps: the app is listed under
+         Settings > Privacy, and the shell asks for the phone's consent the
+         first time a site may have them (MainPage::AskDeviceAccess). -->
+    <DeviceCapability Name="webcam" />
+    <DeviceCapability Name="microphone" />
+    <DeviceCapability Name="location" />
   </Capabilities>
 </Package>

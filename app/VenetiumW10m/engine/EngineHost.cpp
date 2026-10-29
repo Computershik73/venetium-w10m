@@ -131,6 +131,7 @@ bool EngineHost::Load(winrt::Windows::UI::Core::CoreDispatcher const& dispatcher
   VW_RESOLVE(file_reply);
   VW_RESOLVE(clipboard_phone_text);
   VW_RESOLVE(media_button);
+  VW_RESOLVE(device_access_reply);
   VW_RESOLVE(set_panel);
   VW_RESOLVE(presenting);
   VW_RESOLVE(presented_frames);
@@ -157,7 +158,7 @@ bool EngineHost::Load(winrt::Windows::UI::Core::CoreDispatcher const& dispatcher
       &EngineHost::OnClipboardSet, &EngineHost::OnShellCommand,
       &EngineHost::OnOpenPath,     &EngineHost::OnDownloadStarted,
       &EngineHost::OnPinApp,      &EngineHost::OnDownloadsActive,
-      &EngineHost::OnMediaState,
+      &EngineHost::OnMediaState,  &EngineHost::OnDeviceAccess,
   };
   if (api_.set_event_sink) {
     api_.set_event_sink(&kEvents);
@@ -317,6 +318,12 @@ void EngineHost::OnMediaState(int32_t state, const char* title,
     if (Get().events_.mediaState) {
       Get().events_.mediaState(state, title, artist, album, artwork, buttons);
     }
+  });
+}
+
+void EngineHost::OnDeviceAccess(int32_t kind) {
+  Get().Post([kind]() {
+    if (Get().events_.deviceAccess) Get().events_.deviceAccess(kind);
   });
 }
 
