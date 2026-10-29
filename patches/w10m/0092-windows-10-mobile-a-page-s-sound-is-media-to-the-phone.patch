@@ -1,0 +1,56 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Thu, 29 Oct 2026 20:54:54 +0400
+Subject: [PATCH] Windows 10 Mobile: a page's sound is media to the phone
+
+A WASAPI stream counts as media by its category, which Chromium sets only
+for offload; left as "other", Windows suspended the app ten seconds after it
+was put in the background while a page played, and showed nothing of it on
+the lock screen. Shared-mode output streams are marked AudioCategory_Media
+(calls keep the communications category): with the backgroundMediaPlayback
+capability the app keeps running while it plays.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../audio/win/audio_low_latency_output_win.cc | 28 +++++++++++++++++++
+ 1 file changed, 28 insertions(+)
+
+diff --git a/media/audio/win/audio_low_latency_output_win.cc b/media/audio/win/audio_low_latency_output_win.cc
+index febc3c73589726ed4097bac1306d1ecf17e0c19e..243c836bb706c3170f8bb1c73f72791ccbc4fd84 100644
+--- a/media/audio/win/audio_low_latency_output_win.cc
++++ b/media/audio/win/audio_low_latency_output_win.cc
+@@ -220,6 +220,34 @@ bool WASAPIAudioOutputStream::Open() {
+     }
+   }
+ 
++#if defined(VENETIUM_W10M)
++  // Windows 10 Mobile: a stream counts as media by its category, which
++  // Chromium sets only for offload. Marked AudioCategory_Media, it keeps the
++  // app running while a page plays -- minimised or with the screen locked
++  // (the backgroundMediaPlayback capability) -- and puts what plays on the
++  // lock screen's controls. Calls keep the communications category.
++  if (share_mode_ == AUDCLNT_SHAREMODE_SHARED && !enable_audio_offload_ &&
++      !communications_device) {
++    Microsoft::WRL::ComPtr<IAudioClient2> audio_client2;
++    HRESULT category_hr = audio_client.As(&audio_client2);
++    if (SUCCEEDED(category_hr)) {
++      AudioClientProperties client_properties = {0};
++      client_properties.cbSize = sizeof(AudioClientProperties);
++      client_properties.eCategory = AudioCategory_Media;
++      category_hr = audio_client2->SetClientProperties(&client_properties);
++    }
++    static bool told = false;
++    if (FAILED(category_hr) || !told) {
++      told = true;
++      LOG(WARNING) << "W10M: audio output "
++                   << (SUCCEEDED(category_hr) ? "marked as media"
++                                              : "not marked as media: ")
++                   << (SUCCEEDED(category_hr) ? std::string()
++                                              : ErrorToString(category_hr));
++    }
++  }
++#endif
++
+   // Setup wave format after possible audio offload enabling.
+   SetupWaveFormat();
+ 
