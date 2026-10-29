@@ -826,6 +826,8 @@ void MainPage::Start(std::wstring initialUrl) {
     }
   });
 
+  SetUpMediaControls();
+
   try {
     MemoryManager::AppMemoryUsageIncreased([](auto&&, auto&&) {
       if (!Api().memory_pressure) return;
@@ -1220,19 +1222,21 @@ void MainPage::AskDeviceAccess(int32_t kind) {
   }
 }
 
-void MainPage::ShowMedia(int32_t state, std::wstring const& title,
-                         std::wstring const& artist,
-                         std::wstring const& album,
-                         std::wstring const& artwork, int32_t buttons) {
+// Made at start, before any sound, with play and pause and someone
+// listening to their buttons (what Windows asks of an app whose sound is to
+// go on in the background). Made the first time a page played, they came
+// after its sound had started, and the app was suspended the first time the
+// screen went off; the second time, its sound had started again after them,
+// and it kept playing. Hidden until something plays.
+void MainPage::SetUpMediaControls() {
   using namespace winrt::Windows::Media;
-  if (!media_) {
-    if (state == 0) return;
-    try {
-      media_ = SystemMediaTransportControls::GetForCurrentView();
-    } catch (winrt::hresult_error const& e) {
-      Log::Write(L"media: no media controls", std::wstring(e.message()));
-      return;
-    }
+  try {
+    media_ = SystemMediaTransportControls::GetForCurrentView();
+  } catch (winrt::hresult_error const& e) {
+    Log::Write(L"media: no media controls", std::wstring(e.message()));
+    return;
+  }
+  try {
     // On a thread of the system's: the engine takes a button from any.
     media_.ButtonPressed(
         [](SystemMediaTransportControls const&,
@@ -1257,9 +1261,41 @@ void MainPage::ShowMedia(int32_t state, std::wstring const& title,
             default:
               return;
           }
+          Log::Write(L"media: the phone's button " + std::to_wstring(button));
           if (Api().media_button) Api().media_button(button);
         });
-    Log::Write(L"media: the phone's media controls are the page's");
+    // How loud Windows lets the app be: muted in the background means it
+    // does not count the app's sound as media.
+    media_.PropertyChanged(
+        [](SystemMediaTransportControls const& controls,
+           SystemMediaTransportControlsPropertyChangedEventArgs const& args) {
+          if (args.Property() != SystemMediaTransportControlsProperty::SoundLevel)
+            return;
+          const SoundLevel level = controls.SoundLevel();
+          Log::Write(std::wstring(L"media: Windows lets the app's sound be ") +
+                     (level == SoundLevel::Full  ? L"full"
+                      : level == SoundLevel::Low ? L"low"
+                                                 : L"muted"));
+        });
+    media_.IsPlayEnabled(true);
+    media_.IsPauseEnabled(true);
+    media_.IsEnabled(false);
+  } catch (winrt::hresult_error const& e) {
+    Log::Write(L"media: the controls refused being set up",
+               std::wstring(e.message()));
+  }
+  Log::Write(L"media: the phone's media controls are the page's");
+}
+
+void MainPage::ShowMedia(int32_t state, std::wstring const& title,
+                         std::wstring const& artist,
+                         std::wstring const& album,
+                         std::wstring const& artwork, int32_t buttons) {
+  using namespace winrt::Windows::Media;
+  if (!media_) {
+    if (state == 0) return;
+    SetUpMediaControls();
+    if (!media_) return;
   }
   if (state != mediaState_ || buttons != mediaButtons_ ||
       title != mediaTitle_) {

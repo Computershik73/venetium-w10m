@@ -65,6 +65,17 @@ struct App : ApplicationT<App, winrt::Windows::UI::Xaml::Markup::IXamlMetadataPr
       client::Log::Write(L"boot: lifecycle events unavailable",
                          std::wstring(e.message()));
     }
+    // Into the background and out (1607 and later): what media playing in
+    // the background is measured against.
+    try {
+      EnteredBackground([](auto const&, auto const&) {
+        client::Log::Write(L"app: in the background");
+      });
+      LeavingBackground([](auto const&, auto const&) {
+        client::Log::Write(L"app: leaving the background");
+      });
+    } catch (winrt::hresult_error const&) {
+    }
   }
 
   void OnLaunched(LaunchActivatedEventArgs const& args) {
