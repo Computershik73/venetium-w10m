@@ -1,0 +1,41 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Thu, 29 Oct 2026 21:55:04 +0400
+Subject: [PATCH] Windows 10 Mobile: no camera and microphone previews in the
+ permission prompt
+
+A phone streams one camera at a time: the prompt's preview held the front
+camera, so the back one could not be picked in it, its frames came out
+green, and with the previews the prompt grew taller than the screen (its
+last button under the system's bar). The prompt asks without them; the page
+picks the device.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../permission_prompt_bubble_one_origin_view.cc          | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/chrome/browser/ui/views/permissions/permission_prompt_bubble_one_origin_view.cc b/chrome/browser/ui/views/permissions/permission_prompt_bubble_one_origin_view.cc
+index 389216c2cf2a87ce9542052188f6a4fa328df427..0518b787e90b01b8ca0de609f55e5520db02cafe 100644
+--- a/chrome/browser/ui/views/permissions/permission_prompt_bubble_one_origin_view.cc
++++ b/chrome/browser/ui/views/permissions/permission_prompt_bubble_one_origin_view.cc
+@@ -283,10 +283,19 @@ void PermissionPromptBubbleOneOriginView::MaybeAddMediaPreview(
+     OnAudioDevicesChanged(cached_device_info->GetAudioDeviceInfos());
+   }
+ 
++#if defined(VENETIUM_W10M)
++  // Windows 10 Mobile: no camera and microphone previews in the prompt. A
++  // phone streams one camera at a time, which the preview held (another
++  // could not be picked, and the page waited for it), its frames came out
++  // green, and the prompt grew taller than the screen. The page picks the
++  // device.
++  return;
++#else
+   media_previews_.emplace(browser(), this, index,
+                           requested_audio_capture_device_ids,
+                           requested_video_capture_device_ids);
+ #endif
++#endif
+ }
+ 
+ #if !BUILDFLAG(IS_CHROMEOS)
