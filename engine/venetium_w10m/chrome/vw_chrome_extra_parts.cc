@@ -22,6 +22,7 @@
 #include "venetium_w10m/chrome/vw_browser_native_widget.h"
 #include "venetium_w10m/chrome/vw_chrome_host.h"
 #include "venetium_w10m/chrome/vw_download_exporter.h"
+#include "venetium_w10m/chrome/vw_media_controls.h"
 #include "venetium_w10m/chrome/vw_select_file_dialog.h"
 #include "venetium_w10m/chrome/vw_tab_grid.h"
 #include "venetium_w10m/chrome/vw_web_apps.h"
@@ -104,6 +105,8 @@ void VwChromeExtraParts::PreProfileInit() {
   w10m::g_toolbar_shown_observer = &ToolbarShown;
   // After Chrome's colour mixers (appended before this stage).
   amoled::Install();
+  // Before the first media session, which makes them.
+  VwMediaControls::Install();
   // The tab count button beside the address bar opens Chrome for Android's
   // tab switcher.
   w10m::SetTabSwitcherOpener(&VwTabGrid::Show);

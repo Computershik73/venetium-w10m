@@ -564,6 +564,11 @@ void MainPage::WireEngineEvents() {
   events.downloadsActive = [this](int32_t count) {
     KeepRunningForDownloads(count);
   };
+  events.mediaState = [this](int32_t state, std::wstring title,
+                             std::wstring artist, std::wstring album,
+                             std::wstring artwork, int32_t buttons) {
+    ShowMedia(state, title, artist, album, artwork, buttons);
+  };
   events.pinApp = [this](std::wstring id, std::wstring name,
                          std::wstring icon) {
     PinAppTile(id, name, icon);
@@ -1081,6 +1086,132 @@ void MainPage::ShowDialog(int32_t id, int32_t kind, std::wstring const& message,
         input ? Narrow(std::wstring(input.Text())) : std::string();
     if (Api().dialog_reply) Api().dialog_reply(id, accepted ? 1 : 0, text.c_str());
   }(this, id, kind, message, defaultText);
+}
+
+void MainPage::ShowMedia(int32_t state, std::wstring const& title,
+                         std::wstring const& artist,
+                         std::wstring const& album,
+                         std::wstring const& artwork, int32_t buttons) {
+  using namespace winrt::Windows::Media;
+  if (!media_) {
+    if (state == 0) return;
+    try {
+      media_ = SystemMediaTransportControls::GetForCurrentView();
+    } catch (winrt::hresult_error const& e) {
+      Log::Write(L"media: no media controls", std::wstring(e.message()));
+      return;
+    }
+    // On a thread of the system's: the engine takes a button from any.
+    media_.ButtonPressed(
+        [](SystemMediaTransportControls const&,
+           SystemMediaTransportControlsButtonPressedEventArgs const& args) {
+          int32_t button = 0;
+          switch (args.Button()) {
+            case SystemMediaTransportControlsButton::Play:
+              button = 1;
+              break;
+            case SystemMediaTransportControlsButton::Pause:
+              button = 2;
+              break;
+            case SystemMediaTransportControlsButton::Next:
+              button = 3;
+              break;
+            case SystemMediaTransportControlsButton::Previous:
+              button = 4;
+              break;
+            case SystemMediaTransportControlsButton::Stop:
+              button = 5;
+              break;
+            default:
+              return;
+          }
+          if (Api().media_button) Api().media_button(button);
+        });
+    Log::Write(L"media: the phone's media controls are the page's");
+  }
+  try {
+    SystemMediaTransportControlsDisplayUpdater display =
+        media_.DisplayUpdater();
+    if (state == 0) {
+      // Nothing plays: the controls go, with what they showed.
+      media_.PlaybackStatus(MediaPlaybackStatus::Closed);
+      media_.IsEnabled(false);
+      display.ClearAll();
+      display.Update();
+      mediaTitle_.clear();
+      mediaArtist_.clear();
+      mediaAlbum_.clear();
+      mediaArtwork_.clear();
+      ++mediaArtworkSerial_;
+      return;
+    }
+    media_.IsEnabled(true);
+    media_.IsPlayEnabled((buttons & 1) != 0);
+    media_.IsPauseEnabled((buttons & 1) != 0);
+    media_.IsNextEnabled((buttons & 2) != 0);
+    media_.IsPreviousEnabled((buttons & 4) != 0);
+    media_.IsStopEnabled((buttons & 8) != 0);
+    media_.PlaybackStatus(state == 1   ? MediaPlaybackStatus::Playing
+                          : state == 2 ? MediaPlaybackStatus::Paused
+                                       : MediaPlaybackStatus::Stopped);
+    if (title != mediaTitle_ || artist != mediaArtist_ ||
+        album != mediaAlbum_) {
+      mediaTitle_ = title;
+      mediaArtist_ = artist;
+      mediaAlbum_ = album;
+      // The engine gives the tab's title when the page names nothing, and
+      // the site as the artist.
+      display.Type(MediaPlaybackType::Music);
+      MusicDisplayProperties music = display.MusicProperties();
+      music.Title(title);
+      music.Artist(artist);
+      music.AlbumTitle(album);
+      display.Update();
+    }
+  } catch (winrt::hresult_error const& e) {
+    Log::Write(L"media: the controls refused", std::wstring(e.message()));
+    return;
+  }
+  if (artwork != mediaArtwork_) {
+    mediaArtwork_ = artwork;
+    ShowMediaArtwork(artwork);
+  }
+}
+
+void MainPage::ShowMediaArtwork(std::wstring const& artwork) {
+  using namespace winrt::Windows::Media;
+  using winrt::Windows::Storage::Streams::RandomAccessStreamReference;
+  const int32_t serial = ++mediaArtworkSerial_;
+  if (artwork.empty()) {
+    try {
+      media_.DisplayUpdater().Thumbnail(nullptr);
+      media_.DisplayUpdater().Update();
+    } catch (winrt::hresult_error const&) {
+    }
+    return;
+  }
+  [](MainPage* page, std::wstring path, int32_t serial)
+      -> winrt::fire_and_forget {
+    StorageFile file{nullptr};
+    try {
+      file = co_await StorageFile::GetFileFromPathAsync(path);
+    } catch (winrt::hresult_error const& e) {
+      Log::Write(L"media: the artwork cannot be opened",
+                 std::wstring(e.message()));
+      co_return;
+    }
+    // Back on the page's thread; a newer picture may have come meanwhile.
+    if (serial != page->mediaArtworkSerial_ || !page->media_) co_return;
+    try {
+      SystemMediaTransportControlsDisplayUpdater display =
+          page->media_.DisplayUpdater();
+      display.Thumbnail(RandomAccessStreamReference::CreateFromFile(file));
+      display.Update();
+    } catch (winrt::hresult_error const& e) {
+      Log::Write(L"media: the artwork was refused",
+                 std::wstring(e.message()));
+    }
+  }(this, artwork, serial);
 }
 
 void MainPage::KeepRunningForDownloads(int32_t count) {

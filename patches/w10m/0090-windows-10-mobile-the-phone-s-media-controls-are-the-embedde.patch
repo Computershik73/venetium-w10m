@@ -1,0 +1,70 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ilya Vysotsky <il.mohoff2016@yandex.ru>
+Date: Thu, 29 Oct 2026 10:51:07 +0400
+Subject: [PATCH] Windows 10 Mobile: the phone's media controls are the
+ embedder's
+
+What a page plays goes to the lock screen's and the volume flyout's media
+controls through the view's SystemMediaTransportControls, which only the
+app's shell can reach; there is no window for Chrome's HWND interop.
+SystemMediaControls::SetW10mFactory lets the engine make the browser's
+controls (Create with no window), which it forwards to the shell.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../system_media_controls.h                    |  8 ++++++++
+ .../win/system_media_controls_win.cc           | 18 ++++++++++++++++++
+ 2 files changed, 26 insertions(+)
+
+diff --git a/components/system_media_controls/system_media_controls.h b/components/system_media_controls/system_media_controls.h
+index 13d7256999416a31f66a6c12d6ece8e7661299fd..a44d04c1b3a81086211ca6845470381c416a5e9a 100644
+--- a/components/system_media_controls/system_media_controls.h
++++ b/components/system_media_controls/system_media_controls.h
+@@ -45,6 +45,14 @@ class COMPONENT_EXPORT(SYSTEM_MEDIA_CONTROLS) SystemMediaControls {
+ 
+   virtual ~SystemMediaControls() = default;
+ 
++#if defined(VENETIUM_W10M)
++  // Windows 10 Mobile: the system's media controls (the lock screen's, the
++  // volume flyout's) belong to the app's view, which the embedder's shell
++  // reaches; Create() makes the embedder's controls when it gave a maker.
++  using W10mFactory = std::unique_ptr<SystemMediaControls> (*)();
++  static void SetW10mFactory(W10mFactory factory);
++#endif
++
+   virtual void AddObserver(SystemMediaControlsObserver* observer) = 0;
+   virtual void RemoveObserver(SystemMediaControlsObserver* observer) = 0;
+ 
+diff --git a/components/system_media_controls/win/system_media_controls_win.cc b/components/system_media_controls/win/system_media_controls_win.cc
+index 6d39fd0f50037038c79b34346123984e7ca263e7..4b84cd224a695e4b99ca1fadccdd89b9e32b6034 100644
+--- a/components/system_media_controls/win/system_media_controls_win.cc
++++ b/components/system_media_controls/win/system_media_controls_win.cc
+@@ -30,10 +30,28 @@ namespace system_media_controls {
+ base::RepeatingCallback<void(bool)>*
+     g_on_visibility_changed_for_testing_callback = nullptr;
+ 
++#if defined(VENETIUM_W10M)
++namespace {
++SystemMediaControls::W10mFactory g_w10m_factory = nullptr;
++}  // namespace
++
++// static
++void SystemMediaControls::SetW10mFactory(W10mFactory factory) {
++  g_w10m_factory = factory;
++}
++#endif
++
+ // static
+ std::unique_ptr<SystemMediaControls> SystemMediaControls::Create(
+     const std::string& product_name,
+     int window) {
++#if defined(VENETIUM_W10M)
++  // The phone's: there is no window for SystemMediaTransportControls'
++  // interop here, the shell has the app's view.
++  if (g_w10m_factory && window == -1) {
++    return g_w10m_factory();
++  }
++#endif
+   auto service = std::make_unique<internal::SystemMediaControlsWin>(window);
+   if (service->Initialize())
+     return std::move(service);

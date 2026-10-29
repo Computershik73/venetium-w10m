@@ -130,6 +130,7 @@ bool EngineHost::Load(winrt::Windows::UI::Core::CoreDispatcher const& dispatcher
   VW_RESOLVE(permission_reply);
   VW_RESOLVE(file_reply);
   VW_RESOLVE(clipboard_phone_text);
+  VW_RESOLVE(media_button);
   VW_RESOLVE(set_panel);
   VW_RESOLVE(presenting);
   VW_RESOLVE(presented_frames);
@@ -156,6 +157,7 @@ bool EngineHost::Load(winrt::Windows::UI::Core::CoreDispatcher const& dispatcher
       &EngineHost::OnClipboardSet, &EngineHost::OnShellCommand,
       &EngineHost::OnOpenPath,     &EngineHost::OnDownloadStarted,
       &EngineHost::OnPinApp,      &EngineHost::OnDownloadsActive,
+      &EngineHost::OnMediaState,
   };
   if (api_.set_event_sink) {
     api_.set_event_sink(&kEvents);
@@ -304,6 +306,17 @@ void EngineHost::OnPinApp(const char* app_id, const char* name,
 void EngineHost::OnDownloadsActive(int32_t count) {
   Get().Post([count]() {
     if (Get().events_.downloadsActive) Get().events_.downloadsActive(count);
+  });
+}
+
+void EngineHost::OnMediaState(int32_t state, const char* title,
+                              const char* artist, const char* album,
+                              const char* artwork, int32_t buttons) {
+  Get().Post([state, title = Widen(title), artist = Widen(artist),
+              album = Widen(album), artwork = Widen(artwork), buttons]() {
+    if (Get().events_.mediaState) {
+      Get().events_.mediaState(state, title, artist, album, artwork, buttons);
+    }
   });
 }
 

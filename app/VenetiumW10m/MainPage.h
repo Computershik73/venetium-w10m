@@ -104,6 +104,21 @@ class MainPage {
       downloadSession_{nullptr};
   int32_t downloadsGoing_ = 0;
   bool downloadSessionAsked_ = false;
+  // The phone's media controls -- the lock screen's, the volume flyout's --
+  // for what a page plays (the engine's media_state); their buttons go back
+  // to the page. Playing, the app keeps running in the background (the
+  // backgroundMediaPlayback capability).
+  void ShowMedia(int32_t state, std::wstring const& title,
+                 std::wstring const& artist, std::wstring const& album,
+                 std::wstring const& artwork, int32_t buttons);
+  void ShowMediaArtwork(std::wstring const& artwork);
+  winrt::Windows::Media::SystemMediaTransportControls media_{nullptr};
+  std::wstring mediaTitle_;
+  std::wstring mediaArtist_;
+  std::wstring mediaAlbum_;
+  std::wstring mediaArtwork_;
+  // Which artwork is the one to show, as files are opened asynchronously.
+  int32_t mediaArtworkSerial_ = 0;
   bool chromeUi_ = false;
   std::wstring pendingUrl_;
   double rawPerView_ = 1.0;

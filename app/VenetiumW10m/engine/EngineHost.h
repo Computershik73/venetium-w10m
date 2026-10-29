@@ -60,6 +60,7 @@ struct Api {
   decltype(&venetium_w10m_permission_reply) permission_reply = nullptr;
   decltype(&venetium_w10m_file_reply) file_reply = nullptr;
   decltype(&venetium_w10m_clipboard_phone_text) clipboard_phone_text = nullptr;
+  decltype(&venetium_w10m_media_button) media_button = nullptr;
   decltype(&venetium_w10m_set_panel) set_panel = nullptr;
   decltype(&venetium_w10m_presenting) presenting = nullptr;
   decltype(&venetium_w10m_presented_frames) presented_frames = nullptr;
@@ -103,6 +104,14 @@ struct Events {
       pinApp;
   // How many downloads are going, when that changes.
   std::function<void(int32_t count)> downloadsActive;
+  // What a page plays, for the phone's media controls: state 0 nothing,
+  // 1 playing, 2 paused, 3 stopped; title, artist, album, the artwork (a PNG
+  // file, or empty) and the buttons that work (bits 1 play/pause, 2 next,
+  // 4 previous, 8 stop).
+  std::function<void(int32_t state, std::wstring title, std::wstring artist,
+                     std::wstring album, std::wstring artwork,
+                     int32_t buttons)>
+      mediaState;
   // venetium_w10m_run returned: the engine has ended, for good.
   std::function<void(int32_t code)> engineStopped;
 };
@@ -166,6 +175,9 @@ class EngineHost {
   static void OnDownloadStarted(const char* name);
   static void OnPinApp(const char* app_id, const char* name, const char* icon);
   static void OnDownloadsActive(int32_t count);
+  static void OnMediaState(int32_t state, const char* title,
+                           const char* artist, const char* album,
+                           const char* artwork, int32_t buttons);
 
   HMODULE module_ = nullptr;
   Api api_;

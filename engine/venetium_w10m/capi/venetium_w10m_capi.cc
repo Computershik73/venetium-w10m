@@ -21,6 +21,7 @@
 #include "venetium_w10m/browser/vw_panel.h"
 #include "venetium_w10m/browser/vw_platform.h"
 #include "venetium_w10m/browser/vw_tab.h"
+#include "venetium_w10m/chrome/vw_media_controls.h"
 #include "venetium_w10m/chrome/vw_web_apps.h"
 #include "venetium_w10m/common/vw_log.h"
 
@@ -388,6 +389,14 @@ VW_EXPORT void venetium_w10m_clipboard_phone_text(const char* text) {
         browser->clipboard()->SetPhoneText(text);
       },
       Text(text)));
+}
+
+VW_EXPORT void venetium_w10m_media_button(int32_t button) {
+  Post(base::BindOnce(
+      [](int32_t button, VwBrowser* browser) {
+        venetium_w10m::VwMediaControls::Press(button);
+      },
+      button));
 }
 
 }  // extern "C"

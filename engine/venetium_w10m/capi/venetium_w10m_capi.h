@@ -253,6 +253,16 @@ typedef struct {
   // keep the app running when it is put in the background, which would
   // otherwise suspend it and stop them.
   void (*downloads_active)(int32_t count);
+  // What a page plays, for the phone's media controls (the lock screen's,
+  // the volume flyout's): state 0 nothing (the controls hidden), 1 playing,
+  // 2 paused, 3 stopped; the title (the tab's title when the page gives
+  // none), the artist (the site when it gives none), the album, the artwork
+  // as a PNG file (empty when there is none) and the buttons that work: bits
+  // 1 play/pause, 2 next, 4 previous, 8 stop. UTF-8. Each time any of it
+  // changes. The buttons come back with venetium_w10m_media_button.
+  void (*media_state)(int32_t state, const char* title, const char* artist,
+                      const char* album, const char* artwork,
+                      int32_t buttons);
 } venetium_w10m_events;
 
 VW_EXPORT void venetium_w10m_set_event_sink(const venetium_w10m_events* sink);
@@ -268,6 +278,9 @@ VW_EXPORT void venetium_w10m_permission_reply(int32_t id, int32_t granted);
 VW_EXPORT void venetium_w10m_file_reply(int32_t id, const char* paths);
 // The phone's clipboard, for a paste (UTF-8).
 VW_EXPORT void venetium_w10m_clipboard_phone_text(const char* text);
+// A button of the phone's media controls was pressed: 1 play, 2 pause,
+// 3 next, 4 previous, 5 stop, 6 play/pause.
+VW_EXPORT void venetium_w10m_media_button(int32_t button);
 
 #ifdef __cplusplus
 }  // extern "C"

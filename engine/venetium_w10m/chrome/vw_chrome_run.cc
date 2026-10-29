@@ -104,6 +104,9 @@ void AddChromeSwitches(const EngineConfig& config,
       // events, clipboard monitoring through a message window: none here.
       "WinSystemLocationPermission,CalculateNativeWinOcclusion,"
       "PlatformClipboardMonitor,WebUsbDeviceDetection,WindowsSystemTracing,"
+      // Media controls of their own for each installed app's window: the
+      // phone has the app's (chrome/vw_media_controls), for every page.
+      "WebAppSystemMediaControls,"
       // What costs memory, flash or data a phone has little of.
       "PreloadTopChromeWebUI,Glic,GlicWebContentsWarming,PersistentHistograms,"
       "OptimizationHints,OptimizationTargetPrediction,"
